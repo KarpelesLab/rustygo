@@ -30,7 +30,7 @@ rustygo test  ./...              # go test semantics, run through rustc
 
 `GOARCH` stays a real value (64-bit: `amd64`/`arm64` type sizes) so `go/packages`
 resolves the standard library normally. Target selection rides on a `rustygo`
-build tag, plus `rustygo_wasm` / `rustygo_nostd` for the constrained targets, so
+build tag, plus `rustygo_nostd` for the constrained targets, so
 packages can ship `foo_rustygo.go`. This mirrors what TinyGo does and avoids
 teaching `go list` a GOARCH it rejects.
 
@@ -101,9 +101,6 @@ object's layout descriptor. This is the main reason generated code can avoid
   blocking semantics, same random choice among ready cases.
 * **Netpoller:** `epoll`/`kqueue` (or Rust `std` blocking threads on
   constrained targets) driving the same parking primitives as channels.
-* **WASM:** no stack switching, so that target falls back to whole-program
-  blocking analysis (GopherJS's approach): functions that can block become state
-  machines, the rest stay plain calls.
 
 ## 5. Control flow, `defer`, `panic`, `recover`
 
@@ -189,7 +186,6 @@ are enforced by the emitter, not by convention.
 |---|---|
 | Native (Linux/macOS/Windows, x86-64 + aarch64) | primary |
 | [fullrust](https://github.com/KarpelesLab/fullrust) static Linux | expected to work once `syscall` sits on Rust `std`; needs `panic=unwind` on that toolchain |
-| `wasm32-unknown-unknown` / WASI | needs the blocking-analysis path instead of coroutines |
 | `no_std` + [purestd](https://github.com/KarpelesLab/purestd) / [kintane](https://github.com/KarpelesLab/kintane) | subset: no goroutine preemption, single heap, no netpoller |
 
 ## 11. Performance expectations
@@ -204,8 +200,9 @@ recovery path, in order of expected payoff:
 4. Hot stdlib primitives (`memmove`, `IndexByte`, hashing) delegated to Rust
    crates instead of pure-Go loops.
 
-Target to beat before claiming anything: gc Go on the same benchmark set, and
-Go-on-WASM as the floor.
+Target to beat before claiming anything: gc Go on the same benchmark set.
+There is no slower floor to hide behind — WASM is not a fallback here, so
+"within a stated factor of gc Go" is the only measure that counts.
 
 ## 12. Correctness strategy
 
@@ -221,10 +218,10 @@ Go-on-WASM as the floor.
 
 1. Shadow stack versus stack maps — how much does precise-root bookkeeping
    actually cost in generated code? (M0 measures it.)
-2. Can `panic = "unwind"` be relied on across fullrust, WASM and `no_std`? If
+2. Can `panic = "unwind"` be relied on across fullrust and `no_std`? If
    not, `defer`/`recover` needs an explicit result-propagation lowering.
-3. Is a single-threaded mode (`Rc` + no scheduler locks) worth having for WASM
-   and embedded?
+3. Is a single-threaded mode (no scheduler locks, one heap) worth having for
+   embedded targets?
 4. How much of `reflect` is enough? `fmt` + `encoding/json` is the practical
    bar; `reflect.StructOf` may never come.
 5. Generated-code size: monomorphization plus type descriptors plus the stdlib

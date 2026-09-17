@@ -13,13 +13,14 @@ Goal: the smallest end-to-end path, deliberately incomplete.
   hand-written `println` in the runtime crate.
 * Relooper for irreducible CFGs, exercised by a `goto` test.
 * Benchmarks: a scalar loop, a struct-field loop, a string concat loop — gc Go
-  versus rustygo versus Go-on-WASM.
+  versus rustygo, native in both cases.
 
 **Exit criteria:** 20 hand-written programs produce identical stdout under gc
 and rustygo; measured shadow-stack and fat-pointer overhead written into
 [DESIGN.md §11](DESIGN.md#11-performance-expectations). If the gap looks
-unrecoverable, stop and revisit
-[option B](RATIONALE.md#b-go--wasm--translate-wasm-to-safe-rust).
+unrecoverable, the answer is to attack it in the compiler — escape analysis and
+bounds-check elision pulled forward from M6 — not to fall back on a WASM route,
+which is ruled out on both performance and native access.
 
 ## M1 — Runtime core
 
@@ -77,12 +78,11 @@ branch — the Rust implementation reached from Go, passing the Go side's tests.
 ## M5 — Targets
 
 * fullrust static Linux binaries (needs `panic=unwind` on that toolchain).
-* `wasm32`: blocking analysis instead of coroutines; single-threaded mode.
 * `no_std` subset for purestd and kintane: single heap, no netpoller, no
   preemption.
 
-**Exit criteria:** the M1 exercise program runs on fullrust, on WASM in a
-browser, and on kintane.
+**Exit criteria:** the M1 exercise program runs on fullrust and on kintane,
+from the same source, with no target-specific code in the program itself.
 
 ## M6 — Performance
 
@@ -94,8 +94,8 @@ browser, and on kintane.
 * Allocator: size classes, per-thread buffers; generational marking if measured
   to help.
 
-**Exit criteria:** within 2× of gc Go on a published benchmark set, and faster
-than Go-on-WASM everywhere.
+**Exit criteria:** within 2× of gc Go on a published benchmark set, measured
+natively; no benchmark more than 4× off.
 
 ## M7 — Real workload
 
@@ -105,6 +105,6 @@ than Go-on-WASM everywhere.
 
 ## Non-goals for the first year
 
-Race detector · `cgo` · async preemption of call-free loops ·
+Race detector · `cgo` · WASM targets · async preemption of call-free loops ·
 `reflect.StructOf` and runtime type construction · 32-bit targets ·
 plugin/`go:linkname` tricks in third-party code · human-readable output.

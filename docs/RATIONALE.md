@@ -24,35 +24,48 @@ built for, and leaves `unsafe` on the boundary.
 
 ## Options considered
 
-### A. Rust → WASM → run inside Go
+### A. Rust → WASM → run inside Go — **rejected**
 
 Compile the Rust crate to `wasm32`, run it in Go on
-[wazero](https://wazero.io) (pure Go), generate bindings both sides.
+[wazero](https://wazero.io) (pure Go), generate bindings both sides. Cheap and
+proven: [ncruces/go-sqlite3](https://github.com/ncruces/go-sqlite3) ships SQLite
+to Go exactly this way.
 
-* **For:** cheap, proven — [ncruces/go-sqlite3](https://github.com/ncruces/go-sqlite3)
-  ships SQLite to Go exactly this way. No cgo, no `unsafe` in Go.
-* **Against:** per-call overhead and no SIMD, so codec-grade work suffers; Rust
-  objects are reachable only through handles; 4 GB per instance; one instance is
-  single-threaded, so parallelism comes from a pool.
-* **Verdict:** still the right answer for *chunky* calls (compress this buffer,
-  sign this message). Worth building independently of rustygo.
+Rejected on two grounds that no amount of engineering fixes:
 
-### B. Go → WASM → translate WASM to safe Rust
+* **Performance.** Per-call overhead on every crossing, no SIMD, and every
+  buffer copied in and out of linear memory. Codec-, crypto- and
+  database-grade work is precisely what would be crossing the boundary.
+* **No native resources.** Inside the sandbox there are no threads, no
+  syscalls, no file descriptors, no devices, no GPU, no `AF_PACKET`, no
+  hardware codecs — the things purecrypto, pktkit, OxideAV and the fleet code
+  exist to reach. A bridge that cannot see them bridges nothing useful.
+
+Also inherent: 4 GB per instance, and one instance is single-threaded, so
+parallelism means a pool.
+
+### B. Go → WASM → translate WASM to safe Rust — **rejected**
 
 `GOOS=wasip1 GOARCH=wasm go build`, then translate the module into safe Rust,
-implementing the WASI imports on Rust `std`. The mirror image of the `GOARCH=wasm`
-port: Go's real runtime, GC, scheduler and `reflect` run unchanged over a
-`Vec<u8>` heap.
+implementing the WASI imports on Rust `std`. The mirror image of the
+`GOARCH=wasm` port: Go's real runtime, GC, scheduler and `reflect` run unchanged
+over a `Vec<u8>` heap. It would have been months of work instead of years, with
+near-complete Go compatibility.
 
-* **For:** near-complete Go compatibility for a fraction of the effort — months,
-  not years. Nothing to maintain across Go releases. Reaches fullrust, purestd
-  and kintane. Shares its front half with a WASM → Go translator, so one tool
-  serves both directions.
-* **Against:** the Go heap is an opaque byte array to Rust. No shared types, no
-  direct calls; interop is still handles. Performance is Go-on-WASM, well below
-  native Go.
-* **Verdict:** the pragmatic path, and the fallback if C turns out to be
-  unaffordable. It does not deliver type-level interop, which is the actual goal.
+Rejected for the same two reasons, which survive the translation to Rust:
+
+* **Performance.** Go-on-WASM is the starting point, and translating the module
+  to Rust does not recover what the WASM port already gave up: its own
+  emulated stack, its own resumable-function scheme, no assembly anywhere in
+  the standard library.
+* **No native resources.** Everything the program can reach is whatever the
+  WASI host chooses to expose. Threads, raw sockets, devices and hardware
+  acceleration stay out of reach, which defeats the point for the services this
+  is meant to run.
+
+And even setting those aside, the Go heap stays an opaque byte array to Rust:
+no shared types, no direct calls, interop still by handles — so it never
+delivered the actual goal either.
 
 ### C. Go → Rust with a Rust runtime (this repository)
 
@@ -86,6 +99,16 @@ rustygo follows them: a separate `rustygo build` command, a `rustygo` build tag
 for target-specific files, and a real 64-bit `GOARCH` underneath so the standard
 library resolves.
 
+## Native compilation is a requirement, not a preference
+
+Both rejected options route through WASM, and WASM is ruled out for this project:
+the performance loss is unacceptable for crypto, codec and database workloads,
+and the sandbox cannot see the native resources — threads, syscalls, devices,
+hardware acceleration — that the Go services and the Rust crates both depend on.
+That constraint is what makes option C's runtime work unavoidable rather than
+merely ambitious: a garbage collector, a scheduler and channels all have to be
+built natively, because there is no host runtime to borrow them from.
+
 ## On fullrust
 
 [fullrust](https://github.com/KarpelesLab/fullrust) is listed as a target, not a
@@ -101,10 +124,11 @@ rather than on a per-OS port.
   The closest existing thing; its `reflect` and stdlib gaps are the realistic
   forecast for rustygo's first years.
 * **GopherJS** — whole-program blocking analysis to emulate goroutines without
-  stack switching. That technique is the plan for the WASM target.
+  stack switching. Not the plan here (stackful coroutines are), but the clearest
+  write-up of what Go's concurrency semantics actually demand of a back end.
 * **Go's own `GOARCH=wasm` port** — how to run the real runtime on a target with
-  no goto and no native stacks.
-* **`ncruces/go-sqlite3`** — evidence for option A's viability.
+  no goto and no native stacks; read for the relooper and stack-emulation
+  techniques, not as a target.
 * **Rust GC experiments** (`gc-arena`, `shredder`, Servo's collector) — for
   shadow-stack versus stack-map tradeoffs and `Trace` derive ergonomics.
 
@@ -112,8 +136,10 @@ rather than on a per-OS port.
 
 Written down now, to be checked honestly later:
 
-1. **M0 measures a 10×-plus slowdown** that escape analysis clearly cannot
-   recover. Then option B delivers the same compatibility for far less work.
+1. **M0 measures a 10×-plus slowdown** that escape analysis and bounds-check
+   elision clearly cannot recover. With the WASM routes off the table there is
+   no cheaper fallback, so the honest conclusion would be to keep maintaining
+   hand-written pairs instead.
 2. **`reflect` proves impractical** to the point that `encoding/json` and `fmt`
    do not work. A Go that cannot marshal JSON is not useful for KLB services.
 3. **Generated crates are so large** that `rustc` compile times make the

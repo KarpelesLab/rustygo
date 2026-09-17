@@ -60,7 +60,7 @@ userland, [kintane](https://github.com/KarpelesLab/kintane), `no_std` targets.
                                            ▼
                                          rustc
                                            │
-                      native · fullrust · wasm32 · no_std subset
+                    native · fullrust · purestd · no_std subset
 ```
 
 Generated code stays safe Rust. The `unsafe` lives in the runtime crate — the
@@ -92,7 +92,7 @@ impl Point {
 | Problem | Plan |
 |---|---|
 | **Garbage collection** — Go has cycles, interior pointers (`&s.f`, `&a[i]`), slices sharing a backing array | Precise tracing collector in the runtime; `Gc<T>` handles; generated trace impls; safe points at calls and loop back-edges; fat pointers for interior pointers |
-| **Goroutines** — can block anywhere, so `async` would colour nearly every function | Stackful coroutines in the runtime (per-arch context switch), M:N scheduler. GopherJS-style blocking analysis only for WASM, where stack switching is unavailable |
+| **Goroutines** — can block anywhere, so `async` would colour nearly every function | Stackful coroutines in the runtime (per-arch context switch), M:N scheduler, growable stacks |
 | **`reflect` / `unsafe.Pointer`** — `encoding/json`, `fmt`, much of the stdlib | Emit full type descriptors; map `unsafe.Pointer` onto the runtime object model; document the patterns that will not be supported |
 | **Standard library** — assembly, `go:linkname`, `runtime` internals | Compile the real stdlib with the `purego` build tag; reimplement only `runtime`, `syscall`, `os` bottom, `reflect` internals, `sync/atomic` on Rust std |
 
@@ -106,11 +106,13 @@ This is a TinyGo-sized project. TinyGo took years and several people, and still
 does not cover all of `reflect` or the standard library. rustygo carries the
 same weight plus a garbage collector Rust does not give it for free.
 
-The cheaper alternative — `GOOS=wasip1 GOARCH=wasm` plus a WASM → safe-Rust
-translator — buys near-complete Go compatibility in months, but the Go heap
-stays an opaque byte array, so Rust never sees Go types and interop remains
-handle-based. That trade is why this repository exists;
-[docs/RATIONALE.md](docs/RATIONALE.md) records the comparison.
+There is no cheaper path to the same goal. The WASM routes — running Rust
+inside Go on a WASM runtime, or compiling Go to WASM and translating that to
+Rust — are ruled out: they cost too much performance, and they cut the code off
+from native resources (threads, syscalls, devices, hardware acceleration) that
+both stacks exist to use. Native compilation is the requirement, so the runtime
+work below is the price of entry. [docs/RATIONALE.md](docs/RATIONALE.md) records
+the comparison.
 
 ## License
 
