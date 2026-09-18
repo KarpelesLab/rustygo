@@ -134,7 +134,8 @@ rather than on a per-OS port.
 
 ## What would make this project wrong
 
-Written down now, to be checked honestly later:
+Written down now, to be checked honestly later, at the decision gates fixed in
+[ROADMAP.md](ROADMAP.md#decision-gates):
 
 1. **M0 measures a 10×-plus slowdown** that escape analysis and bounds-check
    elision clearly cannot recover. With the WASM routes off the table there is

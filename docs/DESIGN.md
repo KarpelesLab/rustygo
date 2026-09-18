@@ -17,8 +17,11 @@ go/packages ──► go/types ──► go/ssa ──► lowering passes ──
   and Rust has no `goto`. `go/ssa` keeps blocks and phis, and a relooper turns
   them back into `loop`/`match` when the CFG is irreducible.
 * **Unit of output:** one Rust module per Go package, one crate per build. Go
-  import cycles are impossible, so module ordering is a topological sort. Crate
-  granularity is a later optimization (incremental builds).
+  import cycles are impossible, so module ordering is a topological sort. The
+  exception is the standard library: from M3 on it is its own crate (or
+  crates), built once per Go version and target and cached. Recompiling `fmt`
+  on every build would make the toolchain unusable. Finer crate granularity for
+  user packages is a later optimization.
 
 ### Tool UX
 
@@ -67,6 +70,22 @@ object's layout descriptor. This is the main reason generated code can avoid
 `unsafe` — and the main reason it costs more than native Go. Escape analysis
 (M6) is what claws that back for locals that never escape.
 
+### Field access and aliasing
+
+Go lets any number of pointers reach the same object and write through all of
+them, even from two goroutines at once. Rust's `&mut` forbids exactly that. In
+Rust, a data race through non-atomic accesses is undefined behavior, even where
+Go gives it a defined (if unhelpful) meaning for word-sized values. The
+runtime's accessor API has to be sound for *any* code the emitter produces, so:
+
+* No Rust reference into a `Gc` object outlives a single load or store, and no
+  call happens while one is held. A `with_mut` closure contains only
+  straight-line field arithmetic, and `p.x = f(p)` evaluates `f(p)` into a
+  temporary first.
+* Concurrent access is still open. Plain loads and stores are UB under a Go data
+  race; relaxed atomics for every heap word are sound but block some
+  optimizations. M0 measures the difference and decides (§13).
+
 ## 3. Memory and the collector
 
 * **Precise tracing collector**, not reference counting: Go programs make cycles
@@ -80,7 +99,9 @@ object's layout descriptor. This is the main reason generated code can avoid
 * **Phase 1:** stop-the-world mark-sweep, one heap, a global lock on allocation.
   Correct and boring.
 * **Phase 2:** per-thread allocation buffers, size-class allocator, then
-  generational or incremental marking if measurements demand it.
+  generational or incremental marking if measurements demand it. Incremental
+  marking needs a write barrier, which is why every pointer store goes through
+  a single emitter path from the start.
 * **Finalizers / weak refs:** `runtime.SetFinalizer`, Go 1.24's `weak`, and
   `unique` ride on the collector's post-mark phase.
 
@@ -91,12 +112,27 @@ object's layout descriptor. This is the main reason generated code can avoid
   recursion. A context switch (per-architecture assembly in the runtime) keeps
   generated code straight-line and lets any function block anywhere.
 * **M:N scheduler** over OS threads, work-stealing run queues, `GOMAXPROCS`
-  honored. Preemption is cooperative at safe points; Go's own async preemption
-  is out of scope initially, so a tight loop without calls can starve a thread.
-* **Growable stacks:** coroutine stacks start small and grow by allocating a
-  larger stack and switching — the runtime can do this precisely because
-  generated code holds Go pointers only in the shadow stack and Rust locals of
-  known layout.
+  honored. Preemption is cooperative at safe points, which are calls and loop
+  back-edges (§3), so every loop stays preemptible as long as its back-edge
+  poll remains. Go's signal-based async preemption is out of scope. For the
+  same reason, M6 may elide safe points only in loops with a bounded trip count.
+* **Stacks are reserved, not grown.** Go grows a stack by copying it and
+  rewriting every pointer into it, which requires knowing where all those
+  pointers are. Rust frames hold raw addresses of locals that no compiler
+  reports: generated code, the runtime, `std`, and any crate reached through
+  interop all do it. So each goroutine instead gets a fixed virtual reservation
+  (configurable, and generous, since only touched pages cost memory),
+  committed lazily by the OS, with a guard page below it. Overflow hits the
+  guard page, and `rustc`'s stack probes guarantee it cannot be skipped over;
+  the result is Go's fatal `stack exceeds limit` error. Stacks of exited
+  goroutines are pooled, and their pages are released with `madvise`.
+  Segmented stacks, which Rust itself tried and dropped, are not revisited.
+  Cost: recursion depth is capped by the reservation, not by
+  `debug.SetMaxStack`, and a goroutine that once went deep keeps those pages
+  until it exits.
+* **Blocking calls** (syscalls, long calls into Rust) hand the thread's
+  scheduler slot to another thread and count as a safe point, so they block
+  neither other goroutines nor a stop-the-world collection.
 * **Channels and `select`** live in the runtime: same FIFO fairness, same
   blocking semantics, same random choice among ready cases.
 * **Netpoller:** `epoll`/`kqueue` (or Rust `std` blocking threads on
@@ -147,6 +183,13 @@ Supported, narrowly:
 * Reimplement only the bottom: `runtime`, `runtime/internal/*`, `sync/atomic`,
   `syscall`, the `os` and `net` syscall layers, `reflect` internals, and the
   `internal/bytealg`-style packages that assume assembly.
+* **Assembly without a `purego` path.** With a real `GOARCH`, packages such as
+  `math` and `internal/bytealg` select files that declare bodyless functions,
+  whose bodies live in `.s` files. Each one gets a Rust implementation or a
+  redirect to the package's generic Go fallback. The same inventory covers the
+  stdlib's `go:linkname` references into `runtime`. That contract changes with
+  every Go release, so rustygo pins one Go version at a time. The replacement
+  packages are substituted through an overlay GOROOT, as TinyGo does.
 * `syscall` sits on Rust `std` — which is what makes fullrust, purestd and
   kintane reachable without a second port.
 * Anything requiring cgo (`os/user` in cgo mode, `net` in cgo resolver mode) is
@@ -184,7 +227,9 @@ are enforced by the emitter, not by convention.
 
 | Target | Status of plan |
 |---|---|
-| Native (Linux/macOS/Windows, x86-64 + aarch64) | primary |
+| Native Linux, x86-64 + aarch64 | primary |
+| Native macOS | after M3 (kqueue netpoller, own context-switch details) |
+| Native Windows | planned, unscheduled (IOCP, different callee-saved registers and stack bookkeeping) |
 | [fullrust](https://github.com/KarpelesLab/fullrust) static Linux | expected to work once `syscall` sits on Rust `std`; needs `panic=unwind` on that toolchain |
 | `no_std` + [purestd](https://github.com/KarpelesLab/purestd) / [kintane](https://github.com/KarpelesLab/kintane) | subset: no goroutine preemption, single heap, no netpoller |
 
@@ -226,3 +271,13 @@ There is no slower floor to hide behind — WASM is not a fallback here, so
    bar; `reflect.StructOf` may never come.
 5. Generated-code size: monomorphization plus type descriptors plus the stdlib
    could produce very large crates and slow `rustc` runs. Needs measuring early.
+6. Racy heap access (§2): plain loads and stores, or relaxed atomics for every
+   heap word? The first is faster and is UB under a Go data race; the second is
+   sound. M0 measures both.
+7. Atomics on fat pointers: `atomic.Pointer[T]` and `CompareAndSwapPointer`
+   operate on `Ptr<T>`, which is two words wide. Options are a double-width CAS
+   (`cmpxchg16b`, `casp`) or a thin representation for pointers that are
+   accessed atomically. To be decided in M2, before `sync` depends on it.
+8. `GoStr` uses `u32` offset and length, which caps strings at 4 GiB where Go
+   allows `int`. The same would hold for `Slice<T>` if it follows suit. A
+   `mmap`-ed database file is where that bites.

@@ -92,7 +92,7 @@ impl Point {
 | Problem | Plan |
 |---|---|
 | **Garbage collection** — Go has cycles, interior pointers (`&s.f`, `&a[i]`), slices sharing a backing array | Precise tracing collector in the runtime; `Gc<T>` handles; generated trace impls; safe points at calls and loop back-edges; fat pointers for interior pointers |
-| **Goroutines** — can block anywhere, so `async` would colour nearly every function | Stackful coroutines in the runtime (per-arch context switch), M:N scheduler, growable stacks |
+| **Goroutines** — can block anywhere, so `async` would colour nearly every function | Stackful coroutines in the runtime (per-arch context switch), M:N scheduler, lazily committed fixed stacks |
 | **`reflect` / `unsafe.Pointer`** — `encoding/json`, `fmt`, much of the stdlib | Emit full type descriptors; map `unsafe.Pointer` onto the runtime object model; document the patterns that will not be supported |
 | **Standard library** — assembly, `go:linkname`, `runtime` internals | Compile the real stdlib with the `purego` build tag; reimplement only `runtime`, `syscall`, `os` bottom, `reflect` internals, `sync/atomic` on Rust std |
 
