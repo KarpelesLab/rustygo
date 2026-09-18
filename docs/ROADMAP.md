@@ -32,6 +32,48 @@ Standing rules that apply from M0 on, instead of being added later:
   * IOCP completion I/O in place of readiness polling;
   * a `syscall` package built around handles and DLL calls.
 
+## The yardstick: Go's own test suite
+
+rustygo is as good as its pass rate on the tests the Go project already wrote
+for itself. Hand-written programs and service tests catch the first bugs; Go's
+own suite is what says the compiler is right. It is run in full from the
+moment it can be:
+
+* **Scope.** Two parts, both from the pinned Go release:
+  * the `test/` directory, run under the same directives
+    `cmd/internal/testdir` understands (`run`, `runoutput`, `build`, …);
+  * `go test std`, the tests of every standard-library package.
+
+  `cmd/...` is the gc toolchain's own test suite and is out of scope. Its
+  programs are not: building `gofmt` and `vet` with rustygo is a free
+  large-program test.
+* **Runner.** `rustygo test` emits `test2json` output, and the harness compares
+  per test against a gc run on the same machine, so tests that are flaky under
+  gc are not charged to rustygo. `-short` runs on every commit and the full
+  suite nightly.
+* **No silent gc.** Many tests build helper programs through
+  `internal/testenv`, which calls `go build` or `go run`. The runner puts a
+  rustygo-backed `go` shim first on `PATH`, so those helpers are
+  rustygo-built. Without it, part of the suite would quietly be testing gc.
+* **Exclusions are few and justified.** A test may be excluded only if it checks
+  gc's *implementation* and not Go's *behavior*. Allowed categories:
+  * gc-specific runtime internals (stack copying, GC pacer internals,
+    `internal/abi` layouts);
+  * `errorcheck` tests of the gc compiler's diagnostic text;
+  * assembly;
+  * `cgo` and `-race`;
+  * goroutine-trace formatting.
+
+  Every exclusion is listed, with its category, in the repository. Anything
+  else that fails counts as a failure, including `testing.AllocsPerRun`
+  checks that need escape analysis (M6).
+* **Pass rate published** per package and per test, from M1 on for `test/` and
+  from M3 on for `std`, with the full list of failing tests. The number only
+  goes up; a drop is a CI failure.
+
+The end state is every non-excluded test passing on every supported platform.
+Each milestone below states how far along that line it gets.
+
 ## Decision gates
 
 [RATIONALE.md](RATIONALE.md#what-would-make-this-project-wrong) lists what
@@ -126,8 +168,8 @@ work fails too, decision gate 1 says stop.
 
 * A non-trivial single-goroutine program runs correctly: a `sort` + `strings`
   exercise, or a small interpreter.
-* The `// run` tests in Go's `test/` directory pass for the non-concurrent,
-  non-reflect subset, with the pass rate published.
+* The `test/` directory's non-concurrent, non-reflect tests pass, and the
+  pass rate for the whole directory is published.
 * GC torture mode passes the same set.
 
 ## M2 — Goroutines, channels, `sync`, timers
@@ -160,7 +202,8 @@ work fails too, decision gate 1 says stop.
 
 **Exit criteria:**
 
-* Concurrency tests from Go's suite pass.
+* Go's concurrency tests pass: `test/chan/` and the rest of `test/` that uses
+  goroutines, plus the `sync`, `sync/atomic` and `context` package tests.
 * A producer/consumer benchmark runs within a stated factor of gc Go, with the
   factor published instead of hidden.
 * 100k parked goroutines fit in a stated memory budget.
@@ -199,8 +242,12 @@ work fails too, decision gate 1 says stop.
 
 **Exit criteria:**
 
+* The whole of `go test std` runs under rustygo, with the pass-rate table and
+  the exclusion list published.
 * `fmt`, `strings`, `bytes`, `errors`, `sort`, `time`, `encoding/json` and
-  `net/http` pass their own tests, with a published pass-rate table per package.
+  `net/http` pass all their non-excluded tests.
+* `gofmt` and `vet`, built with rustygo, produce the same output as gc builds
+  over the Go source tree.
 * The service-test scenarios pass in every client/server pairing, and the load
   variant's latency and RSS against gc are published.
 * Stdlib build time and a small program's incremental rebuild time are recorded
@@ -245,8 +292,8 @@ branch, in each direction:
 
 **Exit criteria:**
 
-* The M3 per-package pass-rate table is published for macOS and Windows,
-  alongside Linux.
+* The `test/` and `std` pass-rate tables are published for macOS and Windows,
+  within a stated margin of Linux.
 * The M3 service tests pass on macOS and Windows. Those runs exercise the
   `kqueue` and IOCP netpollers end to end.
 * The M1 exercise program runs on fullrust and on kintane, from the same source,
@@ -273,6 +320,8 @@ branch, in each direction:
 * Within 2× of gc Go on a published benchmark set, measured natively, and no
   benchmark more than 4× off.
 * p99 GC pause stated for a heap-heavy benchmark.
+* The `testing.AllocsPerRun` tests in `std` pass. They count heap allocations,
+  so they are a direct check of escape analysis.
 
 ## M7 — Real workload
 
@@ -287,7 +336,8 @@ branch, in each direction:
 
 * The service runs on production traffic next to its gc build for two weeks.
 * Latency (p50/p99), RSS and CPU are compared and published.
-* The unsupported list is published.
+* The unsupported list is published. It includes every test in `test/` and
+  `std` that still fails, one by one, next to the exclusion list.
 
 ## Non-goals for the first year
 

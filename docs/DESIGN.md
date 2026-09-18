@@ -266,8 +266,13 @@ There is no slower floor to hide behind — WASM is not a fallback here, so
     side.
   * A load variant of each scenario doubles as a scheduler and GC stress test,
     and yields latency numbers against gc for free.
-* **Go's own test suite:** the `test/` directory of the Go distribution plus
-  standard-library tests, tracked as a published pass rate from M1 onward.
+* **Go's own test suite** is the primary measure of correctness: the `test/`
+  directory plus `go test std`, for the pinned release. A rustygo-backed `go`
+  shim sits first on `PATH`, so tests that build helper programs build them
+  with rustygo. Results are compared per test against gc on the same machine.
+  Exclusions are allowed only for tests of gc's implementation, not of Go's
+  behavior, and each one is listed. See
+  [ROADMAP](ROADMAP.md#the-yardstick-gos-own-test-suite).
 * **GC torture:** allocation-heavy tests under a debug collector that collects
   at every safe point and poisons freed objects.
 * **Race detector:** out of scope; document it as missing.
