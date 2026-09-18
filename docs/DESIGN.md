@@ -254,6 +254,18 @@ There is no slower floor to hide behind — WASM is not a fallback here, so
 
 * **Differential testing:** build every test program twice — gc and rustygo —
   and compare stdout, exit status and panic text.
+* **Service tests:** the same comparison for programs that serve rather than
+  print. The harness starts a server, waits for its port and drives it with a
+  scripted client, comparing status codes, headers (minus `Date` and similar)
+  and bodies against the gc build.
+  * Clients and servers are also mixed across compilers (gc client against
+    rustygo server, and the reverse). A symmetric bug, such as a TLS mistake
+    made identically on both ends, passes when rustygo talks to itself but not
+    when it talks to gc.
+  * The driver is built with gc by default, so a failure points at the rustygo
+    side.
+  * A load variant of each scenario doubles as a scheduler and GC stress test,
+    and yields latency numbers against gc for free.
 * **Go's own test suite:** the `test/` directory of the Go distribution plus
   standard-library tests, tracked as a published pass rate from M1 onward.
 * **GC torture:** allocation-heavy tests under a debug collector that collects

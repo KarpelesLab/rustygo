@@ -16,7 +16,9 @@ Standing rules that apply from M0 on, instead of being added later:
 * **Differential harness in CI.** Every test program is built with gc and with
   rustygo and compared on stdout, stderr, exit status and the first line of any
   panic. Full goroutine traces are not compared. The harness exists before the
-  first test program does.
+  first test program does. From M3 on it also has a service mode
+  ([DESIGN §12](DESIGN.md#12-correctness-strategy)): start a server, drive it
+  with a client, compare what comes back.
 * **Tracked numbers, published in the repository:** runtime against gc Go,
   emitted Rust size, `rustc` wall time and binary size, plus GC pause times
   from M1 on. Exit criteria cite these numbers, so each is measured at every
@@ -180,6 +182,17 @@ work fails too, decision gate 1 says stop.
 * Type descriptors complete enough for `fmt` and `encoding/json`.
 * `rustygo test`: test-main generation and the `testing` package, so the stdlib
   is measured by its own tests.
+* Service tests. These end-to-end tests are cheap to write, and each one covers
+  the netpoller, the scheduler, the collector under load, `crypto/tls` and
+  `net/http` at once:
+  * a `net/http` server built with rustygo is driven by a client built with gc;
+  * the scenarios are plain HTTP, HTTPS, HTTP/2, keep-alive, streamed and large
+    bodies, client timeouts and context cancellation, and graceful shutdown on
+    `SIGTERM`;
+  * every client/server pairing runs: gc×rustygo, rustygo×gc and
+    rustygo×rustygo;
+  * a load variant of the same scenarios reports latency and RSS against the
+    gc build.
 * Build caching. The compiled standard library becomes its own crate or crates,
   built once per Go version and target and then reused, so rebuilding a small
   program does not recompile `fmt`.
@@ -188,6 +201,8 @@ work fails too, decision gate 1 says stop.
 
 * `fmt`, `strings`, `bytes`, `errors`, `sort`, `time`, `encoding/json` and
   `net/http` pass their own tests, with a published pass-rate table per package.
+* The service-test scenarios pass in every client/server pairing, and the load
+  variant's latency and RSS against gc are published.
 * Stdlib build time and a small program's incremental rebuild time are recorded
   (decision gate 3).
 
@@ -232,6 +247,8 @@ branch, in each direction:
 
 * The M3 per-package pass-rate table is published for macOS and Windows,
   alongside Linux.
+* The M3 service tests pass on macOS and Windows. Those runs exercise the
+  `kqueue` and IOCP netpollers end to end.
 * The M1 exercise program runs on fullrust and on kintane, from the same source,
   with no target-specific code in the program itself.
 
