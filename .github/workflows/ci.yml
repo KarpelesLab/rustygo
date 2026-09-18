@@ -1,0 +1,166 @@
+name: CI
+
+on:
+  push:
+    branches: [master]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  test:
+    name: Runtime test & lint (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, windows-latest, macos-latest]
+    steps:
+      - uses: actions/checkout@v6
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt, clippy
+
+      - name: Cache
+        uses: Swatinem/rust-cache@v2
+        with:
+          key: ${{ matrix.os }}
+
+      - name: Format
+        if: runner.os == 'Linux' # formatting is platform-independent
+        run: cargo fmt --all --check
+
+      - name: Clippy (all features, warnings denied)
+        run: cargo clippy --all-targets --all-features -- -D warnings
+
+      - name: Test (all features)
+        run: cargo test --all-features
+
+  no_std:
+    name: no_std builds (${{ matrix.target }})
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        # Bare-metal 64-bit targets, the shape of kintane: they catch any
+        # accidental `std` dependency. 32-bit targets are a non-goal
+        # (docs/ROADMAP.md), so none are built here.
+        target: [x86_64-unknown-none, aarch64-unknown-none]
+    steps:
+      - uses: actions/checkout@v6
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.target }}
+
+      - name: Cache
+        uses: Swatinem/rust-cache@v2
+        with:
+          key: ${{ matrix.target }}
+
+      - name: Build bare no_std (no default features)
+        run: cargo build --target ${{ matrix.target }} --no-default-features
+
+      - name: Build no_std with every non-std feature
+        run: cargo build --target ${{ matrix.target }} --no-default-features --features gc-torture
+
+  msrv:
+    name: MSRV (Rust 1.89)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+
+      # Keep this pin in sync with `rust-version` in Cargo.toml. Compile-only:
+      # behavior is covered by the stable `test` jobs.
+      - name: Install Rust 1.89 (declared MSRV)
+        uses: dtolnay/rust-toolchain@1.89
+
+      - name: Cache
+        uses: Swatinem/rust-cache@v2
+        with:
+          key: msrv
+
+      - name: cargo check --all-features --all-targets
+        run: cargo check --all-features --all-targets
+
+  docs:
+    name: Docs build (warnings denied)
+    runs-on: ubuntu-latest
+    env:
+      RUSTDOCFLAGS: -D warnings -D rustdoc::broken-intra-doc-links
+    steps:
+      - uses: actions/checkout@v6
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache
+        uses: Swatinem/rust-cache@v2
+
+      - name: cargo doc --no-deps --all-features
+        run: cargo doc --no-deps --all-features
+
+  lean_features:
+    # `--all-features` everywhere else hides breakage that only shows in a lean
+    # build: doc links to `std`-only items, lints in `no_std` code paths,
+    # tests that assume a feature. Check-only, so it is cheap.
+    name: Lean feature checks
+    runs-on: ubuntu-latest
+    env:
+      RUSTDOCFLAGS: -D warnings -D rustdoc::broken-intra-doc-links
+    steps:
+      - uses: actions/checkout@v6
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy
+
+      - name: Cache
+        uses: Swatinem/rust-cache@v2
+        with:
+          key: lean
+
+      # Keep in sync with Cargo.toml's [features] when adding a feature.
+      - name: clippy + rustdoc per feature set
+        run: |
+          set -euo pipefail
+          for f in "" "gc-torture" "std" "std,gc-torture"; do
+            echo "::group::features=[$f]"
+            cargo clippy --no-default-features --features "$f" --all-targets -- -D warnings
+            cargo doc --no-deps --no-default-features --features "$f"
+            echo "::endgroup::"
+          done
+
+  compiler:
+    name: Compiler (Go, ${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, windows-latest, macos-latest]
+    steps:
+      - uses: actions/checkout@v6
+
+      - name: Install Go
+        uses: actions/setup-go@v6
+        with:
+          go-version-file: go.mod
+
+      - name: gofmt
+        if: runner.os == 'Linux'
+        run: test -z "$(gofmt -l .)" || { gofmt -l .; exit 1; }
+
+      - name: go vet
+        run: go vet ./...
+
+      - name: go test
+        run: go test ./...

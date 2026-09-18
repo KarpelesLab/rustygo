@@ -4,11 +4,12 @@
 a Rust runtime, and end up with Go and Rust code in *one* binary that share
 real types — no cgo, no FFI, no `unsafe` in anything you write.
 
-> **Status: design only.** There is no code in this repository yet. This is the
-> written-down plan: [docs/DESIGN.md](docs/DESIGN.md) for the architecture,
+> **Status: scaffolding, M0 starting.** The front end loads Go packages into
+> SSA, and the runtime has its first pieces (Go integer semantics, builtin
+> `println`, panics). No Go code compiles to Rust yet. The plan is
+> [docs/DESIGN.md](docs/DESIGN.md) for the architecture,
 > [docs/RATIONALE.md](docs/RATIONALE.md) for why this shape and not another,
-> [docs/ROADMAP.md](docs/ROADMAP.md) for the milestones. Comments and holes
-> poked in it are welcome before the first line lands.
+> and [docs/ROADMAP.md](docs/ROADMAP.md) for the milestones.
 
 ## Why
 
@@ -53,7 +54,7 @@ userland, [kintane](https://github.com/KarpelesLab/kintane), `no_std` targets.
                                                │
                         ┌──────────────────────┴──────────────────────┐
                         ▼                                             ▼
-             generated Rust crate(s)                        rustygo-runtime crate
+             generated Rust crate(s)                     `rustygo` crate (runtime)
              (safe Rust, no unsafe)                  GC · scheduler · chan · map ·
                         │                            reflect · syscall shims
                         └──────────────────┬──────────────────────────┘
@@ -74,8 +75,10 @@ func (p *Point) Scale(k int) { p.X *= k; p.Y *= k }
 ```
 
 ```rust
-#[derive(Default, Trace)]
+#[derive(Default)]
 pub struct Point { pub x: i64, pub y: i64 }
+
+impl Trace for Point { fn trace(&self, _: &mut Tracer) {} }   // no pointers inside
 
 impl Point {
     pub fn scale(this: &Gc<Point>, k: i64) {
@@ -113,6 +116,28 @@ from native resources (threads, syscalls, devices, hardware acceleration) that
 both stacks exist to use. Native compilation is the requirement, so the runtime
 work below is the price of entry. [docs/RATIONALE.md](docs/RATIONALE.md) records
 the comparison.
+
+## Repository layout
+
+One repository and one version number, with two halves:
+
+| Path | What | Language |
+|---|---|---|
+| `cmd/rustygo`, `internal/` | the compiler: `rustygo build` / `emit` / `test` / `ssa` | Go (it runs on `go/ssa`) |
+| `Cargo.toml`, `src/` | the runtime: the `rustygo` crate generated code links against | Rust |
+| `docs/` | design, rationale, roadmap | |
+
+The runtime is a single crate. Its optional parts are cargo features (`std`,
+`gc-torture`, and more to come), not separate crates. Tracing code is written
+by the emitter, not by a derive macro, so no proc-macro crate is needed.
+
+```sh
+go run ./cmd/rustygo ssa ./some/pkg   # the SSA the emitter will consume
+cargo test                            # runtime unit tests
+```
+
+Rust MSRV is 1.89 (edition 2024). The compiler targets the Go release pinned in
+`go.mod`.
 
 ## License
 

@@ -1,0 +1,31 @@
+[package]
+name = "rustygo"
+version = "0.0.1"
+edition = "2024"
+rust-version = "1.89"
+description = "Runtime for Go packages compiled to Rust by the rustygo compiler"
+license = "MIT"
+repository = "https://github.com/KarpelesLab/rustygo"
+readme = "README.md"
+keywords = ["go", "golang", "compiler", "runtime", "gc"]
+categories = ["compilers", "memory-management", "no-std"]
+# The repository also holds the compiler (a Go module); only the runtime ships.
+include = ["/src", "/Cargo.toml", "/README.md", "/LICENSE", "/CHANGELOG.md"]
+
+[package.metadata.docs.rs]
+all-features = true
+
+# One crate, gated by features. Add a feature before adding a crate.
+[features]
+default = ["std"]
+# Hosted targets: stderr output, process exit, unwinding via std. Without it
+# the crate is `no_std` + `alloc` (purestd, kintane).
+std = []
+# Debug collector: collect at every safe point and poison freed objects.
+gc-torture = []
+
+[dependencies]
+
+[lints.rust]
+unsafe_op_in_unsafe_fn = "deny"
+missing_docs = "warn"

@@ -22,6 +22,14 @@ go/packages ──► go/types ──► go/ssa ──► lowering passes ──
   crates), built once per Go version and target and cached. Recompiling `fmt`
   on every build would make the toolchain unusable. Finer crate granularity for
   user packages is a later optimization.
+* **One published crate.** The runtime is the single `rustygo` crate on
+  crates.io, with cargo features (`std`, `gc-torture`, …) in place of
+  sub-crates. Generated crates, including the cached stdlib, depend on it and
+  are build artifacts that are never published. The emitter writes every
+  `impl Trace` itself, so there is no derive macro and no proc-macro crate.
+* **The compiler is a Go module** (`github.com/KarpelesLab/rustygo`) in the same
+  repository, because `go/ssa` is a Go library. The release tag `vX.Y.Z`
+  versions both halves at once.
 
 ### Tool UX
 
@@ -50,7 +58,7 @@ teaching `go list` a GOARCH it rejects.
 | `map[K]V` | `Gc<GoMap<K, V>>` | runtime hash map, randomized iteration order |
 | `chan T` | `Gc<Chan<T>>` | runtime, integrates with scheduler |
 | `func(...)` | `Gc<Closure<Args, Ret>>` | captured env is a traced struct |
-| `struct` | `#[derive(Trace)] struct` | field order preserved; `Gc<T>` when heap-allocated |
+| `struct` | `struct` + emitted `impl Trace` | field order preserved; `Gc<T>` when heap-allocated |
 | `*T` | `Ptr<T>` | see interior pointers |
 | `interface{...}` | `Iface { typ: &'static TypeDesc, val: Word }` | vtable hangs off `TypeDesc` |
 | `unsafe.Pointer` | `Ptr<Opaque>` | restricted; see §7 |
@@ -215,6 +223,9 @@ finalizer calling Rust's `Drop`).
 ```rust
 let out = rustygo_std::strconv::quote(rustygo::str("hi"));
 ```
+
+(`rustygo_std` is the generated, cached stdlib crate from §1, not a published
+one.)
 
 Go values stay `Gc`-managed. A Rust caller must hold a runtime handle (which
 starts the scheduler and collector), and the API mirrors that: `Runtime::new()`,

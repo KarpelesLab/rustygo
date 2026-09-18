@@ -138,8 +138,8 @@ work fails too, decision gate 1 says stop.
 
 ## M1 — Runtime core
 
-* Precise mark-sweep collector, shadow-stack roots, `Trace` derive, and safe
-  points at calls and loop back-edges. Every pointer store goes through one
+* Precise mark-sweep collector, shadow-stack roots, emitted `Trace` impls, and
+  safe points at calls and loop back-edges. Every pointer store goes through one
   emitter choke point, so a write barrier can be added in M6 without
   redesigning codegen.
 * Finalizers and weak references (`runtime.SetFinalizer`, `weak`). `unique`

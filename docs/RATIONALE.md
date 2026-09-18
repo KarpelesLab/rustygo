@@ -130,7 +130,7 @@ rather than on a per-OS port.
   no goto and no native stacks; read for the relooper and stack-emulation
   techniques, not as a target.
 * **Rust GC experiments** (`gc-arena`, `shredder`, Servo's collector) — for
-  shadow-stack versus stack-map tradeoffs and `Trace` derive ergonomics.
+  shadow-stack versus stack-map tradeoffs and `Trace` implementation ergonomics.
 
 ## What would make this project wrong
 
