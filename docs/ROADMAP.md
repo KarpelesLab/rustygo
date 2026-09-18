@@ -21,10 +21,14 @@ Standing rules that apply from M0 on, instead of being added later:
   emitted Rust size, `rustc` wall time and binary size, plus GC pause times
   from M1 on. Exit criteria cite these numbers, so each is measured at every
   milestone and not just once.
-* **Platform order.** Linux x86-64 and aarch64 come first. macOS (kqueue and its
-  own context-switch details) follows once M3 lands. Windows is planned but not
-  scheduled: it needs IOCP, a different callee-saved register set, and TIB
-  stack-bounds bookkeeping in the context switch.
+* **Platforms: Linux, macOS and Windows** on x86-64 and aarch64. Linux comes
+  first, and macOS and Windows ports land in M5. Windows diverges the most, so
+  the M2 context switch and the M3 netpoller and `syscall` layer are designed
+  for it from the start, not retrofitted:
+  * a different callee-saved register set (`xmm6`–`xmm15` on x64);
+  * TIB stack bounds to update on every switch;
+  * IOCP completion I/O in place of readiness polling;
+  * a `syscall` package built around handles and DLL calls.
 
 ## Decision gates
 
@@ -127,8 +131,9 @@ work fails too, decision gate 1 says stop.
 ## M2 — Goroutines, channels, `sync`, timers
 
 * Stackful coroutines: a context switch for x86-64 (System V) and aarch64
-  (AAPCS64). Stacks are fixed-size virtual reservations, committed lazily, with
-  guard pages. Rust frames hold raw addresses into the stack, so Go-style stack
+  (AAPCS64). The Windows x64 ABI is written and tested at the same time, even
+  though the rest of the Windows port waits for M5. Stacks are fixed-size
+  virtual reservations, committed lazily, with guard pages. Rust frames hold raw addresses into the stack, so Go-style stack
   copying is not available ([DESIGN §4](DESIGN.md#4-goroutines-and-the-scheduler)).
 * A panic never unwinds across a context switch. It stops at the goroutine's
   entry frame after running defers. If unrecovered, it becomes Go's fatal
@@ -164,8 +169,9 @@ work fails too, decision gate 1 says stop.
   bodyless functions and `go:linkname` references for every package it reaches.
 * Reimplement the rest of the bottom layer: `runtime`, `syscall`, `os`,
   `reflect` internals, `internal/bytealg`-style packages.
-* Netpoller on `epoll`, plus `kqueue` with the macOS port. `net`, `crypto/tls`,
-  and `net/http` client and server on top of it.
+* Netpoller on `epoll`, behind an interface that also fits `kqueue` and
+  completion-based IOCP, so the M5 ports only add backends. `net`,
+  `crypto/tls`, and `net/http` client and server on top of it.
 * Process-level pieces services rely on: `os/signal`, `os/exec`, environment,
   arguments, exit codes.
 * `runtime.Caller`/`Callers` and panic stack traces in Go terms: the emitter
@@ -211,13 +217,23 @@ branch, in each direction:
 
 ## M5 — Targets
 
+* Native macOS (x86-64, aarch64): `kqueue` netpoller, Darwin `syscall` layer.
+* Native Windows (x86-64, aarch64): IOCP netpoller, Windows context switch
+  (TIB stack bounds, guard pages via `VirtualAlloc`), and the Windows `syscall`
+  package. That package includes `SyscallN` and lazy DLL procedures, which
+  `golang.org/x/sys/windows` and most Windows Go code call through.
+  `windows-msvc` is the Rust target, so panics unwind through SEH.
 * fullrust static Linux binaries (needs `panic=unwind` on that toolchain; M0
   already checked it).
 * `no_std` subset for purestd and kintane: single heap, no netpoller, no
   preemption, fixed small stacks where there is no lazy commit.
 
-**Exit criteria:** the M1 exercise program runs on fullrust and on kintane,
-from the same source, with no target-specific code in the program itself.
+**Exit criteria:**
+
+* The M3 per-package pass-rate table is published for macOS and Windows,
+  alongside Linux.
+* The M1 exercise program runs on fullrust and on kintane, from the same source,
+  with no target-specific code in the program itself.
 
 ## M6 — Performance
 
@@ -261,6 +277,6 @@ from the same source, with no target-specific code in the program itself.
 Race detector · `cgo` · WASM targets · async preemption of call-free loops ·
 `reflect.StructOf` and runtime type construction · 32-bit targets ·
 plugin/`go:linkname` tricks in third-party code · human-readable output ·
-Go versions other than the pinned one · Windows ·
+Go versions other than the pinned one ·
 `runtime/pprof`, `runtime/trace` and Delve support (stubs that compile, so
 importing `net/http/pprof` does not break a build).

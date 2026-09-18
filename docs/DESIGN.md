@@ -125,7 +125,8 @@ runtime's accessor API has to be sound for *any* code the emitter produces, so:
   committed lazily by the OS, with a guard page below it. Overflow hits the
   guard page, and `rustc`'s stack probes guarantee it cannot be skipped over;
   the result is Go's fatal `stack exceeds limit` error. Stacks of exited
-  goroutines are pooled, and their pages are released with `madvise`.
+  goroutines are pooled, and their pages are released with `madvise`
+  (`VirtualFree(MEM_DECOMMIT)` on Windows).
   Segmented stacks, which Rust itself tried and dropped, are not revisited.
   Cost: recursion depth is capped by the reservation, not by
   `debug.SetMaxStack`, and a goroutine that once went deep keeps those pages
@@ -135,7 +136,7 @@ runtime's accessor API has to be sound for *any* code the emitter produces, so:
   neither other goroutines nor a stop-the-world collection.
 * **Channels and `select`** live in the runtime: same FIFO fairness, same
   blocking semantics, same random choice among ready cases.
-* **Netpoller:** `epoll`/`kqueue` (or Rust `std` blocking threads on
+* **Netpoller:** `epoll`/`kqueue`/IOCP (or Rust `std` blocking threads on
   constrained targets) driving the same parking primitives as channels.
 
 ## 5. Control flow, `defer`, `panic`, `recover`
@@ -228,8 +229,8 @@ are enforced by the emitter, not by convention.
 | Target | Status of plan |
 |---|---|
 | Native Linux, x86-64 + aarch64 | primary |
-| Native macOS | after M3 (kqueue netpoller, own context-switch details) |
-| Native Windows | planned, unscheduled (IOCP, different callee-saved registers and stack bookkeeping) |
+| Native macOS, x86-64 + aarch64 | M5 (kqueue netpoller, Darwin `syscall`) |
+| Native Windows, x86-64 + aarch64 | M5 (IOCP netpoller, Windows x64 context switch with TIB stack bounds, `SyscallN`/DLL `syscall` package, `windows-msvc` with SEH unwinding) |
 | [fullrust](https://github.com/KarpelesLab/fullrust) static Linux | expected to work once `syscall` sits on Rust `std`; needs `panic=unwind` on that toolchain |
 | `no_std` + [purestd](https://github.com/KarpelesLab/purestd) / [kintane](https://github.com/KarpelesLab/kintane) | subset: no goroutine preemption, single heap, no netpoller |
 
