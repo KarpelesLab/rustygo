@@ -89,6 +89,12 @@ fn with_heap<R>(f: impl FnOnce(&mut Heap) -> R) -> R {
 /// to survive one.
 pub fn allocate<T: Trace>(value: T) -> NonNull<T> {
     let layout = Layout::new::<T>();
+    if layout.size() == 0 {
+        // Go gives every zero-sized allocation one shared address, and
+        // programs compare those pointers (test/zerosize.go). There is
+        // nothing to write and nothing to collect.
+        return zerobase().cast();
+    }
     let should_collect = with_heap(|h| h.live_bytes + layout.size() > h.threshold);
     if should_collect || cfg!(feature = "gc-torture") {
         collect();
@@ -197,6 +203,16 @@ fn needs_drop<T>() -> Option<unsafe fn(*mut u8)> {
     } else {
         None
     }
+}
+
+/// The address every zero-sized allocation shares, as gc's `zerobase` is.
+/// Aligned generously, so it suits a zero-sized type of any alignment.
+pub(crate) fn zerobase() -> NonNull<u8> {
+    // Its contents are never read; only its address matters.
+    #[repr(align(16))]
+    struct Zerobase([u8; 0]);
+    static ZEROBASE: Zerobase = Zerobase([]);
+    NonNull::from(&ZEROBASE).cast()
 }
 
 /// A zero-sized payload still needs a distinct address.

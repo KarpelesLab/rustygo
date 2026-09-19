@@ -80,6 +80,18 @@ impl<P: Place, const N: usize> Place for [P; N] {
     }
 }
 
+/// Every pointer to a zero-sized place gets the one address gc gives them,
+/// so two such pointers compare equal as they do under gc. Rust is free to
+/// materialize a reference to a zero-sized type at any aligned address.
+#[inline]
+fn zst_normalized<P>(p: NonNull<P>) -> NonNull<P> {
+    if size_of::<P>() == 0 {
+        crate::heap::zerobase().cast()
+    } else {
+        p
+    }
+}
+
 /// A Go pointer: nil, or the address of a place.
 pub struct Ptr<P: 'static>(Option<NonNull<P>>);
 
@@ -155,14 +167,14 @@ impl<P> Ptr<P> {
     /// backing array, say. The place's own object keeps it alive.
     #[inline]
     pub fn to_place(p: &P) -> Self {
-        Ptr(Some(NonNull::from(p)))
+        Ptr(Some(zst_normalized(NonNull::from(p))))
     }
 
     /// A pointer to a place that lives for the rest of the program: a
     /// package-level variable's storage.
     #[inline]
     pub fn to_global(p: &'static P) -> Self {
-        Ptr(Some(NonNull::from(p)))
+        Ptr(Some(zst_normalized(NonNull::from(p))))
     }
 
     /// `&x.f` and `&a[i]`: the pointer to a place inside this one.
@@ -171,7 +183,8 @@ impl<P> Ptr<P> {
     /// borrow into the heap escapes. Panics like Go if this pointer is nil.
     #[inline]
     pub fn project<Q>(self, f: impl FnOnce(&P) -> &Q) -> Ptr<Q> {
-        Ptr(Some(NonNull::from(f(self.place()))))
+        let q = NonNull::from(f(self.place()));
+        Ptr(Some(zst_normalized(q)))
     }
 
     /// The place, or Go's nil-dereference panic.

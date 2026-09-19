@@ -30,6 +30,7 @@ import (
 
 	"github.com/KarpelesLab/rustygo/internal/load"
 	"golang.org/x/tools/go/ssa"
+	"golang.org/x/tools/go/types/typeutil"
 )
 
 // Options controls where and how the crate is written.
@@ -114,7 +115,7 @@ type emitter struct {
 	// methodIDs numbers each distinct method name and signature; descs and
 	// wrappers memoize the per-type descriptors and their method wrappers.
 	methodIDs map[string]uint32
-	descs     map[string]string
+	descs     typeutil.Map // types.Type -> string, the descriptor's path
 	wrappers  map[string]string
 	queue     []*ssa.Function
 	types     *typeReg

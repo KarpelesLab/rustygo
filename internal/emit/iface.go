@@ -71,8 +71,12 @@ func signatureKey(sig *types.Signature) string {
 func qualifiedPath(p *types.Package) string { return p.Path() }
 
 // goName is the type's name as Go prints it: `main.Point`, `*main.Node`,
-// `int`. Packages are named, not pathed, exactly as gc's panic messages do.
+// `int`. Packages are named, not pathed, exactly as gc's panic messages do,
+// and an alias prints as the type it names (`byte` is `uint8`).
 func goName(t types.Type) string {
+	if b, ok := types.Unalias(t).(*types.Basic); ok {
+		return types.Typ[b.Kind()].Name()
+	}
 	return types.TypeString(t, func(p *types.Package) string { return p.Name() })
 }
 
@@ -92,16 +96,16 @@ func goIfaceName(t types.Type) string {
 // typeDesc returns the Rust path of t's type descriptor, emitting it, its
 // method wrappers and its comparison and printing functions on first use.
 func (e *emitter) typeDesc(t types.Type, pos token.Pos) string {
-	if e.descs == nil {
-		e.descs = map[string]string{}
-	}
-	key := types.TypeString(t, qualifiedPath)
-	if p, ok := e.descs[key]; ok {
+	// Keyed by type identity, not by spelling: `byte` and `uint8` are one
+	// type with two names, and an assertion across the two has to find the
+	// same descriptor.
+	if p, ok := e.descs.At(t).(string); ok {
 		return p
 	}
+	key := types.TypeString(t, qualifiedPath)
 	name := e.types.ns.claim("TD_" + mangle(strings.NewReplacer("*", "ptr_", ".", "_", "/", "_").Replace(key)))
 	path := "crate::ty::" + name
-	e.descs[key] = path
+	e.descs.Set(t, path)
 
 	place := e.types.place(t, e, pos)
 	methods := e.methodTable(t, pos)
