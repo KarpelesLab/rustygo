@@ -136,6 +136,25 @@ and bounds-check elision forward from M6. Falling back on a WASM route is not an
 option; it is ruled out on both performance and native access. If the compiler
 work fails too, decision gate 1 says stop.
 
+**Status (2026-09-19): exit criteria met, with one item carried into M1.**
+
+* 26 programs match gc on stdout, stderr and exit status. CI runs them on
+  Linux, macOS (arm64) and Windows.
+* Benchmarks and compile scaling are in [BENCHMARKS.md](BENCHMARKS.md), and
+  the findings are in [DESIGN §11](DESIGN.md#11-performance-expectations):
+  * scalar, field and call code runs at gc's speed or faster, and pointer
+    chasing within 1.1×;
+  * shadow-stack upkeep costs 0–8%;
+  * strings run at 2.2×, set by the leaking allocator;
+  * about 4 minutes of release build for the whole stdlib, by extrapolation.
+* Heap access model: settled for one thread (places with copy-in/copy-out,
+  DESIGN §2). The multi-threaded half is open question 6, for M2.
+* `panic = "unwind"` works on fullrust; `no_std`/kintane is untested.
+* Decision gate 1 is not in sight.
+* Carried into M1: the cost of `Ptr` carrying its object's handle. The place
+  model (DESIGN §2) replaced the planned byte-offset fat pointer, so there
+  was nothing to measure without the collector.
+
 ## M1 — Runtime core
 
 * Precise mark-sweep collector, shadow-stack roots, emitted `Trace` impls, and
