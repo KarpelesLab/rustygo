@@ -11,13 +11,15 @@
 //! them, and its guard never leaves this module, so a frame cannot be leaked
 //! into the chain (by `mem::forget`, say) and then outlived.
 //!
-//! **M0 status:** there is no collector yet, so nothing walks the chain. The
-//! emitter produces frames only when `RUSTYGO_SHADOWSTACK=1`, to measure their
-//! cost against the same benchmarks (DESIGN §13, question 1). The collector
-//! arrives in M1 and walks this chain as its root set.
+//! A slot holds either a reference itself (a pointer or string, recorded with
+//! [`Frame::set`]), or the address of a local that contains references, with
+//! its trace function ([`Frame::set_local`]). The second kind covers struct
+//! and array values held in locals: the slot tracks the local, so it stays
+//! correct as the local is reassigned.
 
 use crate::place::Ptr;
 use crate::string::GoStr;
+use crate::trace::{Trace, TraceFn, Tracer, trace_fn};
 use core::cell::Cell;
 use core::marker::PhantomData;
 
@@ -41,19 +43,28 @@ impl Root for GoStr {
     }
 }
 
-/// The header every frame starts with, whatever its slot count.
+/// The header every frame starts with, whatever its slot count. `slots` and
+/// `len` let the collector walk a frame without knowing `N`.
 #[repr(C)]
 struct Header {
     prev: Cell<*const Header>,
     linked: Cell<bool>,
+    slots: Cell<*const Slot>,
     len: usize,
+}
+
+/// One root: either a reference, or a local to trace in place.
+#[derive(Default)]
+struct Slot {
+    word: Cell<usize>,
+    trace: Cell<Option<TraceFn>>,
 }
 
 /// One function's root slots.
 #[repr(C)]
 pub struct Frame<const N: usize> {
     header: Header,
-    slots: [Cell<usize>; N],
+    slots: [Slot; N],
 }
 
 std::thread_local! {
@@ -74,9 +85,10 @@ impl<const N: usize> Frame<N> {
             header: Header {
                 prev: Cell::new(core::ptr::null()),
                 linked: Cell::new(false),
+                slots: Cell::new(core::ptr::null()),
                 len: N,
             },
-            slots: [const { Cell::new(0) }; N],
+            slots: core::array::from_fn(|_| Slot::default()),
         }
     }
 
@@ -89,6 +101,7 @@ impl<const N: usize> Frame<N> {
     #[inline]
     pub fn scope<R>(&self, body: impl FnOnce() -> R) -> R {
         assert!(!self.header.linked.replace(true), "frame linked twice");
+        self.header.slots.set(self.slots.as_ptr());
         let me: *const Header = &self.header;
         TOP.with(|top| self.header.prev.set(top.replace(me)));
         let _guard = FrameGuard {
@@ -98,10 +111,19 @@ impl<const N: usize> Frame<N> {
         body()
     }
 
-    /// Records the root in slot `i`.
+    /// Records a reference in slot `i`.
     #[inline]
     pub fn set(&self, i: usize, v: &impl Root) {
-        self.slots[i].set(v.root_word());
+        self.slots[i].word.set(v.root_word());
+        self.slots[i].trace.set(None);
+    }
+
+    /// Records a local that holds references, to be traced where it lives.
+    /// The borrow makes the local outlive the frame.
+    #[inline]
+    pub fn set_local<'a, T: Trace>(&'a self, i: usize, v: &'a T) {
+        self.slots[i].word.set(v as *const T as usize);
+        self.slots[i].trace.set(Some(trace_fn::<T>()));
     }
 }
 
@@ -118,6 +140,29 @@ impl Drop for FrameGuard<'_> {
         let prev = self.header.prev.get();
         TOP.with(|top| top.set(prev));
         self.header.linked.set(false);
+    }
+}
+
+/// Reports every root on this thread's shadow stack to the collector.
+pub(crate) fn trace_roots(t: &mut Tracer<'_>) {
+    let mut p = TOP.with(|top| top.get());
+    while !p.is_null() {
+        // SAFETY: see `depth`.
+        let header = unsafe { &*p };
+        for i in 0..header.len {
+            // SAFETY: `slots` points at this frame's `[Slot; N]`, which is
+            // alive while the frame is linked, and `len` is that `N`.
+            let slot = unsafe { &*header.slots.get().add(i) };
+            let word = slot.word.get();
+            match slot.trace.get() {
+                None => t.edge(word),
+                // SAFETY: the slot holds the address of a live local, and
+                // the trace function came from that local's own type.
+                Some(trace) if word != 0 => unsafe { trace(word as *const u8, t) },
+                Some(_) => {}
+            }
+        }
+        p = header.prev.get();
     }
 }
 
@@ -146,6 +191,7 @@ mod tests {
         let outer = Frame::<2>::new();
         outer.scope(|| {
             outer.set(0, &GoStr::lit(b"x"));
+            assert_eq!(depth(), 1);
             let inner = Frame::<1>::new();
             assert_eq!(inner.scope(depth), 2);
             assert_eq!(depth(), 1);

@@ -10,11 +10,12 @@ a Rust runtime, and end up with Go and Rust code in *one* binary that share
 real types — no FFI between them, no `unsafe` in anything you write, and no
 cgo needed to get there.
 
-> **Status: M0 spike in progress.** Single-goroutine Go programs using
+> **Status: M0 done, M1 in progress.** Single-goroutine Go programs using
 > integers, floats, strings, structs, arrays, pointers, methods, generics and
-> multiple packages compile to Rust and run. Their output, panics and exit
-> codes are identical to gc's, and the differential harness checks that on
-> every commit. Not yet: garbage collection (everything leaks), slices, maps,
+> multiple packages compile to Rust and run, under a precise mark-sweep
+> collector. Their output, panics and exit codes are identical to gc's, and the
+> differential harness checks that on every commit — including under GC
+> torture, which collects at every allocation. Not yet: slices, maps,
 > interfaces, closures, `defer`, goroutines and the standard library. The plan is
 > [docs/DESIGN.md](docs/DESIGN.md) for the architecture,
 > [docs/RATIONALE.md](docs/RATIONALE.md) for why this shape and not another,

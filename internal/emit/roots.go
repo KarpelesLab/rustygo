@@ -23,15 +23,21 @@ import (
 // collectRoots assigns shadow-stack slots.
 func (f *fnEmitter) collectRoots() {
 	f.roots = map[ssa.Value]int{}
+	f.cells = map[ssa.Value]bool{}
 	cand := map[ssa.Value]bool{}
 	for _, p := range f.fn.Params {
-		if holdsRef(p.Type()) {
+		if containsRef(p.Type()) {
 			cand[p] = true
 		}
 	}
 	for _, b := range f.fn.Blocks {
 		for _, instr := range b.Instrs {
-			if v, ok := instr.(ssa.Value); ok && f.hasVar(v) && holdsRef(v.Type()) {
+			v, ok := instr.(ssa.Value)
+			if !ok || !f.hasVar(v) {
+				continue
+			}
+			// A string iterator holds the string it walks.
+			if _, isRange := v.(*ssa.Range); isRange || containsRef(v.Type()) {
 				cand[v] = true
 			}
 		}
@@ -106,37 +112,79 @@ func (f *fnEmitter) collectRoots() {
 			}
 		}
 		transfer(b, live, func(instr ssa.Instruction, after map[ssa.Value]bool) {
-			if safePoint(instr) {
-				for v := range after {
-					need[v] = true
+			if !safePoint(instr) {
+				return
+			}
+			// Live across the safe point, and also what it is handed: a
+			// collection can run while the callee holds those values.
+			for v := range after {
+				need[v] = true
+			}
+			var ops []*ssa.Value
+			for _, op := range instr.Operands(ops) {
+				if *op != nil && cand[*op] {
+					need[*op] = true
 				}
 			}
 		})
 	}
-	// Slots in a stable order: parameters, then instructions.
-	for _, p := range f.fn.Params {
-		if need[p] {
-			f.roots[p] = len(f.roots)
+	// Slots in a stable order: parameters, then instructions. A value whose
+	// references sit inside an aggregate lives in a cell, so the collector
+	// can trace the local itself.
+	assign := func(v ssa.Value) {
+		if !need[v] {
+			return
 		}
+		f.roots[v] = len(f.roots)
+		if _, isRange := v.(*ssa.Range); isRange || !holdsRef(v.Type()) {
+			f.cells[v] = true
+		}
+	}
+	for _, p := range f.fn.Params {
+		assign(p)
 	}
 	for _, b := range f.fn.Blocks {
 		for _, instr := range b.Instrs {
-			if v, ok := instr.(ssa.Value); ok && need[v] {
-				f.roots[v] = len(f.roots)
+			if v, ok := instr.(ssa.Value); ok {
+				assign(v)
 			}
 		}
 	}
 }
 
-// holdsRef reports whether a value of type t holds a GC reference that a
-// slot records: pointers and strings. References inside struct and array
-// values are not tracked yet.
+// holdsRef reports whether a value of type t *is* a GC reference: a pointer
+// or a string. Such a value goes in a plain root slot.
 func holdsRef(t types.Type) bool {
 	switch u := t.Underlying().(type) {
 	case *types.Pointer:
 		return true
 	case *types.Basic:
 		return u.Info()&types.IsString != 0
+	}
+	return false
+}
+
+// containsRef reports whether a value of type t holds any GC reference,
+// including inside a struct, array or tuple. Such a value must be traced.
+func containsRef(t types.Type) bool {
+	if holdsRef(t) {
+		return true
+	}
+	switch u := t.Underlying().(type) {
+	case *types.Struct:
+		for i := 0; i < u.NumFields(); i++ {
+			if containsRef(u.Field(i).Type()) {
+				return true
+			}
+		}
+	case *types.Array:
+		return containsRef(u.Elem())
+	case *types.Tuple:
+		for i := 0; i < u.Len(); i++ {
+			if containsRef(u.At(i).Type()) {
+				return true
+			}
+		}
 	}
 	return false
 }

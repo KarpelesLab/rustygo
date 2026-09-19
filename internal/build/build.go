@@ -93,16 +93,17 @@ func RuntimeDir() (string, error) {
 	return dir, nil
 }
 
-// Config selects code-generation options.
+// Config selects code-generation options. The shadow stack, which M0
+// measured behind a switch, is mandatory now that the collector reads it.
 type Config struct {
-	// ShadowStack emits GC root frames. M0 has no collector to read them;
-	// the switch exists to measure their cost.
-	ShadowStack bool
+	// GcTorture builds against the runtime's debug collector, which
+	// collects at every allocation.
+	GcTorture bool
 }
 
-// ConfigFromEnv reads RUSTYGO_SHADOWSTACK=1.
+// ConfigFromEnv reads RUSTYGO_GCTORTURE=1.
 func ConfigFromEnv() Config {
-	return Config{ShadowStack: os.Getenv("RUSTYGO_SHADOWSTACK") == "1"}
+	return Config{GcTorture: os.Getenv("RUSTYGO_GCTORTURE") == "1"}
 }
 
 // Emit writes the crate for res into dir.
@@ -111,7 +112,7 @@ func Emit(res *load.Result, dir string, cfg Config) error {
 	if err != nil {
 		return err
 	}
-	return emit.Crate(res, emit.Options{OutDir: dir, RuntimePath: rt, BinName: "main", ShadowStack: cfg.ShadowStack})
+	return emit.Crate(res, emit.Options{OutDir: dir, RuntimePath: rt, BinName: "main", GcTorture: cfg.GcTorture})
 }
 
 // Binary compiles res to a native executable at output.
@@ -128,7 +129,7 @@ func Binary(res *load.Result, output string, cfg Config) error {
 	// One binary name per work directory, so builds sharing the cargo
 	// target directory never overwrite each other's output.
 	bin := "p" + id
-	if err := emit.Crate(res, emit.Options{OutDir: work, RuntimePath: rt, BinName: bin, ShadowStack: cfg.ShadowStack}); err != nil {
+	if err := emit.Crate(res, emit.Options{OutDir: work, RuntimePath: rt, BinName: bin, GcTorture: cfg.GcTorture}); err != nil {
 		return err
 	}
 

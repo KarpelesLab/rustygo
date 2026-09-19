@@ -1,80 +1,150 @@
 //! Go strings: immutable byte sequences, not necessarily UTF-8.
 
 use crate::ops;
+use crate::trace::{Trace, Tracer};
 use crate::value::GoValue;
-use alloc::boxed::Box;
-use alloc::vec::Vec;
 
-/// A Go `string`.
+/// A Go `string`: a pointer and a length, over bytes that are either a
+/// literal in the binary or an array on the heap.
 ///
-/// **M0 status:** there is no collector yet, so a string is a leaked byte
-/// slice and concatenation leaks. M1 moves the bytes under the collector as
-/// `GoStr { data: Gc<[u8]>, off, len }` (DESIGN §2) behind the same API.
-#[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Debug)]
-pub struct GoStr(&'static [u8]);
+/// A substring points into the middle of those bytes; the collector resolves
+/// such an interior pointer back to its object, and skips addresses that are
+/// not on the heap (DESIGN §3).
+#[derive(Clone, Copy)]
+pub struct GoStr {
+    ptr: *const u8,
+    len: usize,
+}
+
+impl Trace for GoStr {
+    #[inline]
+    fn trace(&self, t: &mut Tracer<'_>) {
+        t.edge(self.ptr as usize);
+    }
+}
+
+impl PartialEq for GoStr {
+    fn eq(&self, other: &Self) -> bool {
+        self.bytes() == other.bytes()
+    }
+}
+
+impl Eq for GoStr {}
+
+impl PartialOrd for GoStr {
+    fn partial_cmp(&self, other: &Self) -> Option<core::cmp::Ordering> {
+        Some(self.cmp(other))
+    }
+}
+
+impl Ord for GoStr {
+    fn cmp(&self, other: &Self) -> core::cmp::Ordering {
+        self.bytes().cmp(other.bytes())
+    }
+}
+
+impl core::hash::Hash for GoStr {
+    fn hash<H: core::hash::Hasher>(&self, h: &mut H) {
+        self.bytes().hash(h);
+    }
+}
+
+impl core::fmt::Debug for GoStr {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        core::fmt::Debug::fmt(&alloc::string::String::from_utf8_lossy(self.bytes()), f)
+    }
+}
 
 impl GoValue for GoStr {
     #[inline]
     fn zero() -> Self {
-        GoStr(b"")
+        GoStr::lit(b"")
     }
 }
 
 impl GoStr {
-    /// A string constant.
+    /// A string constant: bytes in the binary, which the collector ignores.
     #[inline]
     pub const fn lit(b: &'static [u8]) -> Self {
-        GoStr(b)
+        GoStr {
+            ptr: b.as_ptr(),
+            len: b.len(),
+        }
     }
 
-    /// The bytes.
+    /// The bytes, borrowed for as long as this handle is.
     #[inline]
-    pub fn bytes(self) -> &'static [u8] {
-        self.0
+    pub fn bytes(&self) -> &[u8] {
+        // SAFETY: `ptr`/`len` describe either a literal in the binary or a
+        // live heap array; generated code keeps the string rooted while it
+        // holds it (DESIGN §3).
+        unsafe { core::slice::from_raw_parts(self.ptr, self.len) }
     }
 
     /// `len(s)`.
     #[inline]
     pub fn len(self) -> i64 {
-        self.0.len() as i64
+        self.len as i64
     }
 
     /// `s == ""`.
     #[inline]
     pub fn is_empty(self) -> bool {
-        self.0.is_empty()
+        self.len == 0
+    }
+
+    /// A string of `len` bytes, written by `fill`. A safe point: it may
+    /// collect before it allocates.
+    fn build(len: usize, fill: impl FnOnce(&mut [u8])) -> GoStr {
+        if len == 0 {
+            return GoStr::lit(b"");
+        }
+        GoStr {
+            ptr: crate::heap::allocate_bytes(len, fill).as_ptr(),
+            len,
+        }
     }
 
     /// `a + b`.
     pub fn concat(self, other: GoStr) -> GoStr {
-        if self.0.is_empty() {
+        if self.is_empty() {
             return other;
         }
-        if other.0.is_empty() {
+        if other.is_empty() {
             return self;
         }
-        let mut v = Vec::with_capacity(self.0.len() + other.0.len());
-        v.extend_from_slice(self.0);
-        v.extend_from_slice(other.0);
-        GoStr(Box::leak(v.into_boxed_slice()))
+        let (a, b) = (self, other);
+        GoStr::build(a.len + b.len, |out| {
+            // Written straight into the object: no temporary copy. Reading
+            // `a` and `b` here is safe because the caller keeps both rooted
+            // across the allocation (DESIGN §3).
+            out[..a.len].copy_from_slice(a.bytes());
+            out[a.len..].copy_from_slice(b.bytes());
+        })
     }
 
     /// `s[i]`, for a signed index.
     #[inline]
     pub fn at(self, i: i64) -> u8 {
-        self.0[ops::index(i, self.0.len())]
+        self.bytes()[ops::index(i, self.len)]
     }
 
     /// `s[i]`, for an unsigned index.
     #[inline]
     pub fn at_u(self, i: u64) -> u8 {
-        self.0[ops::index_u(i, self.0.len())]
+        self.bytes()[ops::index_u(i, self.len)]
     }
 
-    /// `s[lo:hi]`; a missing `hi` means `len(s)`.
+    /// `s[lo:hi]`; a missing `hi` means `len(s)`. The result shares the
+    /// bytes, as in Go.
     pub fn slice(self, lo: i64, hi: Option<i64>) -> GoStr {
-        let (lo, hi) = ops::slice_bounds(lo, hi, self.0.len());
-        GoStr(&self.0[lo..hi])
+        let (lo, hi) = ops::slice_bounds(lo, hi, self.len);
+        GoStr {
+            // SAFETY: `lo <= hi <= len`, so this stays inside the bytes (one
+            // past the end is allowed).
+            ptr: unsafe { self.ptr.add(lo) },
+            len: hi - lo,
+        }
     }
 
     /// `string(r)` for an integer `r`: its UTF-8 encoding, or U+FFFD if it is
@@ -86,26 +156,37 @@ impl GoStr {
             .unwrap_or(char::REPLACEMENT_CHARACTER);
         let mut buf = [0u8; 4];
         let s = c.encode_utf8(&mut buf);
-        GoStr(Box::leak(Box::from(s.as_bytes())))
+        let bytes = s.as_bytes();
+        GoStr::build(bytes.len(), |out| out.copy_from_slice(bytes))
     }
 
     /// The iterator of `for i, r := range s`.
     #[inline]
     pub fn iter(self) -> StrIter {
-        StrIter { s: self.0, i: 0 }
+        StrIter { s: self, i: 0 }
     }
 }
 
 /// State of a `for i, r := range s` loop.
 #[derive(Clone, Copy, Debug)]
 pub struct StrIter {
-    s: &'static [u8],
+    s: GoStr,
     i: usize,
 }
 
 impl GoValue for StrIter {
     fn zero() -> Self {
-        StrIter { s: b"", i: 0 }
+        StrIter {
+            s: GoStr::zero(),
+            i: 0,
+        }
+    }
+}
+
+impl Trace for StrIter {
+    #[inline]
+    fn trace(&self, t: &mut Tracer<'_>) {
+        self.s.trace(t);
     }
 }
 
@@ -113,11 +194,11 @@ impl StrIter {
     /// Advances: `(ok, index, rune)`. Invalid UTF-8 yields U+FFFD one byte at
     /// a time, as in Go.
     pub fn advance(&mut self) -> (bool, i64, i32) {
-        if self.i >= self.s.len() {
+        if self.i >= self.s.len {
             return (false, 0, 0);
         }
         let start = self.i;
-        let (r, n) = decode_rune(&self.s[start..]);
+        let (r, n) = decode_rune(&self.s.bytes()[start..]);
         self.i += n;
         (true, start as i64, r)
     }
@@ -168,9 +249,9 @@ pub fn decode_rune(p: &[u8]) -> (i32, usize) {
 mod tests {
     use super::*;
 
-    fn runes(s: &'static [u8]) -> Vec<(i64, i32)> {
+    fn runes(s: &'static [u8]) -> alloc::vec::Vec<(i64, i32)> {
         let mut it = GoStr::lit(s).iter();
-        let mut out = Vec::new();
+        let mut out = alloc::vec::Vec::new();
         loop {
             let (ok, i, r) = it.advance();
             if !ok {

@@ -20,9 +20,11 @@ type fnEmitter struct {
 	// loop is set when the body has more than one block and runs as a
 	// dispatch loop over block indices.
 	loop bool
-	// roots maps each pointer-holding value to its shadow-stack slot, when
-	// Options.ShadowStack is set.
+	// roots maps each value that must stay visible to the collector to its
+	// shadow-stack slot; cells marks those held in a `Slot` local because
+	// their references sit inside an aggregate.
 	roots map[ssa.Value]int
+	cells map[ssa.Value]bool
 }
 
 func (e *emitter) function(fn *ssa.Function) {
@@ -58,11 +60,16 @@ func (e *emitter) function(fn *ssa.Function) {
 		ret = " -> " + f.typ(res, fn.Pos())
 	}
 	fmt.Fprintf(&f.out, "\n// Go: %s\npub fn %s(%s)%s {\n", fn.String(), name, strings.Join(params, ", "), ret)
-	if e.opt.ShadowStack {
-		f.collectRoots()
-	}
+	f.collectRoots()
+	f.declare()
 	if len(f.roots) > 0 {
-		fmt.Fprintf(&f.out, "    let __roots = rustygo::gc::Frame::<%d>::new();\n    __roots.scope(|| {\n", len(f.roots))
+		fmt.Fprintf(&f.out, "    let __roots = rustygo::gc::Frame::<%d>::new();\n", len(f.roots))
+		for v, k := range f.rootsInOrder() {
+			if f.cells[v] {
+				fmt.Fprintf(&f.out, "    __roots.set_local(%d, &%s);\n", k, f.name(v))
+			}
+		}
+		f.out.WriteString("    __roots.scope(|| {\n")
 		for _, p := range fn.Params {
 			f.out.WriteString(f.rootSet(p, "    "))
 		}
@@ -75,17 +82,51 @@ func (e *emitter) function(fn *ssa.Function) {
 	m.buf.WriteString(f.out.String())
 }
 
-// rootSet records v in its shadow-stack slot, if it has one.
+// rootSet records v in its shadow-stack slot after v is assigned. Values in
+// cells need no such write: their slot tracks the cell itself.
 func (f *fnEmitter) rootSet(v ssa.Value, ind string) string {
 	k, ok := f.roots[v]
-	if !ok {
+	if !ok || f.cells[v] {
 		return ""
 	}
-	name := v.Name()
-	if p, isParam := v.(*ssa.Parameter); isParam {
-		name = f.val(p)
+	return fmt.Sprintf("%s__roots.set(%d, &%s);\n", ind, k, f.name(v))
+}
+
+// name is the Rust expression naming v's local (not its value).
+func (f *fnEmitter) name(v ssa.Value) string {
+	if p, ok := v.(*ssa.Parameter); ok {
+		for i, q := range f.fn.Params {
+			if p == q {
+				return fmt.Sprintf("a%d", i)
+			}
+		}
 	}
-	return fmt.Sprintf("%s__roots.set(%d, &%s);\n", ind, k, name)
+	return v.Name()
+}
+
+// rootsInOrder iterates the rooted values by slot, for stable output.
+func (f *fnEmitter) rootsInOrder() map[ssa.Value]int {
+	return f.roots
+}
+
+// declare writes the locals: one per SSA value, zero-initialized, because
+// rustc cannot prove definite assignment across reconstructed control flow.
+// Values that hold references inside an aggregate live in a `Slot`, so the
+// collector can trace the local where it sits.
+func (f *fnEmitter) declare() {
+	for _, b := range f.fn.Blocks {
+		for _, instr := range b.Instrs {
+			v, ok := instr.(ssa.Value)
+			if !ok || !f.hasVar(v) {
+				continue
+			}
+			if f.cells[v] {
+				fmt.Fprintf(&f.out, "    let %s: Slot<%s> = Place::new(GoValue::zero());\n", v.Name(), f.valueType(v))
+			} else {
+				fmt.Fprintf(&f.out, "    let mut %s: %s = GoValue::zero();\n", v.Name(), f.valueType(v))
+			}
+		}
+	}
 }
 
 func (f *fnEmitter) typ(t types.Type, pos token.Pos) string {
@@ -109,18 +150,6 @@ func (f *fnEmitter) errorf(pos token.Pos, format string, args ...any) {
 }
 
 func (f *fnEmitter) body() {
-	// Every SSA value is a mutable local, zero-initialized up front: with
-	// blocks dispatched from a loop, rustc cannot prove definite assignment,
-	// and every Go type has a zero value anyway.
-	for _, b := range f.fn.Blocks {
-		for _, instr := range b.Instrs {
-			v, ok := instr.(ssa.Value)
-			if !ok || !f.hasVar(v) {
-				continue
-			}
-			fmt.Fprintf(&f.out, "    let mut %s: %s = GoValue::zero();\n", v.Name(), f.valueType(v))
-		}
-	}
 	if len(f.fn.Blocks) == 1 {
 		f.block(f.fn.Blocks[0], "    ")
 		return
@@ -236,7 +265,7 @@ func (f *fnEmitter) instr(instr ssa.Instruction) string {
 		if !f.hasVar(v) {
 			return expr + ";"
 		}
-		return v.Name() + " = " + expr + ";" + strings.TrimSuffix(f.rootSet(v, " "), "\n")
+		return f.assign(v, expr)
 	}
 	switch instr := instr.(type) {
 	case *ssa.Store:
@@ -255,6 +284,14 @@ func (f *fnEmitter) instr(instr ssa.Instruction) string {
 		f.errorf(instr.Pos(), "instruction %T is not supported yet", instr)
 	}
 	return ""
+}
+
+// assign writes v's local, and records it as a root if it has a slot.
+func (f *fnEmitter) assign(v ssa.Value, expr string) string {
+	if f.cells[v] {
+		return fmt.Sprintf("%s.store(%s);", v.Name(), expr)
+	}
+	return v.Name() + " = " + expr + ";" + strings.TrimSuffix(f.rootSet(v, " "), "\n")
 }
 
 // expr returns the right-hand side for a value-producing instruction.
@@ -278,11 +315,11 @@ func (f *fnEmitter) expr(v ssa.Value) string {
 		return fmt.Sprintf("(%s).%s", f.val(v.X), f.e.types.field(v.X.Type(), v.Field, f.e, v.Pos()))
 	case *ssa.FieldAddr:
 		st := v.X.Type().Underlying().(*types.Pointer).Elem()
-		return fmt.Sprintf("Ptr::from_ref(&(%s).get().%s)", f.val(v.X), f.e.types.field(st, v.Field, f.e, v.Pos()))
+		return fmt.Sprintf("(%s).project(|p| &p.%s)", f.val(v.X), f.e.types.field(st, v.Field, f.e, v.Pos()))
 	case *ssa.IndexAddr:
 		if p, ok := v.X.Type().Underlying().(*types.Pointer); ok {
 			if arr, ok := p.Elem().Underlying().(*types.Array); ok {
-				return fmt.Sprintf("Ptr::from_ref(&(%s).get()[%s])", f.val(v.X), f.index(v.Index, arr.Len()))
+				return fmt.Sprintf("(%s).project(|a| &a[%s])", f.val(v.X), f.index(v.Index, arr.Len()))
 			}
 		}
 		f.errorf(v.Pos(), "indexing %s is not supported yet (roadmap M1)", v.X.Type())
@@ -320,7 +357,13 @@ func (f *fnEmitter) expr(v ssa.Value) string {
 			f.errorf(v.Pos(), "range over maps is not supported yet (roadmap M1)")
 			return ""
 		}
-		return v.Iter.Name() + ".advance()"
+		it := v.Iter.Name()
+		if f.cells[v.Iter] {
+			// The iterator lives in a cell so the collector can trace the
+			// string it holds; step it and put it back.
+			return fmt.Sprintf("{ let mut it = %s.load(); let r = it.advance(); %s.store(it); r }", it, it)
+		}
+		return it + ".advance()"
 	case *ssa.MakeInterface:
 		// Only reachable as a panic operand, which panic() handles itself.
 		if onlyPanicUses(v) {
@@ -593,6 +636,9 @@ func (f *fnEmitter) val(val ssa.Value) string {
 		f.errorf(v.Pos(), "closures are not supported yet (roadmap M1)")
 		return "()"
 	case ssa.Instruction:
+		if f.cells[val] {
+			return val.Name() + ".load()"
+		}
 		return val.Name()
 	}
 	f.errorf(val.Pos(), "operand %T is not supported", val)

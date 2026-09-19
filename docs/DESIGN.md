@@ -117,11 +117,27 @@ runtime's accessor API has to be sound for *any* code the emitter produces, so:
 * **Roots:** generated functions maintain a shadow stack of `Gc` handles. Cheap
   push/pop, no stack maps, no `unsafe` in generated code. Escape analysis keeps
   non-escaping values out of it entirely.
-* **Safe points** at every call and every loop back-edge — enough for a
-  stop-the-world collector that never interrupts a thread mid-object.
-* **Phase 1:** stop-the-world mark-sweep, one heap, a global lock on allocation.
-  Correct and boring.
-* **Phase 2:** per-thread allocation buffers, size-class allocator, then
+* **Safe points** at every call, every allocation and every loop back-edge —
+  enough for a stop-the-world collector that never interrupts a thread
+  mid-object. A value needs a root slot only if it is live across one of
+  these, or is handed to one; a liveness pass decides
+  (`internal/emit/roots.go`).
+* **Objects are entries in a table**, not headers in front of the payload:
+  address range, layout, mark bit and trace function. The table is what makes
+  interior pointers work — `&s.f`, `&a[i]` and a substring are ordinary
+  one-word pointers, and marking resolves any address back to its object by
+  binary search. Words that resolve to nothing (a string literal in the
+  binary, nil, a non-heap address) are skipped, so no `Ptr` needs a second
+  word for its base.
+* **Phase 1 (M1, implemented):** stop-the-world mark-sweep, one heap, one
+  allocation per object through the system allocator. Correct and boring, and
+  measurably so: the table costs a per-object entry and a sort per
+  collection ([§11](#11-performance-expectations)).
+* **GC torture** (`RUSTYGO_GCTORTURE=1`, the runtime's `gc-torture` feature)
+  collects at every allocation. The whole differential suite passes under it,
+  which is what checks that the emitted roots are complete.
+* **Phase 2 (M6):** a size-class allocator with per-thread buffers, which
+  also replaces the table's binary search with address arithmetic, then
   generational or incremental marking if measurements demand it. Incremental
   marking needs a write barrier, which is why every pointer store goes through
   a single emitter path from the start.
@@ -308,6 +324,21 @@ recovery path, in order of expected payoff:
 Target to beat before claiming anything: gc Go on the same benchmark set.
 There is no slower floor to hide behind — WASM is not a fallback here, so
 "within a stated factor of gc Go" is the only measure that counts.
+
+### Measured in M1
+
+With the collector in ([BENCHMARKS.md](BENCHMARKS.md), linux/amd64):
+
+* Code that does not allocate is unchanged: scalar 0.96×, calls 0.58×.
+* Pointer chasing is 1.33× gc, and a million-node list costs 63 MiB against
+  gc's 21 MiB. Both are the M1 allocator: one `malloc` and one table entry
+  per object, against gc's size-classed spans.
+* String building is 4.4× gc — 2 million short-lived allocations, each with a
+  threshold check, a table push, and a share of the sort every collection
+  does. Memory is bounded now, which is the point of M1: 72 MiB against M0's
+  850 MiB for the same program.
+* The fix for both is the phase-2 allocator (§3), not the code generator. M1's
+  bar is correctness under GC torture; M6's is the 2× target.
 
 ### Measured in M0
 

@@ -104,7 +104,7 @@ func (r *typeReg) structInfo(st *types.Struct, hint string, e *emitter, pos toke
 		si.fields = append(si.fields, fieldNS.claim(name))
 	}
 
-	var def, place, zero, newP, load, store bytes.Buffer
+	var def, place, zero, newP, load, store, trace bytes.Buffer
 	for i, f := range si.fields {
 		ft := st.Field(i).Type()
 		fmt.Fprintf(&def, "    pub %s: %s,\n", f, r.rust(ft, e, pos))
@@ -113,6 +113,9 @@ func (r *typeReg) structInfo(st *types.Struct, hint string, e *emitter, pos toke
 		fmt.Fprintf(&newP, " %s: Place::new(v.%s),", f, f)
 		fmt.Fprintf(&load, " %s: self.%s.load(),", f, f)
 		fmt.Fprintf(&store, "        self.%s.store(v.%s);\n", f, f)
+		if containsRef(ft) {
+			fmt.Fprintf(&trace, "        self.%s.trace(t);\n", f)
+		}
 	}
 	n := si.name
 	fmt.Fprintf(&r.buf, `
@@ -141,8 +144,19 @@ impl Place for %s_P {
     fn store(&self, v: %s) {
 %s    }
 }
+
+impl Trace for %s {
+    fn trace(&self, t: &mut Tracer<'_>) {
+%s    }
+}
+
+impl Trace for %s_P {
+    fn trace(&self, t: &mut Tracer<'_>) {
+%s    }
+}
 `, types.TypeString(st, nil), n, def.String(), n, n, zero.String(),
-		n, place.String(), n, n, n, n, newP.String(), n, n, load.String(), n, store.String())
+		n, place.String(), n, n, n, n, newP.String(), n, n, load.String(), n, store.String(),
+		n, trace.String(), n, trace.String())
 	return si
 }
 

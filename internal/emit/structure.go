@@ -157,16 +157,14 @@ func (f *fnEmitter) phiMoves(src, dst *ssa.BasicBlock, ind string) string {
 	idx := predIndex(dst, src)
 	var b strings.Builder
 	if len(phis) == 1 {
-		fmt.Fprintf(&b, "%s%s = %s;\n", ind, phis[0].Name(), f.val(phis[0].Edges[idx]))
-		b.WriteString(f.rootSet(phis[0], ind))
+		fmt.Fprintf(&b, "%s%s\n", ind, f.assign(phis[0], f.val(phis[0].Edges[idx])))
 		return b.String()
 	}
 	for i, phi := range phis {
 		fmt.Fprintf(&b, "%slet e%d = %s;\n", ind, i, f.val(phi.Edges[idx]))
 	}
 	for i, phi := range phis {
-		fmt.Fprintf(&b, "%s%s = e%d;\n", ind, phi.Name(), i)
-		b.WriteString(f.rootSet(phi, ind))
+		fmt.Fprintf(&b, "%s%s\n", ind, f.assign(phi, fmt.Sprintf("e%d", i)))
 	}
 	return b.String()
 }
