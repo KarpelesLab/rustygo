@@ -690,6 +690,28 @@ func (f *fnEmitter) unop(v *ssa.UnOp) string {
 func (f *fnEmitter) convert(v *ssa.Convert) string {
 	from, to := basicInfo(v.X.Type()), basicInfo(v.Type())
 	x := f.val(v.X)
+	// unsafe.Pointer conversions. The one back to a typed pointer is where
+	// generated code says `unsafe`: it reinterprets memory as gc would, on
+	// the Go program's own authority (DESIGN §7).
+	if isUnsafePointer(v.Type()) {
+		switch {
+		case isUnsafePointer(v.X.Type()):
+			return x
+		case isPointer(v.X.Type()):
+			return fmt.Sprintf("UPtr::from_ptr(%s)", x)
+		case from != nil && from.Info()&types.IsInteger != 0:
+			return fmt.Sprintf("UPtr::from_addr(%s as u64)", x)
+		}
+	}
+	if isUnsafePointer(v.X.Type()) {
+		switch {
+		case isPointer(v.Type()):
+			elem := v.Type().Underlying().(*types.Pointer).Elem()
+			return fmt.Sprintf("unsafe { (%s).to_ptr::<%s>() }", x, f.place(elem, v.Pos()))
+		case to != nil && to.Info()&types.IsInteger != 0:
+			return fmt.Sprintf("((%s).addr() as %s)", x, basicTypes[to.Kind()])
+		}
+	}
 	// string <-> []byte and []rune.
 	if s, ok := v.Type().Underlying().(*types.Slice); ok && isString(v.X.Type()) {
 		if eb := basicInfo(s.Elem()); eb != nil {
@@ -825,6 +847,17 @@ func (f *fnEmitter) builtin(b *ssa.Builtin, c *ssa.CallCommon, resultType types.
 				return fmt.Sprintf("(%s).len()", args[0])
 			}
 		}
+	// Package unsafe's builtins.
+	case "Add":
+		return fmt.Sprintf("(%s).offset(%s as i64)", args[0], args[1])
+	case "Slice":
+		return fmt.Sprintf("unsafe { Slice::from_raw(%s, %s as i64) }", args[0], args[1])
+	case "SliceData":
+		return fmt.Sprintf("(%s).data_ptr()", args[0])
+	case "String":
+		return fmt.Sprintf("unsafe { GoStr::from_raw(%s, %s as i64) }", args[0], args[1])
+	case "StringData":
+		return fmt.Sprintf("(%s).data_ptr()", args[0])
 	case "ssa:wrapnilchk":
 		// go/ssa's nil check before a promoted field or method reaches
 		// through an embedded pointer.
@@ -890,6 +923,9 @@ func (e *emitter) printArgOf(t types.Type, x string, pos token.Pos) string {
 		case info&types.IsComplex != 0:
 			return fmt.Sprintf("rustygo::print::Arg::Complex128((%s).re, (%s).im)", x, x)
 		}
+	}
+	if b, ok := u.(*types.Basic); ok && b.Kind() == types.UnsafePointer {
+		return fmt.Sprintf("rustygo::print::Arg::Pointer((%s).addr())", x)
 	}
 	switch u.(type) {
 	case *types.Pointer, *types.Signature:
@@ -1024,6 +1060,16 @@ func byteString(s string) string {
 	}
 	b.WriteByte('"')
 	return b.String()
+}
+
+func isUnsafePointer(t types.Type) bool {
+	b := basicInfo(t)
+	return b != nil && b.Kind() == types.UnsafePointer
+}
+
+func isPointer(t types.Type) bool {
+	_, ok := t.Underlying().(*types.Pointer)
+	return ok
 }
 
 func isString(t types.Type) bool {

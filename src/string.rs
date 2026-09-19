@@ -63,6 +63,16 @@ impl GoValue for GoStr {
 }
 
 impl GoStr {
+    /// A string from its two words.
+    ///
+    /// # Safety
+    ///
+    /// `ptr` must point at `len` readable bytes, alive as long as the string.
+    #[inline]
+    pub(crate) unsafe fn from_parts(ptr: *const u8, len: usize) -> Self {
+        GoStr { ptr, len }
+    }
+
     /// A string constant: bytes in the binary, which the collector ignores.
     #[inline]
     pub const fn lit(b: &'static [u8]) -> Self {

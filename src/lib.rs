@@ -52,4 +52,5 @@ pub mod rt;
 pub mod slice;
 pub mod string;
 pub mod trace;
+pub mod unsafe_ptr;
 pub mod value;

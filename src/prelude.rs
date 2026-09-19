@@ -10,4 +10,5 @@ pub use crate::place::{Place, Ptr, Slot};
 pub use crate::slice::Slice;
 pub use crate::string::{GoStr, StrIter};
 pub use crate::trace::{Trace, Tracer};
+pub use crate::unsafe_ptr::UPtr;
 pub use crate::value::GoValue;

@@ -181,7 +181,7 @@ func holdsRef(t types.Type) bool {
 	case *types.Pointer, *types.Slice, *types.Signature, *types.Interface, *types.Map:
 		return true
 	case *types.Basic:
-		return u.Info()&types.IsString != 0
+		return u.Info()&types.IsString != 0 || u.Kind() == types.UnsafePointer
 	}
 	return false
 }

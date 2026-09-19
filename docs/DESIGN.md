@@ -221,15 +221,25 @@ runtime's accessor API has to be sound for *any* code the emitter produces, so:
 
 ## 7. `unsafe.Pointer` and package `unsafe`
 
-Supported, narrowly:
+Supported, as gc supports it (revised in M1; the first draft rejected
+reinterpretation):
 
-* `unsafe.Sizeof`/`Alignof`/`Offsetof` — compile-time constants.
-* `unsafe.Slice`, `unsafe.String`, `unsafe.SliceData`, `unsafe.StringData` —
-  expressible on the object model, so they work.
-* Round-tripping a pointer through `uintptr` arithmetic to reach another object,
-  or reinterpreting a struct as unrelated bytes, is rejected at compile time
-  with a clear error. This breaks some packages; that is the price of a safe
-  generated-code guarantee.
+* **Places have gc's bytes.** Generated structs are `#[repr(C)]` — Go's struct
+  layout — in both their value and place forms, and a `Slot` is transparent
+  over its value. So a place has exactly the layout gc would give the same
+  variable, and `unsafe.Sizeof`/`Alignof`/`Offsetof`, which go/types computes
+  with gc's rules, describe it truthfully. Pointers, strings, slices, maps and
+  interfaces have gc's sizes too; only func values differ (two words, not one).
+* **`unsafe.Pointer` is an address** (`UPtr`). Converting it back to a typed
+  pointer reinterprets memory as gc does — `math.Float64bits` is
+  `*(*uint64)(unsafe.Pointer(&f))` — and pointer arithmetic through `uintptr`
+  works, the collector being non-moving. The collector traces an
+  `unsafe.Pointer` like any pointer; a `uintptr` keeps nothing alive, as Go's
+  rules say.
+* `unsafe.Add`, `Slice`, `SliceData`, `String` and `StringData` work.
+* **The honest cost:** generated code contains `unsafe` exactly where the Go
+  source imports package `unsafe`, and nowhere else. Such code is as safe as
+  Go's own `unsafe` contract makes it, under rustygo as under gc.
 
 ## 8. Standard library
 

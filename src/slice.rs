@@ -47,6 +47,16 @@ impl<P> Trace for Slice<P> {
 }
 
 impl<P> Slice<P> {
+    /// A slice from its three words.
+    ///
+    /// # Safety
+    ///
+    /// `ptr` must point at `cap` consecutive places, and `len <= cap`.
+    #[inline]
+    pub(crate) unsafe fn from_parts(ptr: *mut P, len: usize, cap: usize) -> Self {
+        Slice { ptr, len, cap }
+    }
+
     /// `len(s)`.
     #[inline]
     pub fn len(self) -> i64 {

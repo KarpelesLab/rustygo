@@ -394,6 +394,17 @@ impl GoKey for crate::string::GoStr {
     }
 }
 
+impl GoKey for crate::unsafe_ptr::UPtr {
+    #[inline]
+    fn go_hash(&self) -> u64 {
+        mix(0, self.addr())
+    }
+    #[inline]
+    fn go_eq(&self, other: &Self) -> bool {
+        self == other
+    }
+}
+
 impl<P> GoKey for crate::place::Ptr<P> {
     #[inline]
     fn go_hash(&self) -> u64 {

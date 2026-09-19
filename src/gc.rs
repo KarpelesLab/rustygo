@@ -36,6 +36,13 @@ impl<P> Root for Ptr<P> {
     }
 }
 
+impl Root for crate::unsafe_ptr::UPtr {
+    #[inline]
+    fn root_word(&self) -> usize {
+        self.addr() as usize
+    }
+}
+
 impl Root for crate::func::Env {
     #[inline]
     fn root_word(&self) -> usize {

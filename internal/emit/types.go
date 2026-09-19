@@ -179,9 +179,11 @@ func (r *typeReg) structInfo(st *types.Struct, hint string, e *emitter, pos toke
 	n := si.name
 	// Only a comparable struct gets equality: Go rejects `==` on a struct
 	// holding a slice, map or func, and so does the generated type.
-	derive := "#[derive(Clone, Copy)]"
+	// C layout on both forms: that is Go's struct layout, so an
+	// unsafe.Pointer reinterpretation sees the bytes gc would (DESIGN §7).
+	derive := "#[derive(Clone, Copy)]\n#[repr(C)]"
 	if types.Comparable(st) {
-		derive = "#[derive(Clone, Copy, PartialEq)]"
+		derive = "#[derive(Clone, Copy, PartialEq)]\n#[repr(C)]"
 	}
 	fmt.Fprintf(&r.buf, `
 // Go: %s
@@ -195,6 +197,7 @@ impl GoValue for %s {
     }
 }
 
+#[repr(C)]
 pub struct %s_P {
 %s}
 
@@ -246,23 +249,24 @@ impl GoKey for %s {
 }
 
 var basicTypes = map[types.BasicKind]string{
-	types.Bool:       "bool",
-	types.Int:        "i64",
-	types.Int8:       "i8",
-	types.Int16:      "i16",
-	types.Int32:      "i32",
-	types.Int64:      "i64",
-	types.Uint:       "u64",
-	types.Uint8:      "u8",
-	types.Uint16:     "u16",
-	types.Uint32:     "u32",
-	types.Uint64:     "u64",
-	types.Uintptr:    "u64",
-	types.Float32:    "f32",
-	types.Float64:    "f64",
-	types.Complex64:  "Complex64",
-	types.Complex128: "Complex128",
-	types.String:     "GoStr",
+	types.Bool:          "bool",
+	types.Int:           "i64",
+	types.Int8:          "i8",
+	types.Int16:         "i16",
+	types.Int32:         "i32",
+	types.Int64:         "i64",
+	types.Uint:          "u64",
+	types.Uint8:         "u8",
+	types.Uint16:        "u16",
+	types.Uint32:        "u32",
+	types.Uint64:        "u64",
+	types.Uintptr:       "u64",
+	types.Float32:       "f32",
+	types.Float64:       "f64",
+	types.Complex64:     "Complex64",
+	types.Complex128:    "Complex128",
+	types.UnsafePointer: "UPtr",
+	types.String:        "GoStr",
 }
 
 // basicInfo returns the underlying basic type of t, or nil.

@@ -46,7 +46,9 @@ pub trait Place: 'static {
 }
 
 /// The place for a scalar, string, pointer or any other value accessed as a
-/// whole.
+/// whole. Transparent over its value, so a place has exactly the bytes gc
+/// would give that variable, which `unsafe.Pointer` code relies on.
+#[repr(transparent)]
 pub struct Slot<T>(Cell<T>);
 
 impl<T: GoValue> Place for Slot<T> {
