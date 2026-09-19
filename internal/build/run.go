@@ -16,12 +16,13 @@ const MaxTestMemory = 8 << 30
 
 // TestCommand runs a rustygo-built binary under MaxTestMemory. The limit is
 // applied through the shell's `ulimit -v`, so the harness itself is not
-// constrained; where there is no such shell (Windows) the binary runs
-// unconstrained.
+// constrained. It is best-effort: macOS does not enforce an address-space
+// limit and refuses to set one, and Windows has no such shell, so there the
+// binary runs unconstrained rather than not at all.
 func TestCommand(ctx context.Context, bin string) *exec.Cmd {
 	if runtime.GOOS == "windows" {
 		return exec.CommandContext(ctx, bin)
 	}
-	script := fmt.Sprintf(`ulimit -v %d && exec "$0"`, MaxTestMemory/1024)
+	script := fmt.Sprintf(`ulimit -v %d 2>/dev/null; exec "$0"`, MaxTestMemory/1024)
 	return exec.CommandContext(ctx, "/bin/sh", "-c", script, bin)
 }
