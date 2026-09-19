@@ -146,7 +146,9 @@ func Binary(res *load.Result, output string, cfg Config) error {
 
 	target := filepath.Join(cache, "target")
 	cmd := exec.Command("cargo", "build", "--release", "--quiet", "--manifest-path", filepath.Join(work, "Cargo.toml"))
-	cmd.Env = append(os.Environ(), "CARGO_TARGET_DIR="+target)
+	// A generous stack for rustc's compiler thread: generated code can be
+	// deeper than what hand-written Rust usually exercises.
+	cmd.Env = append(os.Environ(), "CARGO_TARGET_DIR="+target, "RUST_MIN_STACK=268435456")
 	var stderr bytes.Buffer
 	cmd.Stderr = &stderr
 	cmd.Stdout = &stderr

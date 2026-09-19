@@ -241,6 +241,19 @@ impl<P: Place> Slice<P> {
 }
 
 impl Slice<crate::place::Slot<u8>> {
+    /// Runs `f` over the bytes in place, for the byte-string routines gc
+    /// writes in assembly (`internal/bytealg`).
+    pub fn with_bytes<R>(self, f: impl FnOnce(&[u8]) -> R) -> R {
+        if self.len == 0 {
+            return f(&[]);
+        }
+        heap::check_live(self.ptr as usize);
+        // SAFETY: a `Slot<u8>` is transparent over a `Cell<u8>`, which is a
+        // byte; the slice's `len` places are in bounds; and nothing writes
+        // them while `f` only reads (one goroutine in M1).
+        f(unsafe { core::slice::from_raw_parts(self.ptr as *const u8, self.len) })
+    }
+
     /// `[]byte(s)`: a fresh array holding the string's bytes.
     pub fn of_str(s: crate::string::GoStr) -> Self {
         let out: Self = Slice::make(s.len(), s.len());

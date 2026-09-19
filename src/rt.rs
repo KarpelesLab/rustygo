@@ -3,6 +3,25 @@
 use crate::panic::GoPanic;
 use std::io::Write;
 
+/// gc's `fatal error: ` report, then exit status 2: for failures a program
+/// cannot recover from, such as every goroutine being blocked.
+pub fn fatal(msg: &[u8]) -> ! {
+    let mut err = std::io::stderr().lock();
+    let _ = err.write_all(b"fatal error: ");
+    let _ = err.write_all(msg);
+    let _ = err.write_all(b"\n");
+    std::process::exit(2)
+}
+
+/// The monotonic clock in nanoseconds, from an arbitrary origin.
+pub fn nanotime() -> i64 {
+    static START: std::sync::OnceLock<std::time::Instant> = std::sync::OnceLock::new();
+    START
+        .get_or_init(std::time::Instant::now)
+        .elapsed()
+        .as_nanos() as i64
+}
+
 /// Runs a Go program: the package initializers, then `main.main`, then exit.
 ///
 /// The generated `fn main()` is a single call to this. An unrecovered Go panic

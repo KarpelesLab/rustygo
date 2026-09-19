@@ -190,6 +190,13 @@ impl Iface {
         }
     }
 
+    /// The address of the dynamic type's descriptor, or 0 for nil: how
+    /// reflection refers to a type.
+    pub fn desc_addr(self) -> u64 {
+        self.desc
+            .map_or(0, |d| d as *const TypeDesc as usize as u64)
+    }
+
     /// `x == nil`.
     #[inline]
     pub fn is_nil(self) -> bool {
@@ -297,4 +304,22 @@ impl Iface {
         }
         self
     }
+}
+
+/// The descriptor at an address [`Iface::desc_addr`] produced.
+fn desc_at(p: crate::unsafe_ptr::UPtr) -> &'static TypeDesc {
+    assert!(p.addr() != 0, "reflection on a nil type");
+    // SAFETY: the address came from `desc_addr`, which takes it from a
+    // `&'static TypeDesc`, and descriptors are statics that never move.
+    unsafe { &*(p.addr() as usize as *const TypeDesc) }
+}
+
+/// Whether values of the type can be compared with `==`.
+pub fn desc_comparable(p: crate::unsafe_ptr::UPtr) -> bool {
+    desc_at(p).equal.is_some()
+}
+
+/// The type's name as Go prints it.
+pub fn desc_name(p: crate::unsafe_ptr::UPtr) -> crate::string::GoStr {
+    crate::string::GoStr::lit(desc_at(p).name.as_bytes())
 }

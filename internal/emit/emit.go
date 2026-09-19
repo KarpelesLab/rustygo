@@ -48,22 +48,39 @@ type Options struct {
 }
 
 // Crate writes the Rust crate for the single main package in res.
+//
+// It runs the emitter twice: the first run finds which package-level
+// variables anything outside initialization reads, so the second can skip
+// building the rest (deadinit.go).
 func Crate(res *load.Result, opt Options) error {
+	first, err := run(res, nil)
+	if err != nil {
+		return err
+	}
+	e, err := run(res, first.readGlobals)
+	if err != nil {
+		return err
+	}
+	return e.write(opt, e.initPath, e.mainPath)
+}
+
+// run emits the whole program into memory. liveGlobals, when set, lets
+// package initializers skip variables nothing else reads.
+func run(res *load.Result, liveGlobals map[*ssa.Global]bool) (*emitter, error) {
 	var mainPkg *ssa.Package
 	for _, p := range res.Pkgs {
 		if p != nil && p.Pkg.Name() == "main" {
 			if mainPkg != nil {
-				return errors.New("more than one main package")
+				return nil, errors.New("more than one main package")
 			}
 			mainPkg = p
 		}
 	}
 	if mainPkg == nil {
-		return errors.New("no main package")
+		return nil, errors.New("no main package")
 	}
 
 	e := &emitter{
-		opt:     opt,
 		res:     res,
 		fset:    res.Prog.Fset,
 		modules: map[*ssa.Package]*module{},
@@ -72,22 +89,25 @@ func Crate(res *load.Result, opt Options) error {
 		globals: map[*ssa.Global]string{},
 		envs:    map[*ssa.Function]*types.Struct{},
 		types:   newTypeReg(),
+
+		liveGlobals: liveGlobals,
+		readGlobals: map[*ssa.Global]bool{},
 	}
-	initPath := e.fnPath(mainPkg.Func("init"))
+	e.initPath = e.fnPath(mainPkg.Func("init"))
 	mainFn := mainPkg.Func("main")
 	if mainFn == nil {
-		return errors.New("main package has no func main")
+		return nil, errors.New("main package has no func main")
 	}
-	mainPath := e.fnPath(mainFn)
+	e.mainPath = e.fnPath(mainFn)
 	for len(e.queue) > 0 {
 		fn := e.queue[0]
 		e.queue = e.queue[1:]
 		e.emitFunction(fn)
 	}
 	if len(e.errs) > 0 {
-		return e.err()
+		return nil, e.err()
 	}
-	return e.write(opt, initPath, mainPath)
+	return e, nil
 }
 
 // emitFunction emits fn, turning a crash into an ordinary error naming the
@@ -102,6 +122,13 @@ func (e *emitter) emitFunction(fn *ssa.Function) {
 }
 
 type emitter struct {
+	initPath, mainPath string
+	// liveGlobals is the previous run's readGlobals, if any: the globals
+	// package initializers must still build. readGlobals collects, during
+	// this run, the globals read outside package initializers.
+	liveGlobals map[*ssa.Global]bool
+	readGlobals map[*ssa.Global]bool
+
 	opt     Options
 	res     *load.Result
 	fset    *token.FileSet

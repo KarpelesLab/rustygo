@@ -280,7 +280,9 @@ impl RuntimeError {
                 format!("slice bounds out of range [{low}:{high}]")
             }
             RuntimeError::UnsafeSliceLen => String::from("unsafe.Slice: len out of range"),
-            RuntimeError::UnsafeSliceNil => String::from("unsafe.Slice: ptr is nil and len is not zero"),
+            RuntimeError::UnsafeSliceNil => {
+                String::from("unsafe.Slice: ptr is nil and len is not zero")
+            }
             RuntimeError::UnsafeStringLen => String::from("unsafe.String: len out of range"),
             RuntimeError::NilMapWrite
             | RuntimeError::UnhashableKey { .. }

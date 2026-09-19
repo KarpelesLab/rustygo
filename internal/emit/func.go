@@ -28,6 +28,9 @@ type fnEmitter struct {
 	// hasDefers is set when the function defers, which wraps its body and
 	// gives the defer list a root slot.
 	hasDefers bool
+	// dead holds a package initializer's instructions that only build
+	// variables nothing reads (deadinit.go); they are not emitted.
+	dead map[ssa.Instruction]bool
 }
 
 func (e *emitter) function(fn *ssa.Function) {
@@ -40,7 +43,7 @@ func (e *emitter) function(fn *ssa.Function) {
 	}
 
 	if fn.Blocks == nil {
-		e.errorf(fn.Pos(), "%s has no Go body (assembly or linkname), not supported yet", fn)
+		e.bodyless(fn, name, m)
 		return
 	}
 
@@ -58,6 +61,9 @@ func (e *emitter) function(fn *ssa.Function) {
 		ret = " -> " + f.typ(res, fn.Pos())
 	}
 	fmt.Fprintf(&f.out, "\n// Go: %s\npub fn %s(%s)%s {\n", fn.String(), name, strings.Join(params, ", "), ret)
+	if isPackageInit(fn) && e.liveGlobals != nil {
+		f.dead = deadInit(fn, e.liveGlobals)
+	}
 	f.collectRoots()
 	f.hasDefers = hasDefers(fn)
 	if len(fn.FreeVars) > 0 {
@@ -144,7 +150,22 @@ func (f *fnEmitter) rootsInOrder() map[ssa.Value]int {
 // rustc cannot prove definite assignment across reconstructed control flow.
 // Values that hold references inside an aggregate live in a `Slot`, so the
 // collector can trace the local where it sits.
+//
+// They are declared a group at a time, one `let` per group: in debug info
+// every `let` opens a scope nested inside the previous one, and a package
+// initializer with thousands of values (internal/strconv's tables) nested
+// deep enough to overflow LLVM's stack.
 func (f *fnEmitter) declare() {
+	const group = 64
+	var names, typs, inits []string
+	flush := func() {
+		if len(names) == 0 {
+			return
+		}
+		fmt.Fprintf(&f.out, "    let (%s,): (%s,) = (%s,);\n",
+			strings.Join(names, ", "), strings.Join(typs, ", "), strings.Join(inits, ", "))
+		names, typs, inits = names[:0], typs[:0], inits[:0]
+	}
 	for _, b := range f.fn.Blocks {
 		for _, instr := range b.Instrs {
 			v, ok := instr.(ssa.Value)
@@ -152,12 +173,20 @@ func (f *fnEmitter) declare() {
 				continue
 			}
 			if f.cells[v] {
-				fmt.Fprintf(&f.out, "    let %s: Slot<%s> = Place::new(GoValue::zero());\n", v.Name(), f.valueType(v))
+				names = append(names, v.Name())
+				typs = append(typs, "Slot<"+f.valueType(v)+">")
+				inits = append(inits, "Place::new(GoValue::zero())")
 			} else {
-				fmt.Fprintf(&f.out, "    let mut %s: %s = GoValue::zero();\n", v.Name(), f.valueType(v))
+				names = append(names, "mut "+v.Name())
+				typs = append(typs, f.valueType(v))
+				inits = append(inits, "GoValue::zero()")
+			}
+			if len(names) == group {
+				flush()
 			}
 		}
 	}
+	flush()
 }
 
 func (f *fnEmitter) typ(t types.Type, pos token.Pos) string {
@@ -206,6 +235,9 @@ func (f *fnEmitter) body() {
 
 // hasVar reports whether v gets a local.
 func (f *fnEmitter) hasVar(v ssa.Value) bool {
+	if instr, ok := v.(ssa.Instruction); ok && f.dead[instr] {
+		return false
+	}
 	if t, ok := v.Type().(*types.Tuple); ok && t.Len() == 0 {
 		return false
 	}
@@ -306,6 +338,9 @@ func (f *fnEmitter) ret(r *ssa.Return) string {
 
 // instr returns the statement for a non-terminator instruction.
 func (f *fnEmitter) instr(instr ssa.Instruction) string {
+	if f.dead[instr] {
+		return ""
+	}
 	if v, ok := instr.(ssa.Value); ok {
 		if deadLoad(v) {
 			return ""
@@ -873,7 +908,7 @@ func (f *fnEmitter) builtin(b *ssa.Builtin, c *ssa.CallCommon, resultType types.
 		return fmt.Sprintf("(%s).append_slice(%s)", args[0], args[1])
 	case "copy":
 		if isString(c.Args[1].Type()) {
-			return fmt.Sprintf("(%s).copy_from(Slice::of_str(%s))", args[0], args[1])
+			return fmt.Sprintf("(%s).copy_from(Slice::<Slot<u8>>::of_str(%s))", args[0], args[1])
 		}
 		return fmt.Sprintf("(%s).copy_from(%s)", args[0], args[1])
 	case "min", "max":
@@ -960,6 +995,9 @@ func (f *fnEmitter) val(val ssa.Value) string {
 			}
 		}
 	case *ssa.Global:
+		if !isPackageInit(f.fn) {
+			f.e.readGlobals[v] = true
+		}
 		return f.e.globalPath(v) + "()"
 	case *ssa.Function:
 		// A plain function used as a value: its shim takes an environment.
@@ -1080,4 +1118,81 @@ func isString(t types.Type) bool {
 func isUnsigned(t types.Type) bool {
 	b := basicInfo(t)
 	return b != nil && b.Info()&types.IsUnsigned != 0
+}
+
+// bodyless emits a function declared without a body: assembly in gc, or a
+// `go:linkname` to a function elsewhere. The body comes from the function the
+// linkname names (internal/load collects them), or from the runtime's
+// intrinsics; anything else is reported.
+func (e *emitter) bodyless(fn *ssa.Function, name string, m *module) {
+	key := fn.Pkg.Pkg.Path() + "." + fn.Name()
+	f := &fnEmitter{e: e, fn: fn}
+	params := make([]string, len(fn.Params))
+	args := make([]string, len(fn.Params))
+	for i, p := range fn.Params {
+		params[i] = fmt.Sprintf("a%d: %s", i, f.typ(p.Type(), fn.Pos()))
+		args[i] = fmt.Sprintf("a%d", i)
+	}
+	ret := ""
+	if res := fn.Signature.Results(); res.Len() == 1 {
+		ret = " -> " + f.typ(res.At(0).Type(), fn.Pos())
+	} else if res.Len() > 1 {
+		ret = " -> " + f.typ(res, fn.Pos())
+	}
+	var body string
+	if impl := e.linkTarget(key); impl != nil {
+		// The two sides of a linkname may spell a parameter differently
+		// (sync's *notifyList is unsafe.Pointer in the runtime); convert
+		// the pointers, which is what gc's linker does by not looking.
+		for i, p := range fn.Params {
+			if i >= len(impl.Params) {
+				break
+			}
+			want := impl.Params[i].Type()
+			if types.Identical(p.Type(), want) {
+				continue
+			}
+			switch {
+			case isPointer(p.Type()) && isUnsafePointer(want):
+				args[i] = fmt.Sprintf("UPtr::from_ptr(%s)", args[i])
+			case isPointer(p.Type()) && isPointer(want):
+				elem := want.Underlying().(*types.Pointer).Elem()
+				args[i] = fmt.Sprintf("unsafe { UPtr::from_ptr(%s).to_ptr::<%s>() }", args[i], f.place(elem, fn.Pos()))
+			default:
+				e.errorf(fn.Pos(), "%s: go:linkname to %s with a %s parameter where it declares %s", key, impl, want, p.Type())
+			}
+		}
+		body = fmt.Sprintf("%s(%s)", e.fnPath(impl), strings.Join(args, ", "))
+	} else if in, ok := intrinsics[key]; ok {
+		body = in(args)
+	} else {
+		e.errorf(fn.Pos(), "%s has no Go body (assembly or linkname) and no rustygo implementation", key)
+		return
+	}
+	fmt.Fprintf(&m.buf, "\n// Go: %s (no Go body; see go:linkname or intrinsics)\npub fn %s(%s)%s {\n    %s\n}\n",
+		fn, name, strings.Join(params, ", "), ret, body)
+}
+
+// linkTarget follows the linkname entries for key to a function with a
+// body, if one was loaded.
+func (e *emitter) linkTarget(key string) *ssa.Function {
+	for range 8 { // a chain of linknames is short; a cycle is a bug
+		target, ok := e.res.Linknames[key]
+		if !ok {
+			return nil
+		}
+		dot := strings.LastIndex(target, ".")
+		pkgPath, name := target[:dot], target[dot+1:]
+		if pkg := e.res.Prog.ImportedPackage(pkgPath); pkg != nil {
+			if fn := pkg.Func(name); fn != nil {
+				if fn.Blocks != nil {
+					return fn
+				}
+				key = pkgPath + "." + name
+				continue
+			}
+		}
+		return nil
+	}
+	return nil
 }
