@@ -17,10 +17,13 @@ use crate::trace::{Trace, Tracer};
 use alloc::vec::Vec;
 use core::cell::RefCell;
 
+/// One deferred call: the thunk, and the environment holding the arguments.
+type Deferred = (fn(Env), Env);
+
 /// The deferred calls of one function, innermost last.
 #[derive(Default)]
 pub struct Defers {
-    list: RefCell<Vec<(fn(Env), Env)>>,
+    list: RefCell<Vec<Deferred>>,
 }
 
 impl Trace for Defers {

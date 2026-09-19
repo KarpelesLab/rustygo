@@ -180,8 +180,13 @@ runtime's accessor API has to be sound for *any* code the emitter produces, so:
 
 ## 5. Control flow, `defer`, `panic`, `recover`
 
-* `defer` → a per-frame defer list in the runtime; frames that own defers are
-  wrapped so the list runs on both normal return and unwinding.
+* `defer` → a per-function list of thunks in the runtime: a code pointer plus
+  the environment holding the arguments, which Go evaluates at the `defer`
+  statement. The environment is an ordinary heap place struct, so deferred
+  arguments stay reachable. The list runs where Go runs it, before a named
+  result is read back, and a function that defers wraps its body in
+  `catch_unwind` so the list also runs while unwinding — and so a deferred
+  call may itself panic without aborting.
 * `panic` → a Rust panic carrying a `GoPanic` payload; `recover` inspects the
   payload from inside a deferred call. Requires `panic = "unwind"`.
 * Runtime panics (nil dereference, index out of range, divide by zero, failed
