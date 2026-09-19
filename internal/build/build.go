@@ -112,16 +112,9 @@ func Binary(res *load.Result, output string) error {
 	if err != nil {
 		return err
 	}
-	// One work directory per main package; one binary name per work
-	// directory, so builds sharing the cargo target directory never
-	// overwrite each other's output.
-	var key string
-	for _, p := range res.Pkgs {
-		key += p.Pkg.Path() + "\x00"
-	}
-	sum := sha256.Sum256([]byte(key))
-	id := hex.EncodeToString(sum[:])[:16]
-	work := filepath.Join(cache, "work", id)
+	work, id := workDir(cache, res)
+	// One binary name per work directory, so builds sharing the cargo
+	// target directory never overwrite each other's output.
 	bin := "p" + id
 	if err := emit.Crate(res, emit.Options{OutDir: work, RuntimePath: rt, BinName: bin}); err != nil {
 		return err
@@ -140,6 +133,27 @@ func Binary(res *load.Result, output string) error {
 		bin += ".exe"
 	}
 	return copyFile(filepath.Join(target, "release", bin), output)
+}
+
+// WorkDir is where Binary writes the crate for res.
+func WorkDir(res *load.Result) (string, error) {
+	cache, err := CacheDir()
+	if err != nil {
+		return "", err
+	}
+	dir, _ := workDir(cache, res)
+	return dir, nil
+}
+
+// workDir picks one work directory per set of main packages.
+func workDir(cache string, res *load.Result) (dir, id string) {
+	var key string
+	for _, p := range res.Pkgs {
+		key += p.Pkg.Path() + "\x00"
+	}
+	sum := sha256.Sum256([]byte(key))
+	id = hex.EncodeToString(sum[:])[:16]
+	return filepath.Join(cache, "work", id), id
 }
 
 func copyFile(src, dst string) error {

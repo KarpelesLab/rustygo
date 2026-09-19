@@ -93,11 +93,14 @@ func (f *fnEmitter) body() {
 			fmt.Fprintf(&f.out, "    let mut %s: %s = GoValue::zero();\n", v.Name(), f.valueType(v))
 		}
 	}
-	f.loop = len(f.fn.Blocks) > 1
-	if !f.loop {
+	if len(f.fn.Blocks) == 1 {
 		f.block(f.fn.Blocks[0], "    ")
 		return
 	}
+	if f.structured() {
+		return
+	}
+	f.loop = true
 	f.out.WriteString("    let mut blk: usize = 0;\n    loop {\n        match blk {\n")
 	for _, b := range f.fn.Blocks {
 		fmt.Fprintf(&f.out, "            %d => {\n", b.Index)
@@ -115,7 +118,24 @@ func (f *fnEmitter) hasVar(v ssa.Value) bool {
 	if mi, ok := v.(*ssa.MakeInterface); ok && onlyPanicUses(mi) {
 		return false
 	}
-	return true
+	return !deadLoad(v)
+}
+
+// deadLoad reports an unused load that cannot panic. go/ssa emits one for
+// `for i := range arr` over an array variable (`t0 = *arr`), and copying the
+// whole array every time the loop starts costs more than the loop. Only loads
+// from globals and allocations qualify: those are never nil, so dropping the
+// load cannot drop a nil-dereference panic.
+func deadLoad(v ssa.Value) bool {
+	u, ok := v.(*ssa.UnOp)
+	if !ok || u.Op != token.MUL || len(*u.Referrers()) > 0 {
+		return false
+	}
+	switch u.X.(type) {
+	case *ssa.Global, *ssa.Alloc:
+		return true
+	}
+	return false
 }
 
 // valueType is the Rust type of the local holding v.
@@ -158,31 +178,7 @@ func (f *fnEmitter) block(b *ssa.BasicBlock, ind string) {
 // edge assigns the phis of succ for the edge from pred, then transfers
 // control to succ.
 func (f *fnEmitter) edge(pred, succ *ssa.BasicBlock, ind string) string {
-	var s strings.Builder
-	var phis []*ssa.Phi
-	for _, instr := range succ.Instrs {
-		if phi, ok := instr.(*ssa.Phi); ok {
-			phis = append(phis, phi)
-		}
-	}
-	if len(phis) > 0 {
-		idx := -1
-		for i, p := range succ.Preds {
-			if p == pred {
-				idx = i
-				break
-			}
-		}
-		// A parallel copy: read every incoming value before writing any phi.
-		for i, phi := range phis {
-			fmt.Fprintf(&s, "%slet e%d = %s;\n", ind, i, f.val(phi.Edges[idx]))
-		}
-		for i, phi := range phis {
-			fmt.Fprintf(&s, "%s%s = e%d;\n", ind, phi.Name(), i)
-		}
-	}
-	fmt.Fprintf(&s, "%sblk = %d;\n%scontinue;\n", ind, succ.Index, ind)
-	return s.String()
+	return f.phiMoves(pred, succ, ind) + fmt.Sprintf("%sblk = %d;\n%scontinue;\n", ind, succ.Index, ind)
 }
 
 func (f *fnEmitter) ret(r *ssa.Return) string {
@@ -202,6 +198,9 @@ func (f *fnEmitter) ret(r *ssa.Return) string {
 // instr returns the statement for a non-terminator instruction.
 func (f *fnEmitter) instr(instr ssa.Instruction) string {
 	if v, ok := instr.(ssa.Value); ok {
+		if deadLoad(v) {
+			return ""
+		}
 		expr := f.expr(v)
 		if expr == "" {
 			return ""

@@ -14,8 +14,12 @@ go/packages ──► go/types ──► go/ssa ──► lowering passes ──
   TinyGo takes the same input, which is the strongest available evidence that it
   is enough.
 * **Not the gc compiler's SSA.** By that point structured control flow is gone,
-  and Rust has no `goto`. `go/ssa` keeps blocks and phis, and a relooper turns
-  them back into `loop`/`match` when the CFG is irreducible.
+  and Rust has no `goto`. `go/ssa` keeps blocks and phis, and the emitter
+  rebuilds them into labeled blocks and loops (`break 'b`, `continue 'l`),
+  following Ramsey's "Beyond Relooper". Only irreducible CFGs (a `goto` into
+  a loop body) fall back to a loop around a `match` on the block index. M0
+  measured why structuring is mandatory: LLVM compiles that fallback to an
+  indirect jump per basic block, which cost 6× on a field-update loop.
 * **Unit of output:** one Rust module per Go package, one crate per build. Go
   import cycles are impossible, so module ordering is a topological sort. The
   exception is the standard library: from M3 on it is its own crate (or
@@ -168,7 +172,7 @@ runtime's accessor API has to be sound for *any* code the emitter produces, so:
   type assertion, closed-channel send) map to the same payload with Go's
   messages, because programs match on them.
 * `goto` and labeled `break`/`continue` come out of `go/ssa` as ordinary CFG
-  edges and are reconstructed by the relooper.
+  edges and are reconstructed by the structuring pass (§1).
 
 ## 6. `reflect` and type descriptors
 
@@ -271,6 +275,32 @@ recovery path, in order of expected payoff:
 Target to beat before claiming anything: gc Go on the same benchmark set.
 There is no slower floor to hide behind — WASM is not a fallback here, so
 "within a stated factor of gc Go" is the only measure that counts.
+
+### Measured in M0
+
+From [BENCHMARKS.md](BENCHMARKS.md) (linux/amd64; regenerate with
+`go run ./internal/cmd/bench -o docs/BENCHMARKS.md`):
+
+* **Straight-line code is at parity or better.** Scalar arithmetic runs at
+  0.96× gc, field updates through pointers at 0.97×, and recursive calls at
+  0.53× (LLVM inlines and unrolls where gc does not). Neither the
+  copy-in/copy-out places (§2) nor the thin M0 `Ptr` show a measurable cost
+  here.
+* **Pointer chasing** runs at 1.07×.
+* **Strings** run at 2.2×, and M0's leaking allocator dominates: every
+  intermediate string is a fresh allocation that is never freed (850 MiB peak
+  against gc's 10 MiB). M1's collector is the fix, not the code generator.
+* **Not yet measured:** shadow-stack upkeep and a `Ptr` that also carries its
+  object's handle. Both arrive with the collector in M1, and the same
+  benchmarks will show their cost then.
+* **Compile time** is about 275 ms of `cargo build --release` per thousand
+  lines of Go, with emitted Rust around 6× the Go line count. Linear
+  extrapolation puts the whole standard library near 4 minutes, which is
+  fine for a build cached per Go version and target (M3), and nowhere near
+  decision gate 3.
+
+Decision gate 1 (an unrecoverable slowdown) is not in sight: nothing here is
+beyond 2.2×, and the one outlier has a known cause outside the emitter.
 
 ## 12. Correctness strategy
 
