@@ -1,5 +1,10 @@
 # rustygo
 
+[![CI](https://github.com/KarpelesLab/rustygo/actions/workflows/ci.yml/badge.svg)](https://github.com/KarpelesLab/rustygo/actions/workflows/ci.yml)
+[![crates.io](https://img.shields.io/crates/v/rustygo.svg)](https://crates.io/crates/rustygo)
+[![docs.rs](https://img.shields.io/docsrs/rustygo)](https://docs.rs/rustygo)
+[![License: MIT](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
+
 **A Go → Rust compiler.** Compile Go packages into Rust source, link them with
 a Rust runtime, and end up with Go and Rust code in *one* binary that share
 real types — no cgo, no FFI, no `unsafe` in anything you write.
