@@ -423,14 +423,15 @@ mod tests {
 
     fn chain(n: usize) -> Ptr<NodeP> {
         let mut head = Ptr::<NodeP>::zero();
-        let frame = Frame::<1>::new();
+        // Both the list so far and the new node's string have to survive the
+        // node's own allocation — under GC torture that allocation collects.
+        let frame = Frame::<2>::new();
         frame.scope(|| {
-            for i in 0..n {
+            for _ in 0..n {
                 frame.set(0, &head);
                 let name = GoStr::lit(b"x").concat(GoStr::lit(b"y"));
-                frame.set(0, &head);
+                frame.set(1, &name);
                 head = Ptr::alloc((head, name));
-                let _ = i;
             }
         });
         head
