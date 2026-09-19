@@ -9,6 +9,12 @@ on:
 permissions:
   contents: read
 
+# A run supersedes the ones before it on the same branch or pull request:
+# a burst of pushes should not queue a full matrix each.
+concurrency:
+  group: ci-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
 env:
   CARGO_TERM_COLOR: always
 

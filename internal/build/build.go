@@ -23,7 +23,12 @@ import (
 // CacheDir is where rustygo keeps the extracted runtime, generated crates and
 // the shared cargo target directory: $RUSTYGO_CACHE, or rustygo/ under the
 // user cache directory.
-func CacheDir() (string, error) {
+func CacheDir() (string, error) { return Config{}.cacheDir() }
+
+func (cfg Config) cacheDir() (string, error) {
+	if cfg.Cache != "" {
+		return cfg.Cache, nil
+	}
 	if d := os.Getenv("RUSTYGO_CACHE"); d != "" {
 		return d, nil
 	}
@@ -36,8 +41,11 @@ func CacheDir() (string, error) {
 
 // RuntimeDir extracts the embedded runtime crate, once per content hash, and
 // returns its directory.
-func RuntimeDir() (string, error) {
-	cache, err := CacheDir()
+func RuntimeDir() (string, error) { return Config{}.RuntimeDir() }
+
+// RuntimeDir extracts the runtime into this configuration's cache.
+func (cfg Config) RuntimeDir() (string, error) {
+	cache, err := cfg.cacheDir()
 	if err != nil {
 		return "", err
 	}
@@ -99,6 +107,9 @@ type Config struct {
 	// GcTorture builds against the runtime's debug collector, which
 	// collects at every allocation.
 	GcTorture bool
+	// Cache overrides the cache directory. Builds running at the same time
+	// need one each: cargo locks its target directory.
+	Cache string
 }
 
 // ConfigFromEnv reads RUSTYGO_GCTORTURE=1.
@@ -108,7 +119,7 @@ func ConfigFromEnv() Config {
 
 // Emit writes the crate for res into dir.
 func Emit(res *load.Result, dir string, cfg Config) error {
-	rt, err := RuntimeDir()
+	rt, err := cfg.RuntimeDir()
 	if err != nil {
 		return err
 	}
@@ -117,11 +128,11 @@ func Emit(res *load.Result, dir string, cfg Config) error {
 
 // Binary compiles res to a native executable at output.
 func Binary(res *load.Result, output string, cfg Config) error {
-	rt, err := RuntimeDir()
+	rt, err := cfg.RuntimeDir()
 	if err != nil {
 		return err
 	}
-	cache, err := CacheDir()
+	cache, err := cfg.cacheDir()
 	if err != nil {
 		return err
 	}
@@ -150,7 +161,7 @@ func Binary(res *load.Result, output string, cfg Config) error {
 
 // WorkDir is where Binary writes the crate for res.
 func WorkDir(res *load.Result, cfg Config) (string, error) {
-	cache, err := CacheDir()
+	cache, err := cfg.cacheDir()
 	if err != nil {
 		return "", err
 	}
