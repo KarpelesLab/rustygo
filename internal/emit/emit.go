@@ -81,12 +81,23 @@ func Crate(res *load.Result, opt Options) error {
 	for len(e.queue) > 0 {
 		fn := e.queue[0]
 		e.queue = e.queue[1:]
-		e.function(fn)
+		e.emitFunction(fn)
 	}
 	if len(e.errs) > 0 {
 		return e.err()
 	}
 	return e.write(opt, initPath, mainPath)
+}
+
+// emitFunction emits fn, turning a crash into an ordinary error naming the
+// function: a bug in the emitter should report where it was, not panic.
+func (e *emitter) emitFunction(fn *ssa.Function) {
+	defer func() {
+		if r := recover(); r != nil {
+			e.errorf(fn.Pos(), "internal error compiling %s: %v", fn, r)
+		}
+	}()
+	e.function(fn)
 }
 
 type emitter struct {

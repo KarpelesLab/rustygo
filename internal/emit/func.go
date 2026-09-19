@@ -39,10 +39,6 @@ func (e *emitter) function(fn *ssa.Function) {
 		m = e.module(fn.Origin().Pkg)
 	}
 
-	if fn.Pkg != nil && e.res.Std[fn.Pkg.Pkg] {
-		e.errorf(fn.Pos(), "package %s: the standard library is not compiled yet (roadmap M3)", fn.Pkg.Pkg.Path())
-		return
-	}
 	if fn.Blocks == nil {
 		e.errorf(fn.Pos(), "%s has no Go body (assembly or linkname), not supported yet", fn)
 		return
@@ -933,10 +929,18 @@ func (f *fnEmitter) constant(c *ssa.Const) string {
 	case b.Info()&types.IsString != 0:
 		return "GoStr::lit(" + byteString(constant.StringVal(c.Value)) + ")"
 	case b.Info()&types.IsUnsigned != 0:
-		u, _ := constant.Uint64Val(c.Value)
+		// A constant of unsigned type may still be held as a float value
+		// (`const x uint = 10` can arrive as 10.0), so normalize first.
+		u, ok := constant.Uint64Val(constant.ToInt(c.Value))
+		if !ok {
+			f.errorf(c.Pos(), "constant %s does not fit in %s", c.Value, c.Type())
+		}
 		return fmt.Sprintf("%d%s", u, rt)
 	case b.Info()&types.IsInteger != 0:
-		i, _ := constant.Int64Val(c.Value)
+		i, ok := constant.Int64Val(constant.ToInt(c.Value))
+		if !ok {
+			f.errorf(c.Pos(), "constant %s does not fit in %s", c.Value, c.Type())
+		}
 		if i == math.MinInt64 {
 			return "i64::MIN"
 		}
@@ -945,10 +949,10 @@ func (f *fnEmitter) constant(c *ssa.Const) string {
 		}
 		return fmt.Sprintf("%d%s", i, rt)
 	case b.Kind() == types.Float32:
-		x, _ := constant.Float32Val(c.Value)
+		x, _ := constant.Float32Val(constant.ToFloat(c.Value))
 		return fmt.Sprintf("f32::from_bits(%#x)", math.Float32bits(x))
 	case b.Info()&types.IsFloat != 0:
-		x, _ := constant.Float64Val(c.Value)
+		x, _ := constant.Float64Val(constant.ToFloat(c.Value))
 		return fmt.Sprintf("f64::from_bits(%#x)", math.Float64bits(x))
 	}
 	f.errorf(c.Pos(), "constant of type %s is not supported yet", c.Type())
