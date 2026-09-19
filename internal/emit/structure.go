@@ -153,7 +153,8 @@ func (s *structurer) branch(src, dst *ssa.BasicBlock, ctx []ctxEntry, ind string
 func (f *fnEmitter) phiMoves(src, dst *ssa.BasicBlock, ind string) string {
 	var phis []*ssa.Phi
 	for _, instr := range dst.Instrs {
-		if phi, ok := instr.(*ssa.Phi); ok {
+		// A phi the dead-initialization pass removed has no local to assign.
+		if phi, ok := instr.(*ssa.Phi); ok && !f.dead[phi] {
 			phis = append(phis, phi)
 		}
 	}

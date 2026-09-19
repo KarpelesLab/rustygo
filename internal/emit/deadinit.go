@@ -12,11 +12,38 @@ import (
 // nothing reads.
 //
 // The emitter runs twice. The first run records every global that some
-// emitted function other than a package initializer refers to (liveGlobals).
-// The second emits each initializer without the instructions that only feed
-// variables outside that set. It is conservative: whatever the first run
-// reached is kept, and calls are always kept, so no initializer's side
-// effects are lost.
+// emitted function other than a package initializer refers to, and every
+// package initializer it emitted. Between the runs, liveInitGlobals grows
+// that set to a fixed point: an initializer that is itself live may read
+// another package-level variable (`var nan = math.NaN()` feeding a table,
+// or one package's variable feeding another's), and that variable is then
+// live too. The second run emits each initializer without the instructions
+// that only feed variables outside the final set. It is conservative:
+// whatever the first run reached is kept, and calls are always kept, so no
+// initializer's side effects are lost.
+
+// liveInitGlobals grows read to the globals the program needs built.
+func liveInitGlobals(inits []*ssa.Function, read map[*ssa.Global]bool) map[*ssa.Global]bool {
+	live := map[*ssa.Global]bool{}
+	for g := range read {
+		live[g] = true
+	}
+	for {
+		grew := false
+		for _, fn := range inits {
+			_, used := analyzeInit(fn, live)
+			for g := range used {
+				if !live[g] {
+					live[g] = true
+					grew = true
+				}
+			}
+		}
+		if !grew {
+			return live
+		}
+	}
+}
 
 // isPackageInit reports go/ssa's synthesized package initializer.
 func isPackageInit(fn *ssa.Function) bool {
@@ -26,6 +53,14 @@ func isPackageInit(fn *ssa.Function) bool {
 // deadInit returns the instructions of a package initializer that only build
 // globals no other code reads.
 func deadInit(fn *ssa.Function, liveGlobals map[*ssa.Global]bool) map[ssa.Instruction]bool {
+	dead, _ := analyzeInit(fn, liveGlobals)
+	return dead
+}
+
+// analyzeInit finds a package initializer's dead instructions, and the
+// globals its live instructions refer to.
+func analyzeInit(fn *ssa.Function, liveGlobals map[*ssa.Global]bool) (dead map[ssa.Instruction]bool, used map[*ssa.Global]bool) {
+	used = map[*ssa.Global]bool{}
 	live := map[ssa.Instruction]bool{}
 	var work []ssa.Instruction
 	mark := func(instr ssa.Instruction) {
@@ -74,6 +109,13 @@ func deadInit(fn *ssa.Function, liveGlobals map[*ssa.Global]bool) map[ssa.Instru
 				if def, ok := (*op).(ssa.Instruction); ok && *op != nil {
 					mark(def)
 				}
+				// A global that a live instruction reads (or takes the
+				// address of) is needed, even if only initialization reads it.
+				if g, ok := (*op).(*ssa.Global); ok {
+					if _, isStore := instr.(*ssa.Store); !isStore || (*op) != instr.(*ssa.Store).Addr {
+						used[g] = true
+					}
+				}
 			}
 		}
 		progress := false
@@ -97,7 +139,7 @@ func deadInit(fn *ssa.Function, liveGlobals map[*ssa.Global]bool) map[ssa.Instru
 			break
 		}
 	}
-	dead := map[ssa.Instruction]bool{}
+	dead = map[ssa.Instruction]bool{}
 	for _, b := range fn.Blocks {
 		for _, instr := range b.Instrs {
 			if !live[instr] {
@@ -105,5 +147,5 @@ func deadInit(fn *ssa.Function, liveGlobals map[*ssa.Global]bool) map[ssa.Instru
 			}
 		}
 	}
-	return dead
+	return dead, used
 }

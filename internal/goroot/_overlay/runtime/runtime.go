@@ -96,14 +96,40 @@ type Cleanup struct{}
 func AddCleanup[T, S any](ptr *T, cleanup func(S), arg S) Cleanup { return Cleanup{} }
 func (c Cleanup) Stop()                                           {}
 
-// MemStats carries the fields programs read; the collector fills in what it
-// tracks.
+// MemStats has gc's fields, so programs that read it compile; the collector
+// fills in what it tracks, and the rest stay zero.
 type MemStats struct {
-	Alloc, TotalAlloc, Sys, Mallocs, Frees, HeapAlloc, HeapSys, HeapIdle uint64
-	HeapInuse, HeapReleased, HeapObjects, NumGC, PauseTotalNs            uint64
+	Alloc, TotalAlloc, Sys, Lookups, Mallocs, Frees                    uint64
+	HeapAlloc, HeapSys, HeapIdle, HeapInuse, HeapReleased, HeapObjects uint64
+	StackInuse, StackSys, MSpanInuse, MSpanSys, MCacheInuse, MCacheSys uint64
+	BuckHashSys, GCSys, OtherSys, NextGC, LastGC, PauseTotalNs         uint64
+	PauseNs, PauseEnd                                                  [256]uint64
+	NumGC, NumForcedGC                                                 uint32
+	GCCPUFraction                                                      float64
+	EnableGC, DebugGC                                                  bool
 }
 
 func ReadMemStats(m *MemStats) { *m = MemStats{} }
+
+// Profiling is out of scope (roadmap non-goals); these keep programs that
+// touch it compiling, and report no samples.
+
+var MemProfileRate int = 512 * 1024
+
+type MemProfileRecord struct {
+	AllocBytes, FreeBytes     int64
+	AllocObjects, FreeObjects int64
+	Stack0                    [32]uintptr
+}
+
+func (r *MemProfileRecord) InUseBytes() int64   { return r.AllocBytes - r.FreeBytes }
+func (r *MemProfileRecord) InUseObjects() int64 { return r.AllocObjects - r.FreeObjects }
+func (r *MemProfileRecord) Stack() []uintptr    { return nil }
+
+func MemProfile(p []MemProfileRecord, inuseZero bool) (n int, ok bool) { return 0, true }
+
+// Breakpoint would trap into a debugger; there is none to trap into.
+func Breakpoint() { panic("runtime.Breakpoint: no debugger (rustygo)") }
 
 func SetMutexProfileFraction(rate int) int { return 0 }
 func SetBlockProfileRate(rate int)         {}

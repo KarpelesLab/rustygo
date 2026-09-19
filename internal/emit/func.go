@@ -61,8 +61,11 @@ func (e *emitter) function(fn *ssa.Function) {
 		ret = " -> " + f.typ(res, fn.Pos())
 	}
 	fmt.Fprintf(&f.out, "\n// Go: %s\npub fn %s(%s)%s {\n", fn.String(), name, strings.Join(params, ", "), ret)
-	if isPackageInit(fn) && e.liveGlobals != nil {
-		f.dead = deadInit(fn, e.liveGlobals)
+	if isPackageInit(fn) {
+		e.inits = append(e.inits, fn)
+		if e.liveGlobals != nil {
+			f.dead = deadInit(fn, e.liveGlobals)
+		}
 	}
 	f.collectRoots()
 	f.hasDefers = hasDefers(fn)

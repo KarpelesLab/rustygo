@@ -57,7 +57,8 @@ func Crate(res *load.Result, opt Options) error {
 	if err != nil {
 		return err
 	}
-	e, err := run(res, first.readGlobals)
+	live := liveInitGlobals(first.inits, first.readGlobals)
+	e, err := run(res, live)
 	if err != nil {
 		return err
 	}
@@ -128,6 +129,8 @@ type emitter struct {
 	// this run, the globals read outside package initializers.
 	liveGlobals map[*ssa.Global]bool
 	readGlobals map[*ssa.Global]bool
+	// inits are the package initializers this run emitted.
+	inits []*ssa.Function
 
 	opt     Options
 	res     *load.Result

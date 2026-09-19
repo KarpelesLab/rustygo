@@ -202,6 +202,14 @@ impl<P: Place + Trace> Slice<P> {
         }
     }
 
+    /// `clear(s)`: every element back to its zero value.
+    pub fn clear(self) {
+        for i in 0..self.len {
+            // SAFETY: `i < len`, inside the backing array.
+            unsafe { (*self.ptr.add(i)).store(GoValue::zero()) };
+        }
+    }
+
     /// `copy(dst, src)`: copies `min(len(dst), len(src))` elements and
     /// returns that count. Overlapping slices copy as if through a temporary,
     /// as in Go.

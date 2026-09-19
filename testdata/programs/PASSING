@@ -37,3 +37,4 @@ interp
 complex
 unsafeptr
 stdlib1
+initdeps
