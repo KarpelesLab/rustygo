@@ -156,6 +156,7 @@ impl<K: GoKey, V: GoValue + Trace> GoMap<K, V> {
         let Some(obj) = self.obj else {
             runtime_error(RuntimeError::NilMapWrite)
         };
+        heap::check_live(obj.as_ptr() as usize);
         // SAFETY: a non-nil handle points at a live map object, which the
         // caller keeps rooted.
         let table = unsafe { &obj.as_ref().table };
@@ -205,12 +206,14 @@ impl<K: GoKey, V: GoValue + Trace> GoMap<K, V> {
 
     fn with<R>(self, f: impl FnOnce(&Table<K, V>) -> R) -> Option<R> {
         let obj = self.obj?;
+        heap::check_live(obj.as_ptr() as usize);
         // SAFETY: as in `set`.
         Some(f(&unsafe { obj.as_ref() }.table.borrow()))
     }
 
     fn with_mut<R>(self, f: impl FnOnce(&mut Table<K, V>) -> R) -> Option<R> {
         let obj = self.obj?;
+        heap::check_live(obj.as_ptr() as usize);
         // SAFETY: as in `set`.
         Some(f(&mut unsafe { obj.as_ref() }.table.borrow_mut()))
     }

@@ -134,8 +134,12 @@ runtime's accessor API has to be sound for *any* code the emitter produces, so:
   measurably so: the table costs a per-object entry and a sort per
   collection ([§11](#11-performance-expectations)).
 * **GC torture** (`RUSTYGO_GCTORTURE=1`, the runtime's `gc-torture` feature)
-  collects at every allocation. The whole differential suite passes under it,
-  which is what checks that the emitted roots are complete.
+  collects at every allocation, and never reuses what it collects: freed
+  objects are poisoned and quarantined, and every dereference checks the
+  quarantine. A missing root is then an immediate panic naming the address
+  ("use of collected object … (a missing GC root)") rather than a read of
+  someone else's data. The whole differential suite passes under it, which is
+  what checks that the emitted roots are complete.
 * **Phase 2 (M6):** a size-class allocator with per-thread buffers, which
   also replaces the table's binary search with address arithmetic, then
   generational or incremental marking if measurements demand it. Incremental

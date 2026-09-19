@@ -195,7 +195,10 @@ impl<P> Ptr<P> {
             // came from `alloc`, from `project` on a live place, or from a
             // registered global. Generated code keeps every pointer it still
             // needs rooted, so the collector cannot free it (DESIGN §3).
-            Some(p) => unsafe { p.as_ref() },
+            Some(p) => {
+                heap::check_live(p.as_ptr() as usize);
+                unsafe { p.as_ref() }
+            }
             None => runtime_error(RuntimeError::NilDeref),
         }
     }

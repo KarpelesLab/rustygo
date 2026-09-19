@@ -75,6 +75,9 @@ impl GoStr {
     /// The bytes, borrowed for as long as this handle is.
     #[inline]
     pub fn bytes(&self) -> &[u8] {
+        if self.len > 0 {
+            crate::heap::check_live(self.ptr as usize);
+        }
         // SAFETY: `ptr`/`len` describe either a literal in the binary or a
         // live heap array; generated code keeps the string rooted while it
         // holds it (DESIGN §3).

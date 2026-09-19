@@ -171,7 +171,7 @@ func runOne(path, work string, cfg build.Config, timeout time.Duration) result {
 		// gc will not build it here: not rustygo's failure to count.
 		return result{name: name, skipped: true, reason: strings.TrimSpace(string(out))}
 	}
-	want, err := run(gcBin, timeout)
+	want, err := run(gcBin, timeout, false)
 	if err != nil {
 		return result{name: name, skipped: true, reason: "gc run: " + err.Error()}
 	}
@@ -185,7 +185,7 @@ func runOne(path, work string, cfg build.Config, timeout time.Duration) result {
 		r.reason = firstError(err.Error())
 		return r
 	}
-	got, err := run(rgBin, timeout)
+	got, err := run(rgBin, timeout, true)
 	if err != nil {
 		r.reason = "rustygo run: " + err.Error()
 		return r
@@ -203,10 +203,15 @@ type outcome struct {
 	exit           int
 }
 
-func run(bin string, timeout time.Duration) (outcome, error) {
+// run executes a test binary; a rustygo-built one runs under a memory cap
+// (build.TestCommand).
+func run(bin string, timeout time.Duration, limit bool) (outcome, error) {
 	ctx, cancel := context.WithTimeout(context.Background(), timeout)
 	defer cancel()
 	cmd := exec.CommandContext(ctx, bin)
+	if limit {
+		cmd = build.TestCommand(ctx, bin)
+	}
 	// Some of Go's tests print a great deal; keep only the first part, the
 	// same amount from both compilers.
 	stdout, stderr := &capped{}, &capped{}

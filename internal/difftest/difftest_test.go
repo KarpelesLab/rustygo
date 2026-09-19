@@ -81,7 +81,7 @@ func TestPrograms(t *testing.T) {
 			if out, err := goBuild.CombinedOutput(); err != nil {
 				t.Fatalf("gc build failed: %v\n%s", err, out)
 			}
-			want := run(t, gcBin)
+			want := run(t, gcBin, false)
 
 			problem := ""
 			rgBin := filepath.Join(tmp, name+"-rustygo"+exe)
@@ -92,7 +92,7 @@ func TestPrograms(t *testing.T) {
 			if err != nil {
 				problem = "rustygo build failed: " + err.Error()
 			} else {
-				problem = diff(want, run(t, rgBin))
+				problem = diff(want, run(t, rgBin, true))
 			}
 
 			switch {
@@ -115,11 +115,17 @@ func TestPrograms(t *testing.T) {
 	}
 }
 
-func run(t *testing.T, bin string) outcome {
+// run executes a test binary. A rustygo-built one runs under a memory cap
+// (build.TestCommand), so a bug that computes a wild allocation size fails
+// in the child rather than asking the host for it.
+func run(t *testing.T, bin string, capped bool) outcome {
 	t.Helper()
 	ctx, cancel := context.WithTimeout(context.Background(), runTimeout)
 	defer cancel()
 	cmd := exec.CommandContext(ctx, bin)
+	if capped {
+		cmd = build.TestCommand(ctx, bin)
+	}
 	var stdout, stderr bytes.Buffer
 	cmd.Stdout, cmd.Stderr = &stdout, &stderr
 	err := cmd.Run()

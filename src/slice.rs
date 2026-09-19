@@ -91,6 +91,7 @@ impl<P> Slice<P> {
 
     #[inline]
     fn elem(self, i: usize) -> Ptr<P> {
+        heap::check_live(self.ptr as usize);
         // SAFETY: `i` is inside the slice, which is inside the backing array.
         Ptr::to_place(unsafe { &*self.ptr.add(i) })
     }
@@ -147,6 +148,9 @@ impl<P: Place + Trace> Slice<P> {
     /// backing array has to grow. Go's growth: double while small, then
     /// widen by about a quarter.
     fn grow(self, extra: usize) -> Slice<P> {
+        if self.len > 0 {
+            heap::check_live(self.ptr as usize);
+        }
         let need = self.len + extra;
         let mut cap = self.cap;
         if cap == 0 {
@@ -170,6 +174,9 @@ impl<P: Place + Trace> Slice<P> {
 
     /// `append(s, src...)`: appends every element of another slice.
     pub fn append_slice(self, src: Slice<P>) -> Slice<P> {
+        if src.len > 0 {
+            heap::check_live(src.ptr as usize);
+        }
         let mut s = self;
         if s.cap - s.len < src.len {
             s = s.grow(src.len);
@@ -190,6 +197,10 @@ impl<P: Place + Trace> Slice<P> {
     /// as in Go.
     pub fn copy_from(self, src: Slice<P>) -> i64 {
         let n = self.len.min(src.len);
+        if n > 0 {
+            heap::check_live(self.ptr as usize);
+            heap::check_live(src.ptr as usize);
+        }
         if self.ptr as usize <= src.ptr as usize {
             for i in 0..n {
                 // SAFETY: `i < n <= len` of both slices.
@@ -209,6 +220,9 @@ impl<P: Place + Trace> Slice<P> {
 impl<P: Place> Slice<P> {
     /// The element values, for conversions and `println`.
     pub fn load_all(self) -> alloc::vec::Vec<P::Value> {
+        if self.len > 0 {
+            heap::check_live(self.ptr as usize);
+        }
         (0..self.len)
             // SAFETY: `i < len`, inside the backing array.
             .map(|i| unsafe { (*self.ptr.add(i)).load() })

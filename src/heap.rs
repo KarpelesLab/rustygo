@@ -17,6 +17,7 @@
 
 use crate::trace::{Trace, TraceFn, Tracer, trace_array_fn, trace_fn};
 use alloc::alloc::{Layout, alloc, dealloc};
+use alloc::collections::BTreeMap;
 use alloc::vec::Vec;
 use core::cell::RefCell;
 use core::ptr::NonNull;
@@ -59,6 +60,11 @@ pub struct Heap {
     threshold: usize,
     globals: Vec<(usize, usize, TraceFn)>,
     collections: usize,
+    /// GC torture only: collected objects, start to end. Their memory is
+    /// poisoned and never reused, so any later use of one is a missing root
+    /// and panics by name. A map, because under torture every allocation
+    /// collects and a sorted vector would be re-sorted each time.
+    quarantine: BTreeMap<usize, usize>,
 }
 
 /// Collect once the live set reaches this, before any doubling.
@@ -74,6 +80,7 @@ rt_global! {
             threshold: MIN_THRESHOLD,
             globals: Vec::new(),
             collections: 0,
+            quarantine: BTreeMap::new(),
     });
 }
 
@@ -258,6 +265,7 @@ pub fn collect() {
         tracer.drain();
 
         let mut live = 0;
+        let quarantine = &mut h.quarantine;
         h.objs.retain(|o| {
             if o.mark {
                 live += o.size;
@@ -268,6 +276,17 @@ pub fn collect() {
                 // the payload afterwards, and this runs once.
                 unsafe { drop(o.start as *mut u8) };
             }
+            if cfg!(feature = "gc-torture") {
+                // Poison and keep: the memory is never handed out again, so a
+                // stale pointer into it can be recognized (`check_live`) and
+                // reads through one see poison rather than someone else's
+                // data.
+                // SAFETY: the object's own allocation, which nothing live
+                // references.
+                unsafe { core::ptr::write_bytes(o.start as *mut u8, POISON, o.size) };
+                quarantine.insert(o.start, o.end());
+                return false;
+            }
             // SAFETY: unreachable, so nothing points at it; freed once,
             // with the layout it was allocated with.
             unsafe { dealloc(o.start as *mut u8, o.layout()) };
@@ -276,6 +295,27 @@ pub fn collect() {
         h.live_bytes = live;
         h.threshold = (live * 2).max(MIN_THRESHOLD);
     });
+}
+
+/// The byte collected objects are filled with under GC torture.
+const POISON: u8 = 0xA5;
+
+/// GC torture only: panics if `addr` points into a collected object. Every
+/// such use is a reference the emitted code (or the runtime) failed to root,
+/// and this names it instead of letting it read garbage. Free otherwise.
+#[inline]
+pub fn check_live(addr: usize) {
+    if cfg!(feature = "gc-torture") && addr != 0 {
+        let hit = with_heap(|h| {
+            h.quarantine
+                .range(..=addr)
+                .next_back()
+                .is_some_and(|(_, &end)| addr < end)
+        });
+        if hit {
+            panic!("rustygo gc-torture: use of collected object at {addr:#x} (a missing GC root)");
+        }
+    }
 }
 
 impl Heap {
