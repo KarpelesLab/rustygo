@@ -51,6 +51,8 @@ func (r *typeReg) rust(t types.Type, e *emitter, pos token.Pos) string {
 		return fmt.Sprintf("[%s; %d]", r.rust(t.Elem(), e, pos), t.Len())
 	case *types.Slice:
 		return "Slice<" + r.place(t.Elem(), e, pos) + ">"
+	case *types.Signature:
+		return "Func<" + r.fnPtr(t, e, pos) + ">"
 	case *types.Tuple:
 		parts := make([]string, t.Len())
 		for i := range parts {
@@ -75,6 +77,27 @@ func (r *typeReg) place(t types.Type, e *emitter, pos token.Pos) string {
 		return fmt.Sprintf("[%s; %d]", r.place(u.Elem(), e, pos), u.Len())
 	}
 	return "Slot<" + r.rust(t, e, pos) + ">"
+}
+
+// fnPtr is the Rust fn-pointer type for a Go signature: the closure's
+// environment, then the parameters.
+func (r *typeReg) fnPtr(sig *types.Signature, e *emitter, pos token.Pos) string {
+	parts := []string{"Env"}
+	if recv := sig.Recv(); recv != nil {
+		parts = append(parts, r.rust(recv.Type(), e, pos))
+	}
+	for i := 0; i < sig.Params().Len(); i++ {
+		parts = append(parts, r.rust(sig.Params().At(i).Type(), e, pos))
+	}
+	ret := ""
+	switch res := sig.Results(); res.Len() {
+	case 0:
+	case 1:
+		ret = " -> " + r.rust(res.At(0).Type(), e, pos)
+	default:
+		ret = " -> " + r.rust(res, e, pos)
+	}
+	return fmt.Sprintf("fn(%s)%s", strings.Join(parts, ", "), ret)
 }
 
 // field returns the Rust field name of field i of struct type t (any type

@@ -28,3 +28,4 @@ structs
 switches
 gcstress
 slices
+closures

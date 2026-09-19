@@ -36,6 +36,13 @@ impl<P> Root for Ptr<P> {
     }
 }
 
+impl<F: Copy> Root for crate::func::Func<F> {
+    #[inline]
+    fn root_word(&self) -> usize {
+        self.addr() as usize
+    }
+}
+
 impl<P> Root for crate::slice::Slice<P> {
     #[inline]
     fn root_word(&self) -> usize {

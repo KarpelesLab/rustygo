@@ -61,7 +61,7 @@ teaching `go list` a GOARCH it rejects.
 | `[N]T` | `[T; N]` | value type, copied on assignment |
 | `map[K]V` | `Gc<GoMap<K, V>>` | runtime hash map, randomized iteration order |
 | `chan T` | `Gc<Chan<T>>` | runtime, integrates with scheduler |
-| `func(...)` | `Gc<Closure<Args, Ret>>` | captured env is a traced struct |
+| `func(...)` | `Func<fn(Env, ..) -> ..>` | code pointer + environment; the captured env is a traced place struct |
 | `struct` | `struct` + emitted `impl Trace` | field order preserved; `Gc<T>` when heap-allocated |
 | `*T` | `Ptr<T>` | see interior pointers |
 | `interface{...}` | `Iface { typ: &'static TypeDesc, val: Word }` | vtable hangs off `TypeDesc` |

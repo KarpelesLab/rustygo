@@ -141,6 +141,16 @@ impl<P> Ptr<P> {
         Ptr(None)
     }
 
+    /// Rebuilds a pointer from a raw address.
+    ///
+    /// # Safety
+    ///
+    /// `addr` must be 0, or the address of a live place of type `P`.
+    #[inline]
+    pub unsafe fn from_addr(addr: usize) -> Self {
+        Ptr(NonNull::new(addr as *mut P))
+    }
+
     /// A pointer to a place the caller knows is live: an element of a live
     /// backing array, say. The place's own object keeps it alive.
     #[inline]

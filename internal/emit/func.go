@@ -40,18 +40,17 @@ func (e *emitter) function(fn *ssa.Function) {
 		e.errorf(fn.Pos(), "package %s: the standard library is not compiled yet (roadmap M3)", fn.Pkg.Pkg.Path())
 		return
 	}
-	if len(fn.FreeVars) > 0 {
-		e.errorf(fn.Pos(), "closures are not supported yet (roadmap M1)")
-		return
-	}
 	if fn.Blocks == nil {
 		e.errorf(fn.Pos(), "%s has no Go body (assembly or linkname), not supported yet", fn)
 		return
 	}
 
-	params := make([]string, len(fn.Params))
+	params := make([]string, 0, len(fn.Params)+1)
+	if len(fn.FreeVars) > 0 {
+		params = append(params, "__env: Env")
+	}
 	for i, p := range fn.Params {
-		params[i] = fmt.Sprintf("a%d: %s", i, f.typ(p.Type(), p.Pos()))
+		params = append(params, fmt.Sprintf("a%d: %s", i, f.typ(p.Type(), p.Pos())))
 	}
 	ret := ""
 	if res := fn.Signature.Results(); res.Len() == 1 {
@@ -61,6 +60,9 @@ func (e *emitter) function(fn *ssa.Function) {
 	}
 	fmt.Fprintf(&f.out, "\n// Go: %s\npub fn %s(%s)%s {\n", fn.String(), name, strings.Join(params, ", "), ret)
 	f.collectRoots()
+	if len(fn.FreeVars) > 0 {
+		fmt.Fprintf(&f.out, "    let __e = __env.cast::<%s>();\n", f.envPlace())
+	}
 	f.declare()
 	if len(f.roots) > 0 {
 		fmt.Fprintf(&f.out, "    let __roots = rustygo::gc::Frame::<%d>::new();\n", len(f.roots))
@@ -135,6 +137,12 @@ func (f *fnEmitter) typ(t types.Type, pos token.Pos) string {
 
 func (f *fnEmitter) place(t types.Type, pos token.Pos) string {
 	return f.e.types.place(t, f.e, f.pos(pos))
+}
+
+// envPlace is the Rust place type of this function's captured environment.
+func (f *fnEmitter) envPlace() string {
+	st := f.e.envStruct(f.fn)
+	return "crate::ty::" + f.e.types.structInfo(st, f.fn.Name()+"$env", f.e, f.fn.Pos()).name + "_P"
 }
 
 // pos falls back to the function's position when an instruction has none.
@@ -389,7 +397,17 @@ func (f *fnEmitter) expr(v ssa.Value) string {
 		}
 		f.errorf(v.Pos(), "interfaces are not supported yet (roadmap M1)")
 	case *ssa.MakeClosure:
-		f.errorf(v.Pos(), "closures are not supported yet (roadmap M1)")
+		fn := v.Fn.(*ssa.Function)
+		st := f.e.envStruct(fn)
+		info := f.e.types.structInfo(st, fn.Name()+"$env", f.e, v.Pos())
+		fields := make([]string, len(v.Bindings))
+		for i, b := range v.Bindings {
+			fields[i] = fmt.Sprintf("%s: %s", info.fields[i], f.val(b))
+		}
+		env := fmt.Sprintf("Ptr::<crate::ty::%s_P>::alloc(crate::ty::%s { %s })",
+			info.name, info.name, strings.Join(fields, ", "))
+		return fmt.Sprintf("Func::new(%s as %s, Env::of(%s))",
+			f.e.fnPath(fn), f.e.types.fnPtr(fn.Signature, f.e, v.Pos()), env)
 	case *ssa.SliceToArrayPointer:
 		f.errorf(v.Pos(), "slice-to-array-pointer conversion is not supported yet")
 	case *ssa.MakeMap, *ssa.Lookup:
@@ -588,12 +606,13 @@ func (f *fnEmitter) call(v *ssa.Call) string {
 	if b, ok := c.Value.(*ssa.Builtin); ok {
 		return f.builtin(v, b, args)
 	}
-	callee := c.StaticCallee()
-	if callee == nil {
-		f.errorf(v.Pos(), "calls through function values are not supported yet (roadmap M1)")
-		return ""
+	if callee := c.StaticCallee(); callee != nil && c.Value == callee {
+		return fmt.Sprintf("%s(%s)", f.e.fnPath(callee), strings.Join(args, ", "))
 	}
-	return fmt.Sprintf("%s(%s)", f.e.fnPath(callee), strings.Join(args, ", "))
+	// A call through a func value: code and environment come from the value.
+	fv := f.val(c.Value)
+	call := append([]string{"__f.env()"}, args...)
+	return fmt.Sprintf("{ let __f = %s; (__f.code())(%s) }", fv, strings.Join(call, ", "))
 }
 
 func (f *fnEmitter) builtin(v *ssa.Call, b *ssa.Builtin, args []string) string {
@@ -646,6 +665,9 @@ func (f *fnEmitter) printArg(a ssa.Value) string {
 	}
 	x := f.val(a)
 	if _, ok := a.Type().Underlying().(*types.Pointer); ok {
+		return fmt.Sprintf("rustygo::print::Arg::Pointer((%s).addr())", x)
+	}
+	if _, ok := a.Type().Underlying().(*types.Signature); ok {
 		return fmt.Sprintf("rustygo::print::Arg::Pointer((%s).addr())", x)
 	}
 	if _, ok := a.Type().Underlying().(*types.Slice); ok {
@@ -712,11 +734,17 @@ func (f *fnEmitter) val(val ssa.Value) string {
 	case *ssa.Global:
 		return f.e.globalPath(v) + "()"
 	case *ssa.Function:
-		f.errorf(v.Pos(), "function values are not supported yet (roadmap M1)")
-		return "()"
+		// A plain function used as a value: its shim takes an environment.
+		return fmt.Sprintf("Func::new(%s as %s, Env::NONE)",
+			f.e.shimPath(v), f.e.types.fnPtr(v.Signature, f.e, v.Pos()))
 	case *ssa.FreeVar:
-		f.errorf(v.Pos(), "closures are not supported yet (roadmap M1)")
-		return "()"
+		for i, fv := range f.fn.FreeVars {
+			if fv == v {
+				st := f.e.envStruct(f.fn)
+				name := f.e.types.structInfo(st, f.fn.Name()+"$env", f.e, v.Pos()).fields[i]
+				return fmt.Sprintf("(__e).project(|e| &e.%s).load()", name)
+			}
+		}
 	case ssa.Instruction:
 		if f.cells[val] {
 			return val.Name() + ".load()"

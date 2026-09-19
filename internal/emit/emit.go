@@ -67,7 +67,9 @@ func Crate(res *load.Result, opt Options) error {
 		fset:    res.Prog.Fset,
 		modules: map[*ssa.Package]*module{},
 		fnPaths: map[*ssa.Function]string{},
+		shims:   map[*ssa.Function]string{},
 		globals: map[*ssa.Global]string{},
+		envs:    map[*ssa.Function]*types.Struct{},
 		types:   newTypeReg(),
 	}
 	initPath := e.fnPath(mainPkg.Func("init"))
@@ -95,7 +97,9 @@ type emitter struct {
 	modList []*module
 	modNS   namespace
 	fnPaths map[*ssa.Function]string
+	shims   map[*ssa.Function]string
 	globals map[*ssa.Global]string
+	envs    map[*ssa.Function]*types.Struct
 	queue   []*ssa.Function
 	types   *typeReg
 	errs    []diag
@@ -192,6 +196,58 @@ func (e *emitter) fnPath(fn *ssa.Function) string {
 	p := "crate::" + m.name + "::" + m.ns.claim(mangle(base))
 	e.fnPaths[fn] = p
 	e.queue = append(e.queue, fn)
+	return p
+}
+
+// envStruct is the type of fn's captured environment: one field per free
+// variable, in order. Emitting it as a Go struct reuses the value/place/trace
+// machinery every other struct gets.
+func (e *emitter) envStruct(fn *ssa.Function) *types.Struct {
+	if st, ok := e.envs[fn]; ok {
+		return st
+	}
+	var fields []*types.Var
+	var pkg *types.Package
+	if fn.Pkg != nil {
+		pkg = fn.Pkg.Pkg
+	}
+	for i, fv := range fn.FreeVars {
+		fields = append(fields, types.NewField(token.NoPos, pkg, fmt.Sprintf("f%d", i), fv.Type(), false))
+	}
+	st := types.NewStruct(fields, nil)
+	e.envs[fn] = st
+	return st
+}
+
+// shimPath returns the Rust path of a wrapper giving fn the shape of a
+// closure — an environment parameter it ignores — so a plain function can be
+// used as a func value.
+func (e *emitter) shimPath(fn *ssa.Function) string {
+	if p, ok := e.shims[fn]; ok {
+		return p
+	}
+	target := e.fnPath(fn) // also queues fn for emission
+	m := e.module(fn.Pkg)
+	name := m.ns.claim(mangle(fn.Name() + "$funcval"))
+	sig := fn.Signature
+	params := []string{"_: Env"}
+	args := make([]string, 0, sig.Params().Len())
+	for i := 0; i < sig.Params().Len(); i++ {
+		params = append(params, fmt.Sprintf("a%d: %s", i, e.types.rust(sig.Params().At(i).Type(), e, fn.Pos())))
+		args = append(args, fmt.Sprintf("a%d", i))
+	}
+	ret := ""
+	switch res := sig.Results(); res.Len() {
+	case 0:
+	case 1:
+		ret = " -> " + e.types.rust(res.At(0).Type(), e, fn.Pos())
+	default:
+		ret = " -> " + e.types.rust(res, e, fn.Pos())
+	}
+	fmt.Fprintf(&m.buf, "\n// %s as a func value\npub fn %s(%s)%s {\n    %s(%s)\n}\n",
+		fn.String(), name, strings.Join(params, ", "), ret, target, strings.Join(args, ", "))
+	p := "crate::" + m.name + "::" + name
+	e.shims[fn] = p
 	return p
 }
 

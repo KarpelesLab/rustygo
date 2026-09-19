@@ -32,6 +32,7 @@ extern crate alloc;
 #[cfg(feature = "std")]
 extern crate std;
 
+pub mod func;
 #[cfg(feature = "std")]
 pub mod gc;
 #[cfg(feature = "std")]
