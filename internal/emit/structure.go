@@ -34,23 +34,7 @@ type structurer struct {
 // structured writes the body in structured form, or reports false (writing
 // nothing) if the CFG is irreducible.
 func (f *fnEmitter) structured() bool {
-	s := &structurer{f: f, rpo: map[*ssa.BasicBlock]int{}}
-	var post []*ssa.BasicBlock
-	seen := map[*ssa.BasicBlock]bool{}
-	var dfs func(b *ssa.BasicBlock)
-	dfs = func(b *ssa.BasicBlock) {
-		seen[b] = true
-		for _, succ := range b.Succs {
-			if !seen[succ] {
-				dfs(succ)
-			}
-		}
-		post = append(post, b)
-	}
-	dfs(f.fn.Blocks[0])
-	for i, b := range post {
-		s.rpo[b] = len(post) - 1 - i
-	}
+	s := &structurer{f: f, rpo: reversePostorder(f.fn)}
 	// Reducible iff every retreating edge targets a dominator of its source.
 	for b := range s.rpo {
 		for _, succ := range b.Succs {
@@ -170,10 +154,11 @@ func (f *fnEmitter) phiMoves(src, dst *ssa.BasicBlock, ind string) string {
 	if len(phis) == 0 {
 		return ""
 	}
-	idx := slices.Index(dst.Preds, src)
+	idx := predIndex(dst, src)
 	var b strings.Builder
 	if len(phis) == 1 {
 		fmt.Fprintf(&b, "%s%s = %s;\n", ind, phis[0].Name(), f.val(phis[0].Edges[idx]))
+		b.WriteString(f.rootSet(phis[0], ind))
 		return b.String()
 	}
 	for i, phi := range phis {
@@ -181,6 +166,7 @@ func (f *fnEmitter) phiMoves(src, dst *ssa.BasicBlock, ind string) string {
 	}
 	for i, phi := range phis {
 		fmt.Fprintf(&b, "%s%s = e%d;\n", ind, phi.Name(), i)
+		b.WriteString(f.rootSet(phi, ind))
 	}
 	return b.String()
 }

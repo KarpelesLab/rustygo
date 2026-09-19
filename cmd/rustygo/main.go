@@ -73,7 +73,7 @@ func runEmit(args []string) error {
 	if err != nil {
 		return err
 	}
-	return build.Emit(res, *out)
+	return build.Emit(res, *out, build.ConfigFromEnv())
 }
 
 func runBuild(args []string) error {
@@ -93,7 +93,7 @@ func runBuild(args []string) error {
 			*out += ".exe"
 		}
 	}
-	return build.Binary(res, *out)
+	return build.Binary(res, *out, build.ConfigFromEnv())
 }
 
 func runSSA(args []string) error {

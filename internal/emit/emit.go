@@ -41,6 +41,9 @@ type Options struct {
 	RuntimePath string
 	// BinName names the binary cargo produces.
 	BinName string
+	// ShadowStack emits GC root frames (runtime `gc` module) although M0 has
+	// no collector to read them, to measure their cost.
+	ShadowStack bool
 }
 
 // Crate writes the Rust crate for the single main package in res.
@@ -59,6 +62,7 @@ func Crate(res *load.Result, opt Options) error {
 	}
 
 	e := &emitter{
+		opt:     opt,
 		res:     res,
 		fset:    res.Prog.Fset,
 		modules: map[*ssa.Package]*module{},
@@ -84,6 +88,7 @@ func Crate(res *load.Result, opt Options) error {
 }
 
 type emitter struct {
+	opt     Options
 	res     *load.Result
 	fset    *token.FileSet
 	modules map[*ssa.Package]*module

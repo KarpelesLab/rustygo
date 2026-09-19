@@ -20,6 +20,9 @@ type fnEmitter struct {
 	// loop is set when the body has more than one block and runs as a
 	// dispatch loop over block indices.
 	loop bool
+	// roots maps each pointer-holding value to its shadow-stack slot, when
+	// Options.ShadowStack is set.
+	roots map[ssa.Value]int
 }
 
 func (e *emitter) function(fn *ssa.Function) {
@@ -55,9 +58,34 @@ func (e *emitter) function(fn *ssa.Function) {
 		ret = " -> " + f.typ(res, fn.Pos())
 	}
 	fmt.Fprintf(&f.out, "\n// Go: %s\npub fn %s(%s)%s {\n", fn.String(), name, strings.Join(params, ", "), ret)
+	if e.opt.ShadowStack {
+		f.collectRoots()
+	}
+	if len(f.roots) > 0 {
+		fmt.Fprintf(&f.out, "    let __roots = rustygo::gc::Frame::<%d>::new();\n    __roots.scope(|| {\n", len(f.roots))
+		for _, p := range fn.Params {
+			f.out.WriteString(f.rootSet(p, "    "))
+		}
+	}
 	f.body()
+	if len(f.roots) > 0 {
+		f.out.WriteString("    })\n")
+	}
 	f.out.WriteString("}\n")
 	m.buf.WriteString(f.out.String())
+}
+
+// rootSet records v in its shadow-stack slot, if it has one.
+func (f *fnEmitter) rootSet(v ssa.Value, ind string) string {
+	k, ok := f.roots[v]
+	if !ok {
+		return ""
+	}
+	name := v.Name()
+	if p, isParam := v.(*ssa.Parameter); isParam {
+		name = f.val(p)
+	}
+	return fmt.Sprintf("%s__roots.set(%d, &%s);\n", ind, k, name)
 }
 
 func (f *fnEmitter) typ(t types.Type, pos token.Pos) string {
@@ -208,7 +236,7 @@ func (f *fnEmitter) instr(instr ssa.Instruction) string {
 		if !f.hasVar(v) {
 			return expr + ";"
 		}
-		return v.Name() + " = " + expr + ";"
+		return v.Name() + " = " + expr + ";" + strings.TrimSuffix(f.rootSet(v, " "), "\n")
 	}
 	switch instr := instr.(type) {
 	case *ssa.Store:

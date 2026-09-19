@@ -14,6 +14,7 @@
 //! * [`panic`](mod@panic): Go panics carried on Rust unwinding.
 //! * `rt`: the process entry point for a Go `main` (`std` only).
 //! * [`prelude`]: what generated code imports.
+//! * `gc`: GC roots (the shadow stack); `std` only for now.
 //!
 //! M0 allocates without collecting; everything leaks. Still to come, by
 //! milestone: the collector, slices, maps, closures and interfaces (M1); goroutines, channels and timers (M2);
@@ -31,6 +32,8 @@ extern crate alloc;
 #[cfg(feature = "std")]
 extern crate std;
 
+#[cfg(feature = "std")]
+pub mod gc;
 pub mod ops;
 pub mod panic;
 pub mod place;

@@ -87,7 +87,7 @@ func TestPrograms(t *testing.T) {
 			rgBin := filepath.Join(tmp, name+"-rustygo"+exe)
 			res, err := load.Load(moduleRoot, pkg)
 			if err == nil {
-				err = build.Binary(res, rgBin)
+				err = build.Binary(res, rgBin, build.ConfigFromEnv())
 			}
 			if err != nil {
 				problem = "rustygo build failed: " + err.Error()

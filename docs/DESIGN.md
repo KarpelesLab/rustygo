@@ -290,9 +290,18 @@ From [BENCHMARKS.md](BENCHMARKS.md) (linux/amd64; regenerate with
 * **Strings** run at 2.2×, and M0's leaking allocator dominates: every
   intermediate string is a fresh allocation that is never freed (850 MiB peak
   against gc's 10 MiB). M1's collector is the fix, not the code generator.
-* **Not yet measured:** shadow-stack upkeep and a `Ptr` that also carries its
-  object's handle. Both arrive with the collector in M1, and the same
-  benchmarks will show their cost then.
+* **Shadow stack: 0–8%.** Built with `RUSTYGO_SHADOWSTACK=1`, each function
+  links a frame of root slots into a per-thread chain (`src/gc.rs`), and
+  stores a value in its slot when it is defined. Only values that hold a
+  reference *and* are live across a safe point (a call, an allocation or a
+  loop back-edge) get a slot, which a liveness pass decides
+  (`internal/emit/roots.go`). That leaves few: 1 slot in the field loop, 3 in
+  the linked-list walk, none in `fib`. Rooting every pointer-typed value
+  instead cost 2.3× on the field loop, because each `&p.X` got a slot write.
+  References inside struct values are not rooted yet, so this is a lower
+  bound.
+* **Not yet measured:** a `Ptr` that also carries its object's handle, which
+  arrives with the collector in M1.
 * **Compile time** is about 275 ms of `cargo build --release` per thousand
   lines of Go, with emitted Rust around 6× the Go line count. Linear
   extrapolation puts the whole standard library near 4 minutes, which is
@@ -332,7 +341,10 @@ beyond 2.2×, and the one outlier has a known cause outside the emitter.
 ## 13. Open questions
 
 1. Shadow stack versus stack maps — how much does precise-root bookkeeping
-   actually cost in generated code? (M0 measures it.)
+   actually cost in generated code? **M0 answer: 0–8% with liveness-based
+   slot assignment** (§11), which is low enough to keep the shadow stack
+   and its no-`unsafe`-in-generated-code property. Revisit if rooting struct
+   fields, still to come, changes the picture.
 2. Can `panic = "unwind"` be relied on across fullrust and `no_std`? If
    not, `defer`/`recover` needs an explicit result-propagation lowering.
    **fullrust: yes** (checked in M0). Generated programs built for

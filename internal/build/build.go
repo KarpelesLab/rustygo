@@ -93,17 +93,29 @@ func RuntimeDir() (string, error) {
 	return dir, nil
 }
 
+// Config selects code-generation options.
+type Config struct {
+	// ShadowStack emits GC root frames. M0 has no collector to read them;
+	// the switch exists to measure their cost.
+	ShadowStack bool
+}
+
+// ConfigFromEnv reads RUSTYGO_SHADOWSTACK=1.
+func ConfigFromEnv() Config {
+	return Config{ShadowStack: os.Getenv("RUSTYGO_SHADOWSTACK") == "1"}
+}
+
 // Emit writes the crate for res into dir.
-func Emit(res *load.Result, dir string) error {
+func Emit(res *load.Result, dir string, cfg Config) error {
 	rt, err := RuntimeDir()
 	if err != nil {
 		return err
 	}
-	return emit.Crate(res, emit.Options{OutDir: dir, RuntimePath: rt, BinName: "main"})
+	return emit.Crate(res, emit.Options{OutDir: dir, RuntimePath: rt, BinName: "main", ShadowStack: cfg.ShadowStack})
 }
 
 // Binary compiles res to a native executable at output.
-func Binary(res *load.Result, output string) error {
+func Binary(res *load.Result, output string, cfg Config) error {
 	rt, err := RuntimeDir()
 	if err != nil {
 		return err
@@ -112,11 +124,11 @@ func Binary(res *load.Result, output string) error {
 	if err != nil {
 		return err
 	}
-	work, id := workDir(cache, res)
+	work, id := workDir(cache, res, cfg)
 	// One binary name per work directory, so builds sharing the cargo
 	// target directory never overwrite each other's output.
 	bin := "p" + id
-	if err := emit.Crate(res, emit.Options{OutDir: work, RuntimePath: rt, BinName: bin}); err != nil {
+	if err := emit.Crate(res, emit.Options{OutDir: work, RuntimePath: rt, BinName: bin, ShadowStack: cfg.ShadowStack}); err != nil {
 		return err
 	}
 
@@ -136,18 +148,18 @@ func Binary(res *load.Result, output string) error {
 }
 
 // WorkDir is where Binary writes the crate for res.
-func WorkDir(res *load.Result) (string, error) {
+func WorkDir(res *load.Result, cfg Config) (string, error) {
 	cache, err := CacheDir()
 	if err != nil {
 		return "", err
 	}
-	dir, _ := workDir(cache, res)
+	dir, _ := workDir(cache, res, cfg)
 	return dir, nil
 }
 
-// workDir picks one work directory per set of main packages.
-func workDir(cache string, res *load.Result) (dir, id string) {
-	var key string
+// workDir picks one work directory per set of main packages and config.
+func workDir(cache string, res *load.Result, cfg Config) (dir, id string) {
+	key := fmt.Sprintf("%+v\x00", cfg)
 	for _, p := range res.Pkgs {
 		key += p.Pkg.Path() + "\x00"
 	}
