@@ -25,6 +25,9 @@ type fnEmitter struct {
 	// their references sit inside an aggregate.
 	roots map[ssa.Value]int
 	cells map[ssa.Value]bool
+	// hasDefers is set when the function defers, which wraps its body and
+	// gives the defer list a root slot.
+	hasDefers bool
 }
 
 func (e *emitter) function(fn *ssa.Function) {
@@ -60,23 +63,43 @@ func (e *emitter) function(fn *ssa.Function) {
 	}
 	fmt.Fprintf(&f.out, "\n// Go: %s\npub fn %s(%s)%s {\n", fn.String(), name, strings.Join(params, ", "), ret)
 	f.collectRoots()
+	f.hasDefers = hasDefers(fn)
 	if len(fn.FreeVars) > 0 {
 		fmt.Fprintf(&f.out, "    let __e = __env.cast::<%s>();\n", f.envPlace())
 	}
 	f.declare()
+	if f.hasDefers {
+		f.out.WriteString("    let __defers = Defers::new();\n")
+	}
 	if len(f.roots) > 0 {
 		fmt.Fprintf(&f.out, "    let __roots = rustygo::gc::Frame::<%d>::new();\n", len(f.roots))
 		for v, k := range f.rootsInOrder() {
+			if v == deferSlot {
+				continue // emitted below, over the defer list itself
+			}
 			if f.cells[v] {
 				fmt.Fprintf(&f.out, "    __roots.set_local(%d, &%s);\n", k, f.name(v))
 			}
+		}
+		if f.hasDefers {
+			fmt.Fprintf(&f.out, "    __roots.set_local(%d, &__defers);\n", f.roots[deferSlot])
 		}
 		f.out.WriteString("    __roots.scope(|| {\n")
 		for _, p := range fn.Params {
 			f.out.WriteString(f.rootSet(p, "    "))
 		}
 	}
+	if f.hasDefers {
+		// The body runs inside catch_unwind so the deferred calls still run
+		// when it panics. On a normal return the body has already run them
+		// (at RunDefers), and running the list drains it, so the call after
+		// the body only does anything while unwinding.
+		f.out.WriteString("    let __r = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {\n")
+	}
 	f.body()
+	if f.hasDefers {
+		f.out.WriteString("    }));\n    __defers.run();\n    match __r {\n        Ok(v) => v,\n        Err(p) => std::panic::resume_unwind(p),\n    }\n")
+	}
 	if len(f.roots) > 0 {
 		f.out.WriteString("    })\n")
 	}
@@ -282,8 +305,12 @@ func (f *fnEmitter) instr(instr ssa.Instruction) string {
 		return f.panic(instr)
 	case *ssa.Go:
 		f.errorf(instr.Pos(), "go statements are not supported yet (roadmap M2)")
-	case *ssa.Defer, *ssa.RunDefers:
-		f.errorf(instr.Pos(), "defer is not supported yet (roadmap M1)")
+	case *ssa.Defer:
+		return f.deferStmt(instr)
+	case *ssa.RunDefers:
+		// Go runs the deferred calls here, before a named result is read
+		// back, so a defer that assigns to one is visible to the caller.
+		return "__defers.run();"
 	case *ssa.Send:
 		f.errorf(instr.Pos(), "channels are not supported yet (roadmap M2)")
 	case *ssa.MapUpdate:
@@ -300,6 +327,63 @@ func (f *fnEmitter) assign(v ssa.Value, expr string) string {
 		return fmt.Sprintf("%s.store(%s);", v.Name(), expr)
 	}
 	return v.Name() + " = " + expr + ";" + strings.TrimSuffix(f.rootSet(v, " "), "\n")
+}
+
+// deferSlot is the key under which a function's defer list takes a root
+// slot: it holds the environments of the deferred calls.
+var deferSlot = new(ssa.Parameter)
+
+// hasDefers reports whether fn defers anything.
+func hasDefers(fn *ssa.Function) bool {
+	for _, b := range fn.Blocks {
+		for _, instr := range b.Instrs {
+			if _, ok := instr.(*ssa.Defer); ok {
+				return true
+			}
+		}
+	}
+	return false
+}
+
+// deferStmt stores a deferred call's arguments and pushes its thunk.
+func (f *fnEmitter) deferStmt(d *ssa.Defer) string {
+	c := d.Call
+	if c.IsInvoke() {
+		f.errorf(d.Pos(), "deferred interface method calls are not supported yet (roadmap M1)")
+		return ""
+	}
+	var argTypes []types.Type
+	var stored []string
+	indirect := false
+	target := ""
+	var builtinName *ssa.Builtin
+	if callee := c.StaticCallee(); callee != nil && c.Value == callee {
+		target = f.e.fnPath(callee)
+	} else if b, isBuiltin := c.Value.(*ssa.Builtin); isBuiltin {
+		builtinName = b
+	} else {
+		// A deferred call through a func value: store the value too.
+		indirect = true
+		argTypes = append(argTypes, c.Value.Type())
+		stored = append(stored, f.val(c.Value))
+	}
+	for _, a := range c.Args {
+		argTypes = append(argTypes, a.Type())
+		stored = append(stored, f.val(a))
+	}
+	body := deferBody{target: target, indirect: indirect}
+	if builtinName != nil {
+		body.builtin = func(loaded []string) string {
+			return f.builtin(builtinName, &c, types.Typ[types.Invalid], d.Pos(), loaded)
+		}
+	}
+	thunk, info := f.e.deferThunk(d, f.fn, argTypes, body)
+	fields := make([]string, len(stored))
+	for i, s := range stored {
+		fields[i] = fmt.Sprintf("%s: %s", info.fields[i], s)
+	}
+	return fmt.Sprintf("__defers.push(%s, Env::of(Ptr::<crate::ty::%s_P>::alloc(crate::ty::%s { %s })));",
+		thunk, info.name, info.name, strings.Join(fields, ", "))
 }
 
 // expr returns the right-hand side for a value-producing instruction.
@@ -604,7 +688,7 @@ func (f *fnEmitter) call(v *ssa.Call) string {
 		args[i] = f.val(a)
 	}
 	if b, ok := c.Value.(*ssa.Builtin); ok {
-		return f.builtin(v, b, args)
+		return f.builtin(b, c, v.Type(), v.Pos(), args)
 	}
 	if callee := c.StaticCallee(); callee != nil && c.Value == callee {
 		return fmt.Sprintf("%s(%s)", f.e.fnPath(callee), strings.Join(args, ", "))
@@ -615,13 +699,12 @@ func (f *fnEmitter) call(v *ssa.Call) string {
 	return fmt.Sprintf("{ let __f = %s; (__f.code())(%s) }", fv, strings.Join(call, ", "))
 }
 
-func (f *fnEmitter) builtin(v *ssa.Call, b *ssa.Builtin, args []string) string {
-	c := v.Common()
+func (f *fnEmitter) builtin(b *ssa.Builtin, c *ssa.CallCommon, resultType types.Type, pos token.Pos, args []string) string {
 	switch b.Name() {
 	case "print", "println":
 		parts := make([]string, len(c.Args))
 		for i, a := range c.Args {
-			parts[i] = f.printArg(a)
+			parts[i] = f.printArgOf(a.Type(), args[i], a.Pos())
 		}
 		return fmt.Sprintf("rustygo::print::%s(&[%s])", b.Name(), strings.Join(parts, ", "))
 	case "len", "cap":
@@ -646,7 +729,7 @@ func (f *fnEmitter) builtin(v *ssa.Call, b *ssa.Builtin, args []string) string {
 		}
 		return fmt.Sprintf("(%s).copy_from(%s)", args[0], args[1])
 	case "min", "max":
-		if bi := basicInfo(v.Type()); bi != nil && bi.Info()&(types.IsInteger|types.IsString) != 0 {
+		if bi := basicInfo(resultType); bi != nil && bi.Info()&(types.IsInteger|types.IsString) != 0 {
 			expr := args[0]
 			for _, a := range args[1:] {
 				expr = fmt.Sprintf("core::cmp::%s(%s, %s)", b.Name(), expr, a)
@@ -654,7 +737,7 @@ func (f *fnEmitter) builtin(v *ssa.Call, b *ssa.Builtin, args []string) string {
 			return expr
 		}
 	}
-	f.errorf(v.Pos(), "builtin %s on these operands is not supported yet", b.Name())
+	f.errorf(pos, "builtin %s on these operands is not supported yet", b.Name())
 	return ""
 }
 
@@ -663,7 +746,18 @@ func (f *fnEmitter) printArg(a ssa.Value) string {
 	if b := basicInfo(a.Type()); b != nil && b.Kind() == types.UntypedNil {
 		return "rustygo::print::Arg::Nil"
 	}
-	x := f.val(a)
+	return f.printArgOf(a.Type(), f.val(a), a.Pos())
+}
+
+// printArgOf is printArg for an operand already rendered as an expression.
+func (f *fnEmitter) printArgOf(t types.Type, x string, pos token.Pos) string {
+	if b := basicInfo(t); b != nil && b.Kind() == types.UntypedNil {
+		return "rustygo::print::Arg::Nil"
+	}
+	a := struct {
+		Type func() types.Type
+		Pos  func() token.Pos
+	}{func() types.Type { return t }, func() token.Pos { return pos }}
 	if _, ok := a.Type().Underlying().(*types.Pointer); ok {
 		return fmt.Sprintf("rustygo::print::Arg::Pointer((%s).addr())", x)
 	}

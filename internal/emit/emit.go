@@ -251,6 +251,52 @@ func (e *emitter) shimPath(fn *ssa.Function) string {
 	return p
 }
 
+// deferThunk emits a function that unpacks a deferred call's arguments from
+// its environment and makes the call, and returns its path along with the
+// environment's struct info. Go evaluates deferred arguments at the `defer`
+// statement, so they are stored when the thunk is created.
+// deferBody says what a thunk calls: a named function, a func value stored
+// as its first argument, or a builtin rendered from the loaded arguments.
+type deferBody struct {
+	target   string
+	indirect bool
+	builtin  func(loaded []string) string
+}
+
+func (e *emitter) deferThunk(d *ssa.Defer, in *ssa.Function, argTypes []types.Type, body deferBody) (string, *structInfo) {
+	var fields []*types.Var
+	var pkg *types.Package
+	if in.Pkg != nil {
+		pkg = in.Pkg.Pkg
+	}
+	for i, t := range argTypes {
+		fields = append(fields, types.NewField(token.NoPos, pkg, fmt.Sprintf("f%d", i), t, false))
+	}
+	st := types.NewStruct(fields, nil)
+	info := e.types.structInfo(st, in.Name()+"$deferred", e, d.Pos())
+
+	m := e.module(in.Pkg)
+	name := m.ns.claim(mangle(in.Name() + "$defer"))
+	var args []string
+	for i, f := range info.fields[:len(argTypes)] {
+		args = append(args, fmt.Sprintf("__e.project(|e| &e.%s).load()", f))
+		_ = i
+	}
+	call := fmt.Sprintf("%s(%s)", body.target, strings.Join(args, ", "))
+	switch {
+	case body.builtin != nil:
+		call = body.builtin(args)
+	case body.indirect:
+		// The func value is the first stored argument.
+		fv := args[0]
+		rest := append([]string{"__f.env()"}, args[1:]...)
+		call = fmt.Sprintf("let __f = %s; (__f.code())(%s)", fv, strings.Join(rest, ", "))
+	}
+	fmt.Fprintf(&m.buf, "\n// deferred call in %s\npub fn %s(__env: Env) {\n    let __e = __env.cast::<crate::ty::%s_P>();\n    %s;\n}\n",
+		in.String(), name, info.name, call)
+	return "crate::" + m.name + "::" + name, info
+}
+
 // globalPath returns the Rust path of the accessor for g, which yields a
 // `Ptr` to its storage, emitting the global on first use.
 func (e *emitter) globalPath(g *ssa.Global) string {

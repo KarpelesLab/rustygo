@@ -24,6 +24,12 @@ import (
 func (f *fnEmitter) collectRoots() {
 	f.roots = map[ssa.Value]int{}
 	f.cells = map[ssa.Value]bool{}
+	if hasDefers(f.fn) {
+		// The list holds the deferred calls' environments, so it is a root
+		// whatever else the function does.
+		f.roots[deferSlot] = len(f.roots)
+		f.cells[deferSlot] = true
+	}
 	cand := map[ssa.Value]bool{}
 	for _, p := range f.fn.Params {
 		if containsRef(p.Type()) {
@@ -211,7 +217,7 @@ func safePoint(instr ssa.Instruction) bool {
 	case *ssa.Convert:
 		// string <-> []byte and []rune both copy into a new object.
 		return isString(instr.Type()) || isString(instr.X.Type())
-	case *ssa.MakeSlice, *ssa.MakeClosure:
+	case *ssa.MakeSlice, *ssa.MakeClosure, *ssa.Defer:
 		return true
 	}
 	return false
