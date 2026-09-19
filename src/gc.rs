@@ -43,6 +43,13 @@ impl Root for crate::func::Env {
     }
 }
 
+impl<K, V> Root for crate::map::GoMap<K, V> {
+    #[inline]
+    fn root_word(&self) -> usize {
+        self.addr() as usize
+    }
+}
+
 impl Root for crate::iface::Iface {
     #[inline]
     fn root_word(&self) -> usize {

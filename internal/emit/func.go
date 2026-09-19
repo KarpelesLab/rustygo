@@ -237,12 +237,30 @@ func deadLoad(v ssa.Value) bool {
 func (f *fnEmitter) valueType(v ssa.Value) string {
 	switch v := v.(type) {
 	case *ssa.Range:
+		if mt, ok := v.X.Type().Underlying().(*types.Map); ok {
+			return fmt.Sprintf("MapIter<%s, %s>", f.typ(mt.Key(), v.Pos()), f.typ(mt.Elem(), v.Pos()))
+		}
 		if !isString(v.X.Type()) {
 			f.errorf(v.Pos(), "range over %s is not supported yet (roadmap M1)", v.X.Type())
 		}
 		return "StrIter"
 	case *ssa.Next:
-		return "(bool, i64, i32)"
+		if v.IsString {
+			return "(bool, i64, i32)"
+		}
+		// (ok, key, value). The result tuple leaves out an unused key or
+		// value as an invalid type, so the map itself gives them.
+		rng, ok := v.Iter.(*ssa.Range)
+		if !ok {
+			f.errorf(v.Pos(), "iterating %s is not supported yet", v.Iter.Type())
+			return "()"
+		}
+		mt, ok := rng.X.Type().Underlying().(*types.Map)
+		if !ok {
+			f.errorf(v.Pos(), "range over %s is not supported yet", rng.X.Type())
+			return "()"
+		}
+		return fmt.Sprintf("(bool, %s, %s)", f.typ(mt.Key(), v.Pos()), f.typ(mt.Elem(), v.Pos()))
 	}
 	return f.typ(v.Type(), v.Pos())
 }
@@ -321,7 +339,7 @@ func (f *fnEmitter) instr(instr ssa.Instruction) string {
 	case *ssa.Send:
 		f.errorf(instr.Pos(), "channels are not supported yet (roadmap M2)")
 	case *ssa.MapUpdate:
-		f.errorf(instr.Pos(), "maps are not supported yet (roadmap M1)")
+		return fmt.Sprintf("(%s).set(%s, %s);", f.val(instr.Map), f.val(instr.Key), f.val(instr.Value))
 	default:
 		f.errorf(instr.Pos(), "instruction %T is not supported yet", instr)
 	}
@@ -508,10 +526,6 @@ func (f *fnEmitter) expr(v ssa.Value) string {
 	case *ssa.Range:
 		return fmt.Sprintf("(%s).iter()", f.val(v.X))
 	case *ssa.Next:
-		if !v.IsString {
-			f.errorf(v.Pos(), "range over maps is not supported yet (roadmap M1)")
-			return ""
-		}
 		it := v.Iter.Name()
 		if f.cells[v.Iter] {
 			// The iterator lives in a cell so the collector can trace the
@@ -542,8 +556,29 @@ func (f *fnEmitter) expr(v ssa.Value) string {
 			f.e.fnPath(fn), f.e.types.fnPtr(fn.Signature, f.e, v.Pos()), env)
 	case *ssa.SliceToArrayPointer:
 		f.errorf(v.Pos(), "slice-to-array-pointer conversion is not supported yet")
-	case *ssa.MakeMap, *ssa.Lookup:
-		f.errorf(v.Pos(), "maps are not supported yet (roadmap M1)")
+	case *ssa.MakeMap:
+		mt := v.Type().Underlying().(*types.Map)
+		size := "0i64"
+		if v.Reserve != nil {
+			size = f.val(v.Reserve) + " as i64"
+		}
+		return fmt.Sprintf("GoMap::<%s, %s>::make(%s)",
+			f.typ(mt.Key(), v.Pos()), f.typ(mt.Elem(), v.Pos()), size)
+	case *ssa.Lookup:
+		if _, ok := v.X.Type().Underlying().(*types.Map); ok {
+			if v.CommaOk {
+				return fmt.Sprintf("(%s).get_ok(%s)", f.val(v.X), f.val(v.Index))
+			}
+			return fmt.Sprintf("(%s).get(%s)", f.val(v.X), f.val(v.Index))
+		}
+		// A string index: gc lowers `s[i]` this way in some shapes.
+		if isString(v.X.Type()) {
+			if isUnsigned(v.Index.Type()) {
+				return fmt.Sprintf("(%s).at_u(%s as u64)", f.val(v.X), f.val(v.Index))
+			}
+			return fmt.Sprintf("(%s).at(%s as i64)", f.val(v.X), f.val(v.Index))
+		}
+		f.errorf(v.Pos(), "lookup in %s is not supported", v.X.Type())
 	case *ssa.MakeChan, *ssa.Select:
 		f.errorf(v.Pos(), "channels are not supported yet (roadmap M2)")
 	default:
@@ -567,11 +602,13 @@ func (f *fnEmitter) binop(v *ssa.BinOp) string {
 	switch v.Op {
 	case token.EQL, token.NEQ:
 		// The only comparison Go allows on a slice is against nil.
-		if _, ok := v.X.Type().Underlying().(*types.Slice); ok {
-			return sliceNilTest(x, v.Op)
+		switch v.X.Type().Underlying().(type) {
+		case *types.Slice, *types.Map:
+			return nilTest(x, v.Op)
 		}
-		if _, ok := v.Y.Type().Underlying().(*types.Slice); ok {
-			return sliceNilTest(y, v.Op)
+		switch v.Y.Type().Underlying().(type) {
+		case *types.Slice, *types.Map:
+			return nilTest(y, v.Op)
 		}
 		return fmt.Sprintf("(%s %s %s)", x, v.Op, y)
 	case token.LSS, token.LEQ, token.GTR, token.GEQ:
@@ -681,8 +718,9 @@ func (f *fnEmitter) convert(v *ssa.Convert) string {
 	return ""
 }
 
-// sliceNilTest compares a slice against nil.
-func sliceNilTest(x string, op token.Token) string {
+// nilTest compares a slice or map against nil, the only comparison Go
+// allows on them.
+func nilTest(x string, op token.Token) string {
 	if op == token.EQL {
 		return fmt.Sprintf("(%s).is_nil()", x)
 	}
@@ -743,8 +781,21 @@ func (f *fnEmitter) builtin(b *ssa.Builtin, c *ssa.CallCommon, resultType types.
 			parts[i] = f.e.printArgOf(a.Type(), args[i], a.Pos())
 		}
 		return fmt.Sprintf("rustygo::print::%s(&[%s])", b.Name(), strings.Join(parts, ", "))
+	case "delete":
+		return fmt.Sprintf("(%s).delete(%s)", args[0], args[1])
+	case "clear":
+		switch c.Args[0].Type().Underlying().(type) {
+		case *types.Map:
+			return fmt.Sprintf("(%s).clear()", args[0])
+		case *types.Slice:
+			return fmt.Sprintf("(%s).clear()", args[0])
+		}
 	case "len", "cap":
 		switch c.Args[0].Type().Underlying().(type) {
+		case *types.Map:
+			if b.Name() == "len" {
+				return fmt.Sprintf("(%s).len()", args[0])
+			}
 		case *types.Slice:
 			return fmt.Sprintf("(%s).%s()", args[0], b.Name())
 		case *types.Basic:
@@ -817,6 +868,8 @@ func (e *emitter) printArgOf(t types.Type, x string, pos token.Pos) string {
 		return fmt.Sprintf("rustygo::print::Arg::Iface { data: (%s).data().addr() }", x)
 	case *types.Slice:
 		return fmt.Sprintf("rustygo::print::Arg::Slice { len: (%s).len(), cap: (%s).cap(), addr: (%s).addr() }", x, x, x)
+	case *types.Map:
+		return fmt.Sprintf("rustygo::print::Arg::Pointer((%s).addr())", x)
 	}
 	e.errorf(pos, "printing a %s is not supported yet", t)
 	return "rustygo::print::Arg::Nil"

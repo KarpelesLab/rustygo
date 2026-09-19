@@ -56,6 +56,9 @@ pub struct TypeDesc {
     /// Compares two values of this type, or `None` if Go says the type is
     /// not comparable (a slice, map or func).
     pub equal: Option<fn(Data, Data) -> bool>,
+    /// Hashes a value of this type, for use as a map key. `None` exactly
+    /// when `equal` is.
+    pub hash: Option<fn(Data) -> u64>,
     /// Appends the value as `print` and `panic` render it.
     pub print: fn(Data, &mut Vec<u8>),
 }
@@ -142,10 +145,11 @@ impl PartialEq for Iface {
                 }
                 match a.equal {
                     Some(eq) => eq(self.data, other.data),
-                    None => go_panic(GoPanic::new(format!(
-                        "runtime error: comparing uncomparable type {}",
-                        a.name
-                    ))),
+                    None => {
+                        crate::panic::runtime_error(crate::panic::RuntimeError::UncomparableType {
+                            type_name: a.name,
+                        })
+                    }
                 }
             }
             _ => false,
@@ -169,6 +173,20 @@ impl Iface {
         Iface {
             desc: None,
             data: Data::NONE,
+        }
+    }
+
+    /// The hash of an interface used as a map key: the dynamic type and the
+    /// value together. Panics like gc if that type is not comparable.
+    pub fn hash_value(self) -> u64 {
+        let Some(desc) = self.desc else {
+            return 0;
+        };
+        match desc.hash {
+            Some(h) => crate::map::mix(desc.name.len() as u64, h(self.data)),
+            None => crate::panic::runtime_error(crate::panic::RuntimeError::UnhashableKey {
+                type_name: desc.name,
+            }),
         }
     }
 

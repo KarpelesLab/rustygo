@@ -84,6 +84,7 @@ pub fn init_runtime_errors(error_id: MethodId, string_id: MethodId) {
         name: "runtime.Error",
         methods,
         equal: Some(|a, b| message(a) == message(b)),
+        hash: Some(|d| crate::map::GoKey::go_hash(&message(d))),
         print: |d, out| out.extend_from_slice(message(d).bytes()),
     }));
     RUNTIME_ERROR.with(|c| c.set(Some(desc)));
@@ -200,6 +201,18 @@ pub enum RuntimeError {
         /// The requested length.
         len: i64,
     },
+    /// `m[k] = v` on a nil map.
+    NilMapWrite,
+    /// A map key whose dynamic type is not hashable.
+    UnhashableKey {
+        /// The dynamic type's name.
+        type_name: &'static str,
+    },
+    /// `==` on interfaces holding an uncomparable type.
+    UncomparableType {
+        /// The dynamic type's name.
+        type_name: &'static str,
+    },
     /// A slice expression's low bound outside `[0, high]`.
     SliceLow {
         /// The low bound.
@@ -212,6 +225,19 @@ pub enum RuntimeError {
 impl RuntimeError {
     /// The message exactly as gc prints it after `panic: `.
     pub fn message(self) -> String {
+        // gc prints a few runtime errors without the `runtime error:` tag.
+        match self {
+            RuntimeError::NilMapWrite => {
+                return String::from("assignment to entry in nil map");
+            }
+            RuntimeError::UnhashableKey { type_name } => {
+                return format!("runtime error: hash of unhashable type {type_name}");
+            }
+            RuntimeError::UncomparableType { type_name } => {
+                return format!("runtime error: comparing uncomparable type {type_name}");
+            }
+            _ => {}
+        }
         let detail = match self {
             RuntimeError::DivideByZero => String::from("integer divide by zero"),
             RuntimeError::NegativeShift => String::from("negative shift amount"),
@@ -247,6 +273,9 @@ impl RuntimeError {
             RuntimeError::SliceLow { low, high } => {
                 format!("slice bounds out of range [{low}:{high}]")
             }
+            RuntimeError::NilMapWrite
+            | RuntimeError::UnhashableKey { .. }
+            | RuntimeError::UncomparableType { .. } => unreachable!("handled above"),
         };
         format!("runtime error: {detail}")
     }

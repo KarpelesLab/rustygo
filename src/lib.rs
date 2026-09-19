@@ -40,6 +40,7 @@ pub mod func;
 pub mod gc;
 pub mod heap;
 pub mod iface;
+pub mod map;
 pub mod ops;
 pub mod panic;
 pub mod place;

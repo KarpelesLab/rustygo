@@ -55,6 +55,8 @@ func (r *typeReg) rust(t types.Type, e *emitter, pos token.Pos) string {
 		return "Func<" + r.fnPtr(t, e, pos) + ">"
 	case *types.Interface:
 		return "Iface"
+	case *types.Map:
+		return fmt.Sprintf("GoMap<%s, %s>", r.rust(t.Key(), e, pos), r.rust(t.Elem(), e, pos))
 	case *types.Tuple:
 		parts := make([]string, t.Len())
 		for i := range parts {
@@ -131,7 +133,7 @@ func (r *typeReg) structInfo(st *types.Struct, hint string, e *emitter, pos toke
 		si.fields = append(si.fields, fieldNS.claim(name))
 	}
 
-	var def, place, zero, newP, load, store, trace bytes.Buffer
+	var def, place, zero, newP, load, store, trace, hash, eq bytes.Buffer
 	for i, f := range si.fields {
 		ft := st.Field(i).Type()
 		fmt.Fprintf(&def, "    pub %s: %s,\n", f, r.rust(ft, e, pos))
@@ -143,6 +145,8 @@ func (r *typeReg) structInfo(st *types.Struct, hint string, e *emitter, pos toke
 		if containsRef(ft) {
 			fmt.Fprintf(&trace, "        self.%s.trace(t);\n", f)
 		}
+		fmt.Fprintf(&hash, " h = rustygo::map::mix(h, GoKey::go_hash(&self.%s));", f)
+		fmt.Fprintf(&eq, " && GoKey::go_eq(&self.%s, &other.%s)", f, f)
 	}
 	n := si.name
 	fmt.Fprintf(&r.buf, `
@@ -181,10 +185,30 @@ impl Trace for %s_P {
     fn trace(&self, t: &mut Tracer<'_>) {
 %s    }
 }
-`, types.TypeString(st, nil), n, def.String(), n, n, zero.String(),
+%s`, types.TypeString(st, nil), n, def.String(), n, n, zero.String(),
 		n, place.String(), n, n, n, n, newP.String(), n, n, load.String(), n, store.String(),
-		n, trace.String(), n, trace.String())
+		n, trace.String(), n, trace.String(), keyImpl(n, st, hash.String(), eq.String()))
 	return si
+}
+
+// keyImpl renders the GoKey implementation of a comparable struct type, so
+// it can be a map key. Go rejects an uncomparable struct as a key, so those
+// need none.
+func keyImpl(name string, st *types.Struct, hash, eq string) string {
+	if !types.Comparable(st) {
+		return ""
+	}
+	return fmt.Sprintf(`
+impl GoKey for %s {
+    fn go_hash(&self) -> u64 {
+        let mut h = 0u64;%s
+        h
+    }
+    fn go_eq(&self, other: &Self) -> bool {
+        true%s
+    }
+}
+`, name, hash, eq)
 }
 
 var basicTypes = map[types.BasicKind]string{

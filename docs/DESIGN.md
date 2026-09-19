@@ -59,7 +59,7 @@ teaching `go list` a GOARCH it rejects.
 | `string` | `GoStr { data: Gc<[u8]>, off: u32, len: u32 }` | **not** `String`: Go strings are arbitrary bytes |
 | `[]T` | `Slice<P>`: pointer, len, cap over places of `T` | aliasing, reslicing and `append` growth as in Go |
 | `[N]T` | `[T; N]` | value type, copied on assignment |
-| `map[K]V` | `Gc<GoMap<K, V>>` | runtime hash map, randomized iteration order |
+| `map[K]V` | `GoMap<K, V>` | handle to a heap object holding an open-addressing table; keys hash by Go's rules; iteration starts at a random bucket |
 | `chan T` | `Gc<Chan<T>>` | runtime, integrates with scheduler |
 | `func(...)` | `Func<fn(Env, ..) -> ..>` | code pointer + environment; the captured env is a traced place struct |
 | `struct` | `struct` + emitted `impl Trace` | field order preserved; `Gc<T>` when heap-allocated |

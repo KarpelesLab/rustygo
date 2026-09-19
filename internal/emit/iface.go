@@ -79,12 +79,13 @@ func (e *emitter) typeDesc(t types.Type, pos token.Pos) string {
 
 	place := e.types.place(t, e, pos)
 	methods := e.methodTable(t, pos)
-	equal := "None"
+	equal, hash := "None", "None"
 	if types.Comparable(t) {
 		equal = fmt.Sprintf("Some(|a, b| a.cast::<%s>().load() == b.cast::<%s>().load())", place, place)
+		hash = fmt.Sprintf("Some(|d| GoKey::go_hash(&d.cast::<%s>().load()))", place)
 	}
-	fmt.Fprintf(&e.types.buf, "\npub static %s: TypeDesc = TypeDesc {\n    name: %q,\n    methods: &[%s],\n    equal: %s,\n    print: |d, out| { %s },\n};\n",
-		name, goName(t), methods, equal, e.printValue(t, place, pos))
+	fmt.Fprintf(&e.types.buf, "\npub static %s: TypeDesc = TypeDesc {\n    name: %q,\n    methods: &[%s],\n    equal: %s,\n    hash: %s,\n    print: |d, out| { %s },\n};\n",
+		name, goName(t), methods, equal, hash, e.printValue(t, place, pos))
 	return path
 }
 

@@ -29,6 +29,10 @@ struct Obj {
     /// Payload bytes.
     size: usize,
     trace: TraceFn,
+    /// Runs the payload's Rust destructor before the memory is freed. Only
+    /// objects that own memory outside the heap need one — a map's table,
+    /// for instance.
+    drop: Option<unsafe fn(*mut u8)>,
     /// log2 of the allocation's alignment; with `size` it rebuilds the
     /// `Layout` that `dealloc` needs.
     align_log2: u8,
@@ -102,6 +106,7 @@ pub fn allocate<T: Trace>(value: T) -> NonNull<T> {
             start: ptr.as_ptr() as usize,
             size: layout.size(),
             trace: trace_fn::<T>(),
+            drop: needs_drop::<T>(),
             align_log2: layout.align().trailing_zeros() as u8,
             mark: false,
         });
@@ -139,6 +144,7 @@ pub fn allocate_bytes(len: usize, fill: impl FnOnce(&mut [u8])) -> NonNull<u8> {
             start: ptr.as_ptr() as usize,
             size: len,
             trace: |_, _, _| {},
+            drop: None,
             align_log2: 0,
             mark: false,
         });
@@ -172,6 +178,7 @@ pub fn allocate_array<P: crate::place::Place + Trace>(n: usize) -> NonNull<P> {
             start: ptr.as_ptr() as usize,
             size: layout.size(),
             trace: trace_array_fn::<P>(),
+            drop: needs_drop::<P>(),
             align_log2: layout.align().trailing_zeros() as u8,
             mark: false,
         });
@@ -179,6 +186,17 @@ pub fn allocate_array<P: crate::place::Place + Trace>(n: usize) -> NonNull<P> {
         h.live_bytes += layout.size();
     });
     ptr
+}
+
+/// The destructor for `T`, if it has one worth running.
+fn needs_drop<T>() -> Option<unsafe fn(*mut u8)> {
+    if core::mem::needs_drop::<T>() {
+        // SAFETY: called once, on the payload of an object allocated as `T`,
+        // just before its memory is freed.
+        Some(|p| unsafe { core::ptr::drop_in_place(p as *mut T) })
+    } else {
+        None
+    }
 }
 
 /// A zero-sized payload still needs a distinct address.
@@ -228,6 +246,11 @@ pub fn collect() {
             if o.mark {
                 live += o.size;
                 return true;
+            }
+            if let Some(drop) = o.drop {
+                // SAFETY: the object is unreachable, so nothing can observe
+                // the payload afterwards, and this runs once.
+                unsafe { drop(o.start as *mut u8) };
             }
             // SAFETY: unreachable, so nothing points at it; freed once,
             // with the layout it was allocated with.

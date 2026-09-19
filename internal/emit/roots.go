@@ -162,7 +162,7 @@ func (f *fnEmitter) collectRoots() {
 // or a string. Such a value goes in a plain root slot.
 func holdsRef(t types.Type) bool {
 	switch u := t.Underlying().(type) {
-	case *types.Pointer, *types.Slice, *types.Signature, *types.Interface:
+	case *types.Pointer, *types.Slice, *types.Signature, *types.Interface, *types.Map:
 		return true
 	case *types.Basic:
 		return u.Info()&types.IsString != 0
@@ -217,8 +217,10 @@ func safePoint(instr ssa.Instruction) bool {
 	case *ssa.Convert:
 		// string <-> []byte and []rune both copy into a new object.
 		return isString(instr.Type()) || isString(instr.X.Type())
-	case *ssa.MakeSlice, *ssa.MakeClosure, *ssa.Defer, *ssa.MakeInterface:
+	case *ssa.MakeSlice, *ssa.MakeClosure, *ssa.Defer, *ssa.MakeInterface, *ssa.MakeMap:
 		return true
+	case *ssa.MapUpdate:
+		return true // inserting may grow the table
 	}
 	return false
 }
