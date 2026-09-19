@@ -335,6 +335,14 @@ beyond 2.2×, and the one outlier has a known cause outside the emitter.
    actually cost in generated code? (M0 measures it.)
 2. Can `panic = "unwind"` be relied on across fullrust and `no_std`? If
    not, `defer`/`recover` needs an explicit result-propagation lowering.
+   **fullrust: yes** (checked in M0). Generated programs built for
+   `x86_64-unknown-linux-fullrust` are static binaries, and Go panics unwind
+   through `resume_unwind` → `catch_unwind` with output identical to gc.
+   The fullrust toolchain found (1.88) is below the declared MSRV (1.89)
+   and needed `--ignore-rust-version`; the MSRV check should include it once
+   fullrust ships ≥ 1.89. **`no_std`/kintane: still open.** Bare-metal targets
+   default to `panic = "abort"`, so unwinding there needs an unwinder
+   (e.g. the `unwinding` crate) and a kintane environment to test on.
 3. Is a single-threaded mode (no scheduler locks, one heap) worth having for
    embedded targets?
 4. How much of `reflect` is enough? `fmt` + `encoding/json` is the practical
