@@ -630,7 +630,13 @@ func (f *fnEmitter) binop(v *ssa.BinOp) string {
 		return fmt.Sprintf("(%s).concat(%s)", x, y)
 	}
 	if b.Info()&types.IsComplex != 0 {
-		f.errorf(v.Pos(), "complex numbers are not supported yet (roadmap M1)")
+		switch v.Op {
+		case token.ADD, token.SUB, token.MUL:
+			return fmt.Sprintf("(%s %s %s)", x, v.Op, y)
+		case token.QUO:
+			return fmt.Sprintf("(%s).divide(%s)", x, y)
+		}
+		f.errorf(v.Pos(), "operator %s on %s is not supported", v.Op, v.X.Type())
 		return ""
 	}
 	if isInt {
@@ -665,8 +671,12 @@ func (f *fnEmitter) unop(v *ssa.UnOp) string {
 	case token.NOT, token.XOR:
 		return fmt.Sprintf("(!%s)", x)
 	case token.SUB:
-		if b := basicInfo(v.X.Type()); b != nil && b.Info()&types.IsInteger != 0 {
+		b := basicInfo(v.X.Type())
+		switch {
+		case b != nil && b.Info()&types.IsInteger != 0:
 			return fmt.Sprintf("(%s).wrapping_neg()", x)
+		case b != nil && b.Info()&types.IsComplex != 0:
+			return fmt.Sprintf("(-%s)", x)
 		}
 		return fmt.Sprintf("(-%s)", x)
 	case token.ARROW:
@@ -701,6 +711,16 @@ func (f *fnEmitter) convert(v *ssa.Convert) string {
 	}
 	if from != nil && to != nil {
 		fi, ti := from.Info(), to.Info()
+		if fi&types.IsComplex != 0 && ti&types.IsComplex != 0 {
+			switch {
+			case from.Kind() == to.Kind():
+				return x
+			case to.Kind() == types.Complex64:
+				return fmt.Sprintf("(%s).to_c64()", x)
+			default:
+				return fmt.Sprintf("(%s).to_c128()", x)
+			}
+		}
 		switch {
 		case fi&types.IsInteger != 0 && ti&types.IsString != 0:
 			return fmt.Sprintf("GoStr::from_rune(%s as i64)", x)
@@ -777,6 +797,12 @@ func (f *fnEmitter) builtin(b *ssa.Builtin, c *ssa.CallCommon, resultType types.
 			parts[i] = f.e.printArgOf(a.Type(), args[i], a.Pos())
 		}
 		return fmt.Sprintf("rustygo::print::%s(&[%s])", b.Name(), strings.Join(parts, ", "))
+	case "real":
+		return fmt.Sprintf("(%s).re", args[0])
+	case "imag":
+		return fmt.Sprintf("(%s).im", args[0])
+	case "complex":
+		return fmt.Sprintf("%s::new(%s, %s)", f.typ(resultType, pos), args[0], args[1])
 	case "delete":
 		return fmt.Sprintf("(%s).delete(%s)", args[0], args[1])
 	case "clear":
@@ -799,6 +825,10 @@ func (f *fnEmitter) builtin(b *ssa.Builtin, c *ssa.CallCommon, resultType types.
 				return fmt.Sprintf("(%s).len()", args[0])
 			}
 		}
+	case "ssa:wrapnilchk":
+		// go/ssa's nil check before a promoted field or method reaches
+		// through an embedded pointer.
+		return fmt.Sprintf("(%s).nil_checked()", args[0])
 	case "recover":
 		return "rustygo::panic::recover()"
 	case "append":
@@ -855,6 +885,10 @@ func (e *emitter) printArgOf(t types.Type, x string, pos token.Pos) string {
 			return fmt.Sprintf("rustygo::print::Arg::Float32(%s)", x)
 		case info&types.IsFloat != 0:
 			return fmt.Sprintf("rustygo::print::Arg::Float64(%s)", x)
+		case b.Kind() == types.Complex64:
+			return fmt.Sprintf("rustygo::print::Arg::Complex64((%s).re, (%s).im)", x, x)
+		case info&types.IsComplex != 0:
+			return fmt.Sprintf("rustygo::print::Arg::Complex128((%s).re, (%s).im)", x, x)
 		}
 	}
 	switch u.(type) {
@@ -948,6 +982,19 @@ func (f *fnEmitter) constant(c *ssa.Const) string {
 			return fmt.Sprintf("(%d%s)", i, rt)
 		}
 		return fmt.Sprintf("%d%s", i, rt)
+	case b.Info()&types.IsComplex != 0:
+		v := constant.ToComplex(c.Value)
+		re, im := constant.Real(v), constant.Imag(v)
+		if b.Kind() == types.Complex64 {
+			r, _ := constant.Float32Val(re)
+			i, _ := constant.Float32Val(im)
+			return fmt.Sprintf("Complex64::new(f32::from_bits(%#x), f32::from_bits(%#x))",
+				math.Float32bits(r), math.Float32bits(i))
+		}
+		r, _ := constant.Float64Val(re)
+		i, _ := constant.Float64Val(im)
+		return fmt.Sprintf("Complex128::new(f64::from_bits(%#x), f64::from_bits(%#x))",
+			math.Float64bits(r), math.Float64bits(i))
 	case b.Kind() == types.Float32:
 		x, _ := constant.Float32Val(constant.ToFloat(c.Value))
 		return fmt.Sprintf("f32::from_bits(%#x)", math.Float32bits(x))

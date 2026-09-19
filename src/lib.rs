@@ -35,6 +35,7 @@ mod tls;
 #[cfg(feature = "std")]
 extern crate std;
 
+pub mod complex;
 pub mod defers;
 pub mod func;
 pub mod gc;

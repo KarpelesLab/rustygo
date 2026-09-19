@@ -417,6 +417,18 @@ impl<T: GoKey, const N: usize> GoKey for [T; N] {
     }
 }
 
+impl<F: GoKey + GoValue> GoKey for crate::complex::Complex<F> {
+    #[inline]
+    fn go_hash(&self) -> u64 {
+        mix(self.re.go_hash(), self.im.go_hash())
+    }
+    #[inline]
+    fn go_eq(&self, other: &Self) -> bool {
+        // Both parts compare as floats do, so a NaN part is never equal.
+        self.re.go_eq(&other.re) && self.im.go_eq(&other.im)
+    }
+}
+
 impl GoKey for crate::iface::Iface {
     /// An interface key hashes through its type descriptor, and panics like
     /// gc if the dynamic type is not comparable.

@@ -187,6 +187,15 @@ impl<P> Ptr<P> {
         }
     }
 
+    /// Checks that the pointer is not nil, panicking like gc if it is, and
+    /// returns it. go/ssa inserts this before reaching through an embedded
+    /// pointer field.
+    #[inline]
+    pub fn nil_checked(self) -> Self {
+        let _ = self.place();
+        self
+    }
+
     /// The address, as `println` shows it. Zero for nil.
     #[inline]
     pub fn addr(self) -> u64 {

@@ -1,5 +1,6 @@
 //! Everything generated code uses unqualified: `use rustygo::prelude::*;`.
 
+pub use crate::complex::{Complex, Complex64, Complex128};
 pub use crate::defers::Defers;
 pub use crate::func::{Env, Func};
 pub use crate::iface::{Data, ErasedFn, Iface, MethodId, TypeDesc};
