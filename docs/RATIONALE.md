@@ -18,9 +18,14 @@ The current bridge is duplication: `tss-lib` / `tsslib-rs`, `outscript` /
 specification, kept compatible by test vectors and care. That cost grows with
 every new pair.
 
-cgo would bridge them, and is rejected: it reintroduces a C toolchain, breaks
+cgo would bridge them, and is rejected *as the bridge*: routing Go↔Rust calls
+through C reintroduces a C toolchain on a path that needs none, breaks
 cross-compilation, breaks the pure-Rust and pure-Go guarantees both sides were
 built for, and leaves `unsafe` on the boundary.
+
+That is a statement about the bridge, not about C. Go packages that use cgo of
+their own accord are supported wherever a C toolchain exists (roadmap M4);
+only the libc-free targets give that up.
 
 ## Options considered
 
@@ -112,11 +117,12 @@ built natively, because there is no host runtime to borrow them from.
 ## On fullrust
 
 [fullrust](https://github.com/KarpelesLab/fullrust) is listed as a target, not a
-motivation. Go already produces static libc-free Linux binaries with
-`CGO_ENABLED=0`, so fullrust adds nothing *there*. What it adds is the places Go
-cannot currently go at all: purestd's syscall-only userland, kintane, `no_std`
-boards. Those are reachable because rustygo's `syscall` layer sits on Rust `std`
-rather than on a per-OS port.
+motivation, and not the default: ordinary builds use the platform's usual Rust
+target, keeping the C toolchain and cgo available. Go already produces static
+libc-free Linux binaries with `CGO_ENABLED=0`, so fullrust adds nothing
+*there*. What it adds is the places Go cannot currently go at all: purestd's
+syscall-only userland and `no_std` boards. Those are reachable because
+rustygo's `syscall` layer sits on Rust `std` rather than on a per-OS port.
 
 ## Prior art worth reading before writing code
 

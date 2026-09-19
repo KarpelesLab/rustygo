@@ -7,7 +7,8 @@
 
 **A Go → Rust compiler.** Compile Go packages into Rust source, link them with
 a Rust runtime, and end up with Go and Rust code in *one* binary that share
-real types — no cgo, no FFI, no `unsafe` in anything you write.
+real types — no FFI between them, no `unsafe` in anything you write, and no
+cgo needed to get there.
 
 > **Status: M0 spike in progress.** Single-goroutine Go programs using
 > integers, floats, strings, structs, arrays, pointers, methods, generics and
@@ -37,16 +38,21 @@ rustygo attacks that from the other side: if Go *compiles to* Rust, a Go package
 can call a Rust crate directly, a Rust program can call a Go package directly,
 and there is one implementation again.
 
-It also puts Go where only Rust currently goes: [fullrust](https://github.com/KarpelesLab/fullrust)
-static binaries, [purestd](https://github.com/KarpelesLab/purestd) libc-free
-userland, [kintane](https://github.com/KarpelesLab/kintane), `no_std` targets.
+It also puts Go where only Rust currently goes: [purestd](https://github.com/KarpelesLab/purestd)
+libc-free userland, [fullrust](https://github.com/KarpelesLab/fullrust) static
+binaries, `no_std` targets. Those are options, not the default: an ordinary
+build targets the platform's usual Rust target, where a C toolchain is
+available and cgo works.
 
 ## What it is not
 
 - **Not a source-to-source beautifier.** The output is Rust that `rustc`
   compiles, not Rust a human would enjoy reading.
-- **Not a cgo replacement.** Programs that need C are out of scope; that is the
-  point.
+- **Not dependent on cgo.** Go reaches Rust directly, so no C sits between
+  them. C itself is not excluded: on targets with a C toolchain, Go packages
+  that `import "C"` are supported (roadmap M4), because plenty of real code
+  needs them. The libc-free targets are where that trade is made, and there
+  cgo is unavailable by construction.
 - **Not a Go implementation in Rust.** The front end is Go's own
   [`go/ssa`](https://pkg.go.dev/golang.org/x/tools/go/ssa); the Go compiler is
   not forked.

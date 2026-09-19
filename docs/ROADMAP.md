@@ -61,7 +61,7 @@ moment it can be:
     `internal/abi` layouts);
   * `errorcheck` tests of the gc compiler's diagnostic text;
   * assembly;
-  * `cgo` and `-race`;
+  * `-race`, and `cgo` until M4 lands it;
   * goroutine-trace formatting.
 
   Every exclusion is listed, with its category, in the repository. Anything
@@ -116,9 +116,9 @@ already has the final shape, so the numbers it produces are meaningful.
   and writes through `Gc`/`Ptr` soundly when Go aliases freely. Every later
   milestone emits code in this shape.
 * Answer [open question 2](DESIGN.md#13-open-questions): does
-  `panic = "unwind"` work on fullrust and on a `no_std` kintane build? If not,
-  M1 lowers `defer`/`recover` differently, and changing that decision later
-  means rewriting core codegen.
+  `panic = "unwind"` work on fullrust? If not, M1 lowers `defer`/`recover`
+  differently, and changing that decision later means rewriting core codegen.
+  (`no_std` is an opt-in M5 target and gates nothing here.)
 * Benchmarks: a scalar loop, a struct-field loop, a pointer-chasing loop and a
   string concat loop, gc Go against rustygo, native in both cases.
 
@@ -149,7 +149,8 @@ work fails too, decision gate 1 says stop.
   * about 4 minutes of release build for the whole stdlib, by extrapolation.
 * Heap access model: settled for one thread (places with copy-in/copy-out,
   DESIGN §2). The multi-threaded half is open question 6, for M2.
-* `panic = "unwind"` works on fullrust; `no_std`/kintane is untested.
+* `panic = "unwind"` works on fullrust; `no_std` is untested and gates nothing
+  before M5.
 * Decision gate 1 is not in sight.
 * Carried into M1: the cost of `Ptr` carrying its object's handle. The place
   model (DESIGN §2) replaced the planned byte-offset fat pointer, so there
@@ -281,6 +282,12 @@ work fails too, decision gate 1 says stop.
   of a Go build is reproducible.
 * Cargo integration for the other direction: a `build.rs` helper, so a Cargo
   project can depend on Go packages and build them with a plain `cargo build`.
+* **cgo** ([DESIGN §9a](DESIGN.md#9a-cgo)), on targets with a C toolchain:
+  load packages with `CGO_ENABLED=1`, so `go/packages` does the cgo
+  processing; bind the generated `_Cfunc_*` symbols to Rust `extern "C"`
+  declarations; compile the package's C through the generated crate's build
+  script, honoring `#cgo CFLAGS`/`LDFLAGS`; treat each C call as a blocking
+  call. C calling back into Go waits for the scheduler.
 * `Runtime::new()` / `rt.enter()` for Rust programs embedding Go packages.
 * Bridge rules enforced by the emitter, so no unpinned Go pointer outlives a
   call. Long-running Rust calls enter the M2 blocking-call state.
@@ -289,12 +296,16 @@ work fails too, decision gate 1 says stop.
   [compcol](https://github.com/KarpelesLab/compcol) and compare with
   `compress/gzip`.
 
-**Exit criteria:** one of the hand-maintained Go/Rust pairs can be retired in a
-branch, in each direction:
+**Exit criteria:**
 
-* the Rust implementation, called from Go, passes the Go side's tests;
-* for another pair, a Rust program calls the Go implementation and passes the
-  Rust side's tests.
+* A Go package that `import "C"`s builds and passes its tests on a target with
+  a C toolchain; `net` and `os/user` work in cgo mode as well as pure-Go mode.
+* One of the hand-maintained Go/Rust pairs can be retired in a branch, in each
+  direction:
+
+  * the Rust implementation, called from Go, passes the Go side's tests;
+  * for another pair, a Rust program calls the Go implementation and passes
+    the Rust side's tests.
 
 ## M5 — Targets
 
@@ -306,8 +317,11 @@ branch, in each direction:
   `windows-msvc` is the Rust target, so panics unwind through SEH.
 * fullrust static Linux binaries (needs `panic=unwind` on that toolchain; M0
   already checked it).
-* `no_std` subset for purestd and kintane: single heap, no netpoller, no
-  preemption, fixed small stacks where there is no lazy commit.
+* `no_std` subset for purestd: single heap, no netpoller, no preemption, fixed
+  small stacks where there is no lazy commit.
+* These targets are opt-in, and give up cgo (M4) and everything else that
+  needs a C toolchain. The default build stays on the platform's usual Rust
+  target.
 
 **Exit criteria:**
 
@@ -315,8 +329,8 @@ branch, in each direction:
   within a stated margin of Linux.
 * The M3 service tests pass on macOS and Windows. Those runs exercise the
   `kqueue` and IOCP netpollers end to end.
-* The M1 exercise program runs on fullrust and on kintane, from the same source,
-  with no target-specific code in the program itself.
+* The M1 exercise program runs on fullrust and on a `no_std` purestd build,
+  from the same source, with no target-specific code in the program itself.
 
 ## M6 — Performance
 
@@ -360,7 +374,7 @@ branch, in each direction:
 
 ## Non-goals for the first year
 
-Race detector · `cgo` · WASM targets · async preemption of call-free loops ·
+Race detector · WASM targets · async preemption of call-free loops ·
 `reflect.StructOf` and runtime type construction · 32-bit targets ·
 plugin/`go:linkname` tricks in third-party code · human-readable output ·
 Go versions other than the pinned one ·

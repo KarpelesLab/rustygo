@@ -4,7 +4,8 @@
 // Packages are loaded with the real GOOS/GOARCH (see DESIGN §1) plus the
 // `rustygo` and `purego` build tags, so files written for rustygo are
 // selected and assembly-backed packages take their pure-Go paths wherever
-// the standard library offers one.
+// the standard library offers one. cgo is off for now; M4 turns it on for
+// targets with a C toolchain (DESIGN §9a).
 package load
 
 import (
@@ -44,7 +45,8 @@ func Load(dir string, patterns ...string) (*Result, error) {
 			packages.NeedModule,
 		Dir:        dir,
 		BuildFlags: []string{"-tags=" + joinTags()},
-		// cgo is out of scope by construction (README, "What it is not").
+		// Packages load with cgo off until M4 binds C (DESIGN §9a), so
+		// anything with both paths takes its pure-Go one.
 		Env: append(os.Environ(), "CGO_ENABLED=0"),
 	}
 	pkgs, err := packages.Load(cfg, patterns...)

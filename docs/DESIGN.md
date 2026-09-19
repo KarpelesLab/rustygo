@@ -214,10 +214,12 @@ Supported, narrowly:
   stdlib's `go:linkname` references into `runtime`. That contract changes with
   every Go release, so rustygo pins one Go version at a time. The replacement
   packages are substituted through an overlay GOROOT, as TinyGo does.
-* `syscall` sits on Rust `std` — which is what makes fullrust, purestd and
-  kintane reachable without a second port.
-* Anything requiring cgo (`os/user` in cgo mode, `net` in cgo resolver mode) is
-  unavailable by construction; the pure-Go paths are the only paths.
+* `syscall` sits on Rust `std` — which is what makes fullrust and purestd
+  reachable without a second port.
+* Packages with both a cgo and a pure-Go path (`os/user`, `net`'s resolver)
+  take the pure-Go path by default. With cgo enabled (§9a) on a target that
+  has a C toolchain, they take their cgo path instead; on the libc-free
+  targets that choice does not exist.
 
 ## 9. Interop, both directions
 
@@ -250,6 +252,34 @@ then `rt.enter(|| ...)`.
 it is pinned; no Rust reference is stored in a Go value except as a handle. Both
 are enforced by the emitter, not by convention.
 
+## 9a. cgo
+
+Go→Rust needs no C, but plenty of Go code calls C on its own, and on a target
+with a C toolchain there is no reason to refuse it. `import "C"` is therefore
+supported (M4), and unavailable only on the libc-free targets (§10).
+
+* **No second cgo implementation.** With `CGO_ENABLED=1`, `go/packages` already
+  hands back the *cgo-processed* package: the `import "C"` file is replaced by
+  generated Go in which each C call is an ordinary call to a bodyless
+  `_Cfunc_*` function. The front end sees normal Go.
+* **The emitter binds those symbols** to Rust `extern "C"` declarations, which
+  is the same bodyless-function machinery the stdlib's assembly stubs need
+  (§8).
+* **The C itself** (the `import "C"` preamble and any `.c` files in the
+  package) is compiled by the generated crate's build script, with the
+  package's `#cgo CFLAGS`/`LDFLAGS` passed through. Linking C is something
+  Cargo does natively.
+* **Pointer rules come for free.** Go already forbids passing Go pointers to C
+  that point at Go pointers, and forbids C keeping them after the call. Our
+  places (§2) hand C a raw address for the duration of a call, which is exactly
+  what those rules permit.
+* **A C call is a blocking call** (§4): it hands off its scheduler slot, and
+  counts as a safe point, so a long or blocking C function stalls neither the
+  other goroutines nor a collection.
+* **Deferred:** C calling back into Go (`//export`, function pointers into Go),
+  which needs a goroutine and stack to run the callback on, so it waits for the
+  scheduler (M2).
+
 ## 10. Targets
 
 | Target | Status of plan |
@@ -257,8 +287,11 @@ are enforced by the emitter, not by convention.
 | Native Linux, x86-64 + aarch64 | primary |
 | Native macOS, x86-64 + aarch64 | M5 (kqueue netpoller, Darwin `syscall`) |
 | Native Windows, x86-64 + aarch64 | M5 (IOCP netpoller, Windows x64 context switch with TIB stack bounds, `SyscallN`/DLL `syscall` package, `windows-msvc` with SEH unwinding) |
-| [fullrust](https://github.com/KarpelesLab/fullrust) static Linux | expected to work once `syscall` sits on Rust `std`; needs `panic=unwind` on that toolchain |
-| `no_std` + [purestd](https://github.com/KarpelesLab/purestd) / [kintane](https://github.com/KarpelesLab/kintane) | subset: no goroutine preemption, single heap, no netpoller |
+| [fullrust](https://github.com/KarpelesLab/fullrust) static Linux | opt-in; works (M0 checked `panic=unwind` there). No cgo |
+| `no_std` + [purestd](https://github.com/KarpelesLab/purestd) | opt-in subset: no goroutine preemption, single heap, no netpoller, no cgo |
+
+The native targets are the default, and they keep a C toolchain within reach,
+which is what makes cgo possible (§9a). The libc-free targets trade that away.
 
 ## 11. Performance expectations
 
@@ -352,9 +385,10 @@ beyond 2.2×, and the one outlier has a known cause outside the emitter.
    through `resume_unwind` → `catch_unwind` with output identical to gc.
    The fullrust toolchain found (1.88) is below the declared MSRV (1.89)
    and needed `--ignore-rust-version`; the MSRV check should include it once
-   fullrust ships ≥ 1.89. **`no_std`/kintane: still open.** Bare-metal targets
-   default to `panic = "abort"`, so unwinding there needs an unwinder
-   (e.g. the `unwinding` crate) and a kintane environment to test on.
+   fullrust ships ≥ 1.89. **`no_std`: still open**, and not urgent — bare-metal
+   targets default to `panic = "abort"`, so unwinding there needs an unwinder
+   (e.g. the `unwinding` crate). It is an opt-in target, so the answer gates
+   nothing before M5.
 3. Is a single-threaded mode (no scheduler locks, one heap) worth having for
    embedded targets?
 4. How much of `reflect` is enough? `fmt` + `encoding/json` is the practical
