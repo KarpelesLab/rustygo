@@ -15,8 +15,10 @@ cgo needed to get there.
 > multiple packages compile to Rust and run, under a precise mark-sweep
 > collector. Their output, panics and exit codes are identical to gc's, and the
 > differential harness checks that on every commit — including under GC
-> torture, which collects at every allocation. Not yet: slices, maps,
-> interfaces, closures, `defer`, goroutines and the standard library. The plan is
+> torture, which collects at every allocation. Slices work, with aliasing,
+> three-index slicing, `append`, `copy` and the string/`[]byte`/`[]rune`
+> conversions. Not yet: maps, interfaces, closures, `defer`, goroutines and
+> the standard library. The plan is
 > [docs/DESIGN.md](docs/DESIGN.md) for the architecture,
 > [docs/RATIONALE.md](docs/RATIONALE.md) for why this shape and not another,
 > and [docs/ROADMAP.md](docs/ROADMAP.md) for the milestones.

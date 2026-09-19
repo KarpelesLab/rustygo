@@ -93,6 +93,11 @@ impl GoStr {
         self.len == 0
     }
 
+    /// A string holding a copy of `bytes`. A safe point.
+    pub(crate) fn from_bytes(bytes: &[u8]) -> GoStr {
+        GoStr::build(bytes.len(), |out| out.copy_from_slice(bytes))
+    }
+
     /// A string of `len` bytes, written by `fill`. A safe point: it may
     /// collect before it allocates.
     fn build(len: usize, fill: impl FnOnce(&mut [u8])) -> GoStr {

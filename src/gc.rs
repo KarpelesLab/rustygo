@@ -36,6 +36,13 @@ impl<P> Root for Ptr<P> {
     }
 }
 
+impl<P> Root for crate::slice::Slice<P> {
+    #[inline]
+    fn root_word(&self) -> usize {
+        self.addr() as usize
+    }
+}
+
 impl Root for GoStr {
     #[inline]
     fn root_word(&self) -> usize {
@@ -57,6 +64,7 @@ struct Header {
 #[derive(Default)]
 struct Slot {
     word: Cell<usize>,
+    size: Cell<usize>,
     trace: Cell<Option<TraceFn>>,
 }
 
@@ -123,6 +131,7 @@ impl<const N: usize> Frame<N> {
     #[inline]
     pub fn set_local<'a, T: Trace>(&'a self, i: usize, v: &'a T) {
         self.slots[i].word.set(v as *const T as usize);
+        self.slots[i].size.set(size_of::<T>());
         self.slots[i].trace.set(Some(trace_fn::<T>()));
     }
 }
@@ -158,7 +167,9 @@ pub(crate) fn trace_roots(t: &mut Tracer<'_>) {
                 None => t.edge(word),
                 // SAFETY: the slot holds the address of a live local, and
                 // the trace function came from that local's own type.
-                Some(trace) if word != 0 => unsafe { trace(word as *const u8, t) },
+                Some(trace) if word != 0 => unsafe {
+                    trace(word as *const u8, slot.size.get(), t)
+                },
                 Some(_) => {}
             }
         }

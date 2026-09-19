@@ -37,6 +37,15 @@ pub enum Arg<'a> {
     Complex128(f64, f64),
     /// `string`: arbitrary bytes, written as they are.
     Str(&'a [u8]),
+    /// A slice, printed as gc does: `[len/cap]0xaddr`.
+    Slice {
+        /// `len(s)`.
+        len: i64,
+        /// `cap(s)`.
+        cap: i64,
+        /// The backing array's address.
+        addr: u64,
+    },
     /// Untyped `nil`.
     Nil,
 }
@@ -61,6 +70,14 @@ pub fn format(out: &mut Vec<u8>, args: &[Arg<'_>], ln: bool) {
             Arg::Float64(v) => push_float(out, v, false),
             Arg::Complex64(re, im) => push_complex(out, f64::from(re), f64::from(im), true),
             Arg::Complex128(re, im) => push_complex(out, re, im, false),
+            Arg::Slice { len, cap, addr } => {
+                out.push(b'[');
+                push_uint(out, len as u64);
+                out.push(b'/');
+                push_uint(out, cap as u64);
+                out.push(b']');
+                push_hex(out, addr);
+            }
             Arg::Str(s) => out.extend_from_slice(s),
             Arg::Nil => out.extend_from_slice(b"nil"),
         }

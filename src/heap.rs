@@ -15,7 +15,7 @@
 //!
 //! **Single-threaded.** M1 has no goroutines; M2 makes the heap shared.
 
-use crate::trace::{Trace, TraceFn, Tracer, trace_fn};
+use crate::trace::{Trace, TraceFn, Tracer, trace_array_fn, trace_fn};
 use alloc::alloc::{Layout, alloc, dealloc};
 use alloc::vec::Vec;
 use core::cell::RefCell;
@@ -53,7 +53,7 @@ pub struct Heap {
     sorted: bool,
     live_bytes: usize,
     threshold: usize,
-    globals: Vec<(usize, TraceFn)>,
+    globals: Vec<(usize, usize, TraceFn)>,
     collections: usize,
 }
 
@@ -140,12 +140,45 @@ pub fn allocate_bytes(len: usize, fill: impl FnOnce(&mut [u8])) -> NonNull<u8> {
         h.objs.push(Obj {
             start: ptr.as_ptr() as usize,
             size: len,
-            trace: |_, _| {},
+            trace: |_, _, _| {},
             align_log2: 0,
             mark: false,
         });
         h.sorted = false;
         h.live_bytes += len;
+    });
+    ptr
+}
+
+/// Allocates `n` places for a slice's backing array, each holding the zero
+/// value, and returns a pointer to the first. A safe point.
+pub fn allocate_array<P: crate::place::Place + Trace>(n: usize) -> NonNull<P> {
+    let layout = Layout::array::<P>(n).expect("slice fits in memory");
+    let should_collect = with_heap(|h| h.live_bytes + layout.size() > h.threshold);
+    if should_collect || cfg!(feature = "gc-torture") {
+        collect();
+    }
+    // SAFETY: `pad` gives a zero-length array a one-byte layout, so the size
+    // is never zero.
+    let ptr = unsafe { alloc(pad(layout)) } as *mut P;
+    let Some(ptr) = NonNull::new(ptr) else {
+        alloc::alloc::handle_alloc_error(layout)
+    };
+    for i in 0..n {
+        // SAFETY: `i < n`, so this is inside the allocation, and nothing has
+        // been written there yet.
+        unsafe { ptr.add(i).write(P::new(crate::value::GoValue::zero())) };
+    }
+    with_heap(|h| {
+        h.objs.push(Obj {
+            start: ptr.as_ptr() as usize,
+            size: layout.size(),
+            trace: trace_array_fn::<P>(),
+            align_log2: layout.align().trailing_zeros() as u8,
+            mark: false,
+        });
+        h.sorted = false;
+        h.live_bytes += layout.size();
     });
     ptr
 }
@@ -165,7 +198,13 @@ fn pad(l: Layout) -> Layout {
 /// The place must live for the rest of the program, which is what generated
 /// code registers.
 pub fn register_global<T: Trace>(place: &'static T) {
-    with_heap(|h| h.globals.push((place as *const T as usize, trace_fn::<T>())));
+    with_heap(|h| {
+        h.globals.push((
+            place as *const T as usize,
+            size_of::<T>(),
+            trace_fn::<T>(),
+        ))
+    });
 }
 
 /// Collects now: mark from the roots, then sweep.
@@ -182,10 +221,10 @@ pub fn collect() {
         let mut tracer = Tracer::new(h);
         crate::gc::trace_roots(&mut tracer);
         let globals = tracer.heap.globals.clone();
-        for (addr, trace) in globals {
+        for (addr, size, trace) in globals {
             // SAFETY: a registered global lives for the rest of the program,
             // and its trace function was derived from its own type.
-            unsafe { trace(addr as *const u8, &mut tracer) };
+            unsafe { trace(addr as *const u8, size, &mut tracer) };
         }
         tracer.drain();
 
@@ -262,10 +301,11 @@ impl<'h> Tracer<'h> {
     /// Traces everything reachable from what has been marked.
     pub(crate) fn drain(&mut self) {
         while let Some(i) = self.work.pop() {
-            let (start, trace) = (self.heap.objs[i].start, self.heap.objs[i].trace);
+            let o = &self.heap.objs[i];
+            let (start, size, trace) = (o.start, o.size, o.trace);
             // SAFETY: the object is live (it is in the table), and its trace
             // function was derived from the type it was allocated with.
-            unsafe { trace(start as *const u8, self) };
+            unsafe { trace(start as *const u8, size, self) };
         }
     }
 }

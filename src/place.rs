@@ -141,6 +141,13 @@ impl<P> Ptr<P> {
         Ptr(None)
     }
 
+    /// A pointer to a place the caller knows is live: an element of a live
+    /// backing array, say. The place's own object keeps it alive.
+    #[inline]
+    pub fn to_place(p: &P) -> Self {
+        Ptr(Some(NonNull::from(p)))
+    }
+
     /// A pointer to a place that lives for the rest of the program: a
     /// package-level variable's storage.
     #[inline]
@@ -159,7 +166,7 @@ impl<P> Ptr<P> {
 
     /// The place, or Go's nil-dereference panic.
     #[inline]
-    fn place(self) -> &'static P {
+    pub(crate) fn place(self) -> &'static P {
         match self.0 {
             // SAFETY: a non-nil `Ptr` holds the address of a live place: it
             // came from `alloc`, from `project` on a live place, or from a
@@ -174,6 +181,14 @@ impl<P> Ptr<P> {
     #[inline]
     pub fn addr(self) -> u64 {
         self.0.map_or(0, |p| p.as_ptr() as usize as u64)
+    }
+}
+
+impl<P, const N: usize> Ptr<[P; N]> {
+    /// `a[:]` on a pointer to an array: a slice over the whole array.
+    #[inline]
+    pub fn to_slice(self) -> crate::slice::Slice<P> {
+        crate::slice::of_array(self.place())
     }
 }
 

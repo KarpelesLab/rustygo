@@ -140,6 +140,51 @@ pub mod float {
     }
 }
 
+/// Checks `[lo:hi:max]` against a slice's length and capacity, as gc does:
+/// the widest bound first, then inwards. Missing bounds default to `len` and
+/// `cap`, and `hi` may reach past the length up to the capacity.
+pub fn slice3_bounds(
+    lo: i64,
+    hi: Option<i64>,
+    max: Option<i64>,
+    len: usize,
+    cap: usize,
+) -> (usize, usize, usize) {
+    let m = match max {
+        Some(m) => {
+            if m < 0 || m as u64 > cap as u64 {
+                runtime_error(RuntimeError::SliceCap { max: m, cap });
+            }
+            m as usize
+        }
+        None => cap,
+    };
+    let h = match hi {
+        Some(h) => {
+            if h < 0 || h as u64 > m as u64 {
+                runtime_error(RuntimeError::SliceHigh { high: h, len: m });
+            }
+            h as usize
+        }
+        None => len.min(m),
+    };
+    if lo < 0 || lo as u64 > h as u64 {
+        runtime_error(RuntimeError::SliceLow { low: lo, high: h });
+    }
+    (lo as usize, h, m)
+}
+
+/// Checks `make([]T, len, cap)`.
+pub fn make_bounds(len: i64, cap: i64) -> (usize, usize) {
+    if cap < 0 {
+        runtime_error(RuntimeError::MakeCap { cap });
+    }
+    if len < 0 || len > cap {
+        runtime_error(RuntimeError::MakeLen { len });
+    }
+    (len as usize, cap as usize)
+}
+
 /// Converts a signed shift count to the unsigned count the [`GoInt`] shifts
 /// take, panicking with Go's runtime error if it is negative.
 #[inline]

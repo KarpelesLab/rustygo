@@ -43,6 +43,7 @@ pub mod prelude;
 pub mod print;
 #[cfg(feature = "std")]
 pub mod rt;
+pub mod slice;
 pub mod string;
 pub mod trace;
 pub mod value;

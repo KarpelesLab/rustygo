@@ -27,3 +27,4 @@ strings
 structs
 switches
 gcstress
+slices

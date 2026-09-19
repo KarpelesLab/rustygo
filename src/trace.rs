@@ -14,16 +14,32 @@ pub trait Trace: 'static {
     fn trace(&self, t: &mut Tracer<'_>);
 }
 
-/// Erased [`Trace::trace`], stored per object in the heap table.
-pub type TraceFn = unsafe fn(*const u8, &mut Tracer<'_>);
+/// Erased [`Trace::trace`], stored per object in the heap table. The second
+/// argument is the object's payload size, which is how an array of `T` traces
+/// every element without storing a count.
+pub type TraceFn = unsafe fn(*const u8, usize, &mut Tracer<'_>);
 
-/// The erased trace function for `T`.
+/// The erased trace function for one `T`.
 pub fn trace_fn<T: Trace>() -> TraceFn {
-    |p, t| {
+    |p, _, t| {
         // SAFETY: the caller passes the address of a live `T`, which is what
         // the heap table records alongside this function.
         let v = unsafe { &*(p as *const T) };
         v.trace(t);
+    }
+}
+
+/// The erased trace function for a contiguous run of `T`, sized by the
+/// object's payload.
+pub fn trace_array_fn<T: Trace>() -> TraceFn {
+    |p, bytes, t| {
+        let n = bytes / size_of::<T>();
+        // SAFETY: the object holds `n` initialized, contiguous `T`s: that is
+        // how `heap::allocate_array` laid it out.
+        let vs = unsafe { core::slice::from_raw_parts(p as *const T, n) };
+        for v in vs {
+            v.trace(t);
+        }
     }
 }
 

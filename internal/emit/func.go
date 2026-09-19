@@ -317,10 +317,17 @@ func (f *fnEmitter) expr(v ssa.Value) string {
 		st := v.X.Type().Underlying().(*types.Pointer).Elem()
 		return fmt.Sprintf("(%s).project(|p| &p.%s)", f.val(v.X), f.e.types.field(st, v.Field, f.e, v.Pos()))
 	case *ssa.IndexAddr:
-		if p, ok := v.X.Type().Underlying().(*types.Pointer); ok {
-			if arr, ok := p.Elem().Underlying().(*types.Array); ok {
+		switch t := v.X.Type().Underlying().(type) {
+		case *types.Pointer:
+			if arr, ok := t.Elem().Underlying().(*types.Array); ok {
 				return fmt.Sprintf("(%s).project(|a| &a[%s])", f.val(v.X), f.index(v.Index, arr.Len()))
 			}
+		case *types.Slice:
+			at := "at"
+			if isUnsigned(v.Index.Type()) {
+				at = "at_u"
+			}
+			return fmt.Sprintf("(%s).%s(%s as %s)", f.val(v.X), at, f.val(v.Index), indexCast(v.Index.Type()))
 		}
 		f.errorf(v.Pos(), "indexing %s is not supported yet (roadmap M1)", v.X.Type())
 	case *ssa.Index:
@@ -337,10 +344,6 @@ func (f *fnEmitter) expr(v ssa.Value) string {
 		}
 		f.errorf(v.Pos(), "indexing %s is not supported yet (roadmap M1)", v.X.Type())
 	case *ssa.Slice:
-		if !isString(v.X.Type()) {
-			f.errorf(v.Pos(), "slicing %s is not supported yet (roadmap M1)", v.X.Type())
-			return ""
-		}
 		lo := "0i64"
 		if v.Low != nil {
 			lo = f.val(v.Low) + " as i64"
@@ -349,7 +352,22 @@ func (f *fnEmitter) expr(v ssa.Value) string {
 		if v.High != nil {
 			hi = "Some(" + f.val(v.High) + " as i64)"
 		}
-		return fmt.Sprintf("(%s).slice(%s, %s)", f.val(v.X), lo, hi)
+		if isString(v.X.Type()) {
+			return fmt.Sprintf("(%s).slice(%s, %s)", f.val(v.X), lo, hi)
+		}
+		max := "None"
+		if v.Max != nil {
+			max = "Some(" + f.val(v.Max) + " as i64)"
+		}
+		x := f.val(v.X)
+		if _, ok := v.X.Type().Underlying().(*types.Pointer); ok {
+			x = "(" + x + ").to_slice()" // a[:] on a pointer to an array
+		}
+		return fmt.Sprintf("(%s).slice(%s, %s, %s)", x, lo, hi, max)
+	case *ssa.MakeSlice:
+		elem := v.Type().Underlying().(*types.Slice).Elem()
+		return fmt.Sprintf("Slice::<%s>::make(%s as i64, %s as i64)",
+			f.place(elem, v.Pos()), f.val(v.Len), f.val(v.Cap))
 	case *ssa.Range:
 		return fmt.Sprintf("(%s).iter()", f.val(v.X))
 	case *ssa.Next:
@@ -372,8 +390,8 @@ func (f *fnEmitter) expr(v ssa.Value) string {
 		f.errorf(v.Pos(), "interfaces are not supported yet (roadmap M1)")
 	case *ssa.MakeClosure:
 		f.errorf(v.Pos(), "closures are not supported yet (roadmap M1)")
-	case *ssa.MakeSlice, *ssa.SliceToArrayPointer:
-		f.errorf(v.Pos(), "slices are not supported yet (roadmap M1)")
+	case *ssa.SliceToArrayPointer:
+		f.errorf(v.Pos(), "slice-to-array-pointer conversion is not supported yet")
 	case *ssa.MakeMap, *ssa.Lookup:
 		f.errorf(v.Pos(), "maps are not supported yet (roadmap M1)")
 	case *ssa.MakeChan, *ssa.Select:
@@ -408,7 +426,16 @@ func (f *fnEmitter) binop(v *ssa.BinOp) string {
 	b := basicInfo(v.X.Type())
 	isInt := b != nil && b.Info()&types.IsInteger != 0
 	switch v.Op {
-	case token.EQL, token.NEQ, token.LSS, token.LEQ, token.GTR, token.GEQ:
+	case token.EQL, token.NEQ:
+		// The only comparison Go allows on a slice is against nil.
+		if _, ok := v.X.Type().Underlying().(*types.Slice); ok {
+			return sliceNilTest(x, v.Op)
+		}
+		if _, ok := v.Y.Type().Underlying().(*types.Slice); ok {
+			return sliceNilTest(y, v.Op)
+		}
+		return fmt.Sprintf("(%s %s %s)", x, v.Op, y)
+	case token.LSS, token.LEQ, token.GTR, token.GEQ:
 		return fmt.Sprintf("(%s %s %s)", x, v.Op, y)
 	case token.SHL, token.SHR:
 		var count string
@@ -481,6 +508,25 @@ func (f *fnEmitter) unop(v *ssa.UnOp) string {
 func (f *fnEmitter) convert(v *ssa.Convert) string {
 	from, to := basicInfo(v.X.Type()), basicInfo(v.Type())
 	x := f.val(v.X)
+	// string <-> []byte and []rune.
+	if s, ok := v.Type().Underlying().(*types.Slice); ok && isString(v.X.Type()) {
+		if eb := basicInfo(s.Elem()); eb != nil {
+			switch eb.Kind() {
+			case types.Uint8:
+				return fmt.Sprintf("Slice::<Slot<u8>>::of_str(%s)", x)
+			case types.Int32:
+				return fmt.Sprintf("Slice::<Slot<i32>>::of_str(%s)", x)
+			}
+		}
+	}
+	if s, ok := v.X.Type().Underlying().(*types.Slice); ok && isString(v.Type()) {
+		if eb := basicInfo(s.Elem()); eb != nil {
+			switch eb.Kind() {
+			case types.Uint8, types.Int32:
+				return fmt.Sprintf("(%s).to_str()", x)
+			}
+		}
+	}
 	if from != nil && to != nil {
 		fi, ti := from.Info(), to.Info()
 		switch {
@@ -494,6 +540,22 @@ func (f *fnEmitter) convert(v *ssa.Convert) string {
 	}
 	f.errorf(v.Pos(), "conversion from %s to %s is not supported yet", v.X.Type(), v.Type())
 	return ""
+}
+
+// sliceNilTest compares a slice against nil.
+func sliceNilTest(x string, op token.Token) string {
+	if op == token.EQL {
+		return fmt.Sprintf("(%s).is_nil()", x)
+	}
+	return fmt.Sprintf("(!(%s).is_nil())", x)
+}
+
+// indexCast is the Rust type an index widens to before a bounds check.
+func indexCast(t types.Type) string {
+	if isUnsigned(t) {
+		return "u64"
+	}
+	return "i64"
 }
 
 // floatToInt converts a float expression to an integer kind the way gc
@@ -543,10 +605,27 @@ func (f *fnEmitter) builtin(v *ssa.Call, b *ssa.Builtin, args []string) string {
 			parts[i] = f.printArg(a)
 		}
 		return fmt.Sprintf("rustygo::print::%s(&[%s])", b.Name(), strings.Join(parts, ", "))
-	case "len":
-		if isString(c.Args[0].Type()) {
-			return fmt.Sprintf("(%s).len()", args[0])
+	case "len", "cap":
+		switch c.Args[0].Type().Underlying().(type) {
+		case *types.Slice:
+			return fmt.Sprintf("(%s).%s()", args[0], b.Name())
+		case *types.Basic:
+			if b.Name() == "len" && isString(c.Args[0].Type()) {
+				return fmt.Sprintf("(%s).len()", args[0])
+			}
 		}
+	case "append":
+		// go/ssa always passes the elements as one slice (or a string, for
+		// append([]byte, string...)).
+		if isString(c.Args[1].Type()) {
+			return fmt.Sprintf("(%s).append_str(%s)", args[0], args[1])
+		}
+		return fmt.Sprintf("(%s).append_slice(%s)", args[0], args[1])
+	case "copy":
+		if isString(c.Args[1].Type()) {
+			return fmt.Sprintf("(%s).copy_from(Slice::of_str(%s))", args[0], args[1])
+		}
+		return fmt.Sprintf("(%s).copy_from(%s)", args[0], args[1])
 	case "min", "max":
 		if bi := basicInfo(v.Type()); bi != nil && bi.Info()&(types.IsInteger|types.IsString) != 0 {
 			expr := args[0]
@@ -568,6 +647,9 @@ func (f *fnEmitter) printArg(a ssa.Value) string {
 	x := f.val(a)
 	if _, ok := a.Type().Underlying().(*types.Pointer); ok {
 		return fmt.Sprintf("rustygo::print::Arg::Pointer((%s).addr())", x)
+	}
+	if _, ok := a.Type().Underlying().(*types.Slice); ok {
+		return fmt.Sprintf("rustygo::print::Arg::Slice { len: (%s).len(), cap: (%s).cap(), addr: (%s).addr() }", x, x, x)
 	}
 	b := basicInfo(a.Type())
 	if b != nil {

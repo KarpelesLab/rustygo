@@ -49,6 +49,8 @@ func (r *typeReg) rust(t types.Type, e *emitter, pos token.Pos) string {
 		return "Ptr<" + r.place(t.Elem(), e, pos) + ">"
 	case *types.Array:
 		return fmt.Sprintf("[%s; %d]", r.rust(t.Elem(), e, pos), t.Len())
+	case *types.Slice:
+		return "Slice<" + r.place(t.Elem(), e, pos) + ">"
 	case *types.Tuple:
 		parts := make([]string, t.Len())
 		for i := range parts {

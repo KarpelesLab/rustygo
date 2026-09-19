@@ -57,7 +57,7 @@ teaching `go list` a GOARCH it rejects.
 | `int`, `uint`, `uintptr` | `i64`, `u64`, `u64` | 64-bit only for now |
 | `complex64/128` | runtime `Complex32/64` | |
 | `string` | `GoStr { data: Gc<[u8]>, off: u32, len: u32 }` | **not** `String`: Go strings are arbitrary bytes |
-| `[]T` | `Slice<T> { arr: Gc<GoArray<T>>, off, len, cap }` | aliasing and `append` semantics preserved |
+| `[]T` | `Slice<P>`: pointer, len, cap over places of `T` | aliasing, reslicing and `append` growth as in Go |
 | `[N]T` | `[T; N]` | value type, copied on assignment |
 | `map[K]V` | `Gc<GoMap<K, V>>` | runtime hash map, randomized iteration order |
 | `chan T` | `Gc<Chan<T>>` | runtime, integrates with scheduler |

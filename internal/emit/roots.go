@@ -156,7 +156,7 @@ func (f *fnEmitter) collectRoots() {
 // or a string. Such a value goes in a plain root slot.
 func holdsRef(t types.Type) bool {
 	switch u := t.Underlying().(type) {
-	case *types.Pointer:
+	case *types.Pointer, *types.Slice:
 		return true
 	case *types.Basic:
 		return u.Info()&types.IsString != 0
@@ -193,14 +193,26 @@ func containsRef(t types.Type) bool {
 func safePoint(instr ssa.Instruction) bool {
 	switch instr := instr.(type) {
 	case *ssa.Call:
-		_, builtin := instr.Call.Value.(*ssa.Builtin)
-		return !builtin
+		b, builtin := instr.Call.Value.(*ssa.Builtin)
+		if !builtin {
+			return true // the callee may allocate
+		}
+		switch b.Name() {
+		case "append":
+			return true // grows by allocating a new array
+		case "copy":
+			return true // copy([]byte, string) allocates
+		}
+		return false
 	case *ssa.Alloc:
 		return true
 	case *ssa.BinOp:
 		return instr.Op == token.ADD && isString(instr.X.Type())
 	case *ssa.Convert:
-		return isString(instr.Type())
+		// string <-> []byte and []rune both copy into a new object.
+		return isString(instr.Type()) || isString(instr.X.Type())
+	case *ssa.MakeSlice:
+		return true
 	}
 	return false
 }

@@ -63,6 +63,23 @@ pub enum RuntimeError {
         /// The length it was checked against.
         len: usize,
     },
+    /// A three-index slice expression's `max` outside `[0, cap]`.
+    SliceCap {
+        /// The max bound.
+        max: i64,
+        /// The capacity it was checked against.
+        cap: usize,
+    },
+    /// `make` with a negative or too-large capacity.
+    MakeCap {
+        /// The requested capacity.
+        cap: i64,
+    },
+    /// `make` with a length outside `[0, cap]`.
+    MakeLen {
+        /// The requested length.
+        len: i64,
+    },
     /// A slice expression's low bound outside `[0, high]`.
     SliceLow {
         /// The low bound.
@@ -96,6 +113,14 @@ impl RuntimeError {
             RuntimeError::SliceHigh { high, len } => {
                 format!("slice bounds out of range [:{high}] with length {len}")
             }
+            RuntimeError::SliceCap { max, .. } if max < 0 => {
+                format!("slice bounds out of range [::{max}]")
+            }
+            RuntimeError::SliceCap { max, cap } => {
+                format!("slice bounds out of range [::{max}] with capacity {cap}")
+            }
+            RuntimeError::MakeCap { .. } => String::from("makeslice: cap out of range"),
+            RuntimeError::MakeLen { .. } => String::from("makeslice: len out of range"),
             RuntimeError::SliceLow { low, .. } if low < 0 => {
                 format!("slice bounds out of range [{low}:]")
             }
