@@ -15,6 +15,9 @@ var intrinsics = map[string]func(args []string) string{
 		return fmt.Sprintf("rustygo::rt::fatal(%s.bytes())", a[0])
 	},
 	"runtime.nanotime": func([]string) string { return "rustygo::rt::nanotime()" },
+	"runtime.writeErr": func(a []string) string {
+		return fmt.Sprintf("rustygo::rt::write_err(%s, %s as i64)", a[0], a[1])
+	},
 
 	// sync's acquire/release loads, which gc links to its runtime atomics.
 	// One goroutine (M1): plain accesses are atomic.

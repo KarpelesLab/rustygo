@@ -1169,7 +1169,7 @@ func (e *emitter) bodyless(fn *ssa.Function, name string, m *module) {
 	} else if in, ok := intrinsics[key]; ok {
 		body = in(args)
 	} else {
-		e.errorf(fn.Pos(), "%s has no Go body (assembly or linkname) and no rustygo implementation", key)
+		e.errorf(fn.Pos(), "%s has no Go body (assembly or linkname) and no rustygo implementation%s", key, e.caller(fn))
 		return
 	}
 	fmt.Fprintf(&m.buf, "\n// Go: %s (no Go body; see go:linkname or intrinsics)\npub fn %s(%s)%s {\n    %s\n}\n",

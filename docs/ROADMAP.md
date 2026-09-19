@@ -206,13 +206,17 @@ work fails too, decision gate 1 says stop.
   and evaluation errors handled through `recover`.
 * Not yet: `runtime.SetFinalizer` and weak references; Go's `test/` directory
   as a tracked pass rate; the standard-library plumbing.
-* Standard-library plumbing, in progress: pure-Go leaf packages already
-  compile straight from the real GOROOT with no overlay at all — `math/bits`
-  and `unicode/utf8` run correctly. What stops `strings`, `strconv` and
-  `sort` is exactly the bottom layer this milestone names: `internal/abi`
-  reinterprets `unsafe.Pointer` and declares assembly stubs, and
-  `internal/bytealg` is assembly. Those need the overlay GOROOT and
-  replacement packages.
+* Standard-library plumbing: **done for the packages that do not need
+  reflection or files.** `strings`, `strconv`, `sort`, `errors`, `unicode`,
+  `math/bits` and `unicode/utf8` compile from the real GOROOT, unmodified,
+  and match gc (`testdata/programs/stdlib1`). The overlay GOROOT
+  (`internal/goroot`) swaps in rustygo's `runtime`, `internal/reflectlite`
+  and the assembly half of `sync/atomic`; `go:linkname` is resolved in both
+  directions; leaf assembly has Rust intrinsics; and package initializers
+  skip building variables nothing reads, which took `strings.ToUpper` from
+  140,605 emitted lines of Rust to 4,029.
+* The next wall is M3's, not M1's: `fmt` needs `reflect` (DESIGN §6) and
+  `os` needs `internal/poll` and `syscall`.
 
 ## M2 — Goroutines, channels, `sync`, timers
 

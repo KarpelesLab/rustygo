@@ -13,6 +13,21 @@ pub fn fatal(msg: &[u8]) -> ! {
     std::process::exit(2)
 }
 
+/// Writes `n` bytes at `p` to standard error, for the runtime's own
+/// reporting paths.
+///
+/// # Safety
+///
+/// `p` must point at `n` readable bytes, as its Go caller guarantees.
+pub fn write_err(p: crate::unsafe_ptr::UPtr, n: i64) {
+    if n <= 0 || p.addr() == 0 {
+        return;
+    }
+    // SAFETY: the caller's contract.
+    let bytes = unsafe { std::slice::from_raw_parts(p.addr() as usize as *const u8, n as usize) };
+    let _ = std::io::stderr().lock().write_all(bytes);
+}
+
 /// The monotonic clock in nanoseconds, from an arbitrary origin.
 pub fn nanotime() -> i64 {
     static START: std::sync::OnceLock<std::time::Instant> = std::sync::OnceLock::new();

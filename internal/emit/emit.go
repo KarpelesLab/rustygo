@@ -93,6 +93,7 @@ func run(res *load.Result, liveGlobals map[*ssa.Global]bool) (*emitter, error) {
 
 		liveGlobals: liveGlobals,
 		readGlobals: map[*ssa.Global]bool{},
+		calledFrom:  map[*ssa.Function]*ssa.Function{},
 	}
 	e.initPath = e.fnPath(mainPkg.Func("init"))
 	mainFn := mainPkg.Func("main")
@@ -114,6 +115,7 @@ func run(res *load.Result, liveGlobals map[*ssa.Global]bool) (*emitter, error) {
 // emitFunction emits fn, turning a crash into an ordinary error naming the
 // function: a bug in the emitter should report where it was, not panic.
 func (e *emitter) emitFunction(fn *ssa.Function) {
+	e.current = fn
 	defer func() {
 		if r := recover(); r != nil {
 			e.errorf(fn.Pos(), "internal error compiling %s: %v", fn, r)
@@ -131,6 +133,11 @@ type emitter struct {
 	readGlobals map[*ssa.Global]bool
 	// inits are the package initializers this run emitted.
 	inits []*ssa.Function
+	// current is the function being emitted, and calledFrom remembers which
+	// function first asked for each other one, so an unsupported callee can
+	// name its caller.
+	current    *ssa.Function
+	calledFrom map[*ssa.Function]*ssa.Function
 
 	opt     Options
 	res     *load.Result
@@ -189,6 +196,14 @@ func (e *emitter) errorf(pos token.Pos, format string, args ...any) {
 	e.errs = append(e.errs, diag{pos, fmt.Sprintf(format, args...)})
 }
 
+// caller names the function that first reached fn, for a diagnostic.
+func (e *emitter) caller(fn *ssa.Function) string {
+	if from := e.calledFrom[fn]; from != nil {
+		return ", reached from " + from.String()
+	}
+	return ""
+}
+
 // err reports each distinct message once, at its first known position, in
 // source order.
 func (e *emitter) err() error {
@@ -242,6 +257,7 @@ func (e *emitter) fnPath(fn *ssa.Function) string {
 	}
 	p := "crate::" + m.name + "::" + m.ns.claim(mangle(base))
 	e.fnPaths[fn] = p
+	e.calledFrom[fn] = e.current
 	e.queue = append(e.queue, fn)
 	return p
 }
