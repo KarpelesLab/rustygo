@@ -108,6 +108,22 @@ func (f *fnEmitter) collectRoots() {
 	}
 
 	need := map[ssa.Value]bool{}
+	// The recover block is a second entry point, with no edge from the body,
+	// so liveness alone never sees its uses. Anything it reads was defined
+	// before the panic and has to stay rooted for the whole body — a named
+	// result's place, for one.
+	if f.fn.Recover != nil {
+		var ops []*ssa.Value
+		for b := range reversePostorderFrom(f.fn.Recover) {
+			for _, instr := range b.Instrs {
+				for _, op := range instr.Operands(ops[:0]) {
+					if *op != nil && cand[*op] {
+						need[*op] = true
+					}
+				}
+			}
+		}
+	}
 	for _, b := range f.fn.Blocks {
 		live := liveOut(b)
 		for _, s := range b.Succs {
