@@ -132,17 +132,11 @@ pub mod float {
         }
     }
 
-    /// `uint32(x)`.
+    /// `uint32(x)`: through int64 on every architecture (checked against gc
+    /// on aarch64, where `uint32(-3e9)` is 1294967296, not 0).
     #[inline]
     pub fn to_u32(x: f64) -> u32 {
-        #[cfg(target_arch = "x86_64")]
-        {
-            cvt64(x) as u32
-        }
-        #[cfg(not(target_arch = "x86_64"))]
-        {
-            x as u32
-        }
+        cvt64(x) as u32
     }
 }
 
