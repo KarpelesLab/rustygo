@@ -192,6 +192,28 @@ work fails too, decision gate 1 says stop.
   pass rate for the whole directory is published.
 * GC torture mode passes the same set.
 
+**Status (2026-09-19): most of M1 is in.**
+
+* Done: the collector (precise mark-sweep, shadow-stack roots, an object
+  table that resolves interior pointers), slices, strings on the heap, maps,
+  closures and func values, interfaces with dynamic dispatch and type
+  switches, `defer`, `panic` and `recover`, and package globals as roots.
+* 34 differential programs match gc, every one of them also under GC torture
+  (a collection at every allocation), which is what checks that the emitted
+  roots are complete.
+* The exit program is there: `testdata/programs/interp`, a small expression
+  language with a parser, an interface hierarchy, maps of variadic closures,
+  and evaluation errors handled through `recover`.
+* Not yet: `runtime.SetFinalizer` and weak references; Go's `test/` directory
+  as a tracked pass rate; the standard-library plumbing.
+* Standard-library plumbing, in progress: pure-Go leaf packages already
+  compile straight from the real GOROOT with no overlay at all — `math/bits`
+  and `unicode/utf8` run correctly. What stops `strings`, `strconv` and
+  `sort` is exactly the bottom layer this milestone names: `internal/abi`
+  reinterprets `unsafe.Pointer` and declares assembly stubs, and
+  `internal/bytealg` is assembly. Those need the overlay GOROOT and
+  replacement packages.
+
 ## M2 — Goroutines, channels, `sync`, timers
 
 * Stackful coroutines: a context switch for x86-64 (System V) and aarch64
