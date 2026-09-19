@@ -34,7 +34,13 @@ type structurer struct {
 // structured writes the body in structured form, or reports false (writing
 // nothing) if the CFG is irreducible.
 func (f *fnEmitter) structured() bool {
-	s := &structurer{f: f, rpo: reversePostorder(f.fn)}
+	return f.structuredFrom(f.fn.Blocks[0])
+}
+
+// structuredFrom does the same from any entry block, which is how the
+// recover block's region is emitted.
+func (f *fnEmitter) structuredFrom(entry *ssa.BasicBlock) bool {
+	s := &structurer{f: f, rpo: reversePostorderFrom(entry)}
 	// Reducible iff every retreating edge targets a dominator of its source.
 	for b := range s.rpo {
 		for _, succ := range b.Succs {
@@ -43,7 +49,7 @@ func (f *fnEmitter) structured() bool {
 			}
 		}
 	}
-	s.tree(f.fn.Blocks[0], nil, "    ")
+	s.tree(entry, nil, "    ")
 	return true
 }
 

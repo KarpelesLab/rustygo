@@ -33,6 +33,12 @@ impl Env {
         Env(p.addr() as usize)
     }
 
+    /// The address the collector resolves.
+    #[inline]
+    pub fn addr(self) -> u64 {
+        self.0 as u64
+    }
+
     /// Recovers the environment as the place type the closure's body
     /// expects, which is the type its `MakeClosure` allocated.
     #[inline]

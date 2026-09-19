@@ -36,6 +36,20 @@ impl<P> Root for Ptr<P> {
     }
 }
 
+impl Root for crate::func::Env {
+    #[inline]
+    fn root_word(&self) -> usize {
+        self.addr() as usize
+    }
+}
+
+impl Root for crate::iface::Iface {
+    #[inline]
+    fn root_word(&self) -> usize {
+        self.data().addr() as usize
+    }
+}
+
 impl<F: Copy> Root for crate::func::Func<F> {
     #[inline]
     fn root_word(&self) -> usize {
@@ -82,8 +96,8 @@ pub struct Frame<const N: usize> {
     slots: [Slot; N],
 }
 
-std::thread_local! {
-    static TOP: Cell<*const Header> = const { Cell::new(core::ptr::null()) };
+rt_global! {
+    static TOP: Cell<*const Header> = Cell::new(core::ptr::null());
 }
 
 impl<const N: usize> Default for Frame<N> {
@@ -174,9 +188,7 @@ pub(crate) fn trace_roots(t: &mut Tracer<'_>) {
                 None => t.edge(word),
                 // SAFETY: the slot holds the address of a live local, and
                 // the trace function came from that local's own type.
-                Some(trace) if word != 0 => unsafe {
-                    trace(word as *const u8, slot.size.get(), t)
-                },
+                Some(trace) if word != 0 => unsafe { trace(word as *const u8, slot.size.get(), t) },
                 Some(_) => {}
             }
         }
@@ -199,7 +211,7 @@ pub fn depth() -> usize {
     n
 }
 
-#[cfg(test)]
+#[cfg(all(test, feature = "std"))]
 mod tests {
     use super::*;
 

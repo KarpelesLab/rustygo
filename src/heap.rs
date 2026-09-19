@@ -60,19 +60,17 @@ pub struct Heap {
 /// Collect once the live set reaches this, before any doubling.
 const MIN_THRESHOLD: usize = 4 << 20;
 
-std::thread_local! {
+rt_global! {
     // Const-initialized: no lazy-init check on the path every allocation
     // takes.
-    static HEAP: RefCell<Heap> = const {
-        RefCell::new(Heap {
+    static HEAP: RefCell<Heap> = RefCell::new(Heap {
             objs: Vec::new(),
             sorted: true,
             live_bytes: 0,
             threshold: MIN_THRESHOLD,
             globals: Vec::new(),
             collections: 0,
-        })
-    };
+    });
 }
 
 /// Runs `f` on the heap.
@@ -199,11 +197,8 @@ fn pad(l: Layout) -> Layout {
 /// code registers.
 pub fn register_global<T: Trace>(place: &'static T) {
     with_heap(|h| {
-        h.globals.push((
-            place as *const T as usize,
-            size_of::<T>(),
-            trace_fn::<T>(),
-        ))
+        h.globals
+            .push((place as *const T as usize, size_of::<T>(), trace_fn::<T>()))
     });
 }
 

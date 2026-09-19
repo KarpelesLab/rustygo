@@ -17,8 +17,9 @@ cgo needed to get there.
 > differential harness checks that on every commit — including under GC
 > torture, which collects at every allocation. Slices work, with aliasing,
 > three-index slicing, `append`, `copy` and the string/`[]byte`/`[]rune`
-> conversions, as do closures, func values and `defer`. Not yet: maps,
-> interfaces, `recover`, goroutines and the standard library. The plan is
+> conversions, as do closures, func values, `defer`, interfaces with dynamic
+> dispatch and type switches, and `panic`/`recover`. Not yet: maps,
+> goroutines and the standard library. The plan is
 > [docs/DESIGN.md](docs/DESIGN.md) for the architecture,
 > [docs/RATIONALE.md](docs/RATIONALE.md) for why this shape and not another,
 > and [docs/ROADMAP.md](docs/ROADMAP.md) for the milestones.

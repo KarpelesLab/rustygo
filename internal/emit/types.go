@@ -53,6 +53,8 @@ func (r *typeReg) rust(t types.Type, e *emitter, pos token.Pos) string {
 		return "Slice<" + r.place(t.Elem(), e, pos) + ">"
 	case *types.Signature:
 		return "Func<" + r.fnPtr(t, e, pos) + ">"
+	case *types.Interface:
+		return "Iface"
 	case *types.Tuple:
 		parts := make([]string, t.Len())
 		for i := range parts {

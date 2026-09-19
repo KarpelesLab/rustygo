@@ -46,6 +46,11 @@ pub enum Arg<'a> {
         /// The backing array's address.
         addr: u64,
     },
+    /// An interface value, printed as gc does: the data word in hex.
+    Iface {
+        /// The boxed value's address.
+        data: u64,
+    },
     /// Untyped `nil`.
     Nil,
 }
@@ -77,6 +82,13 @@ pub fn format(out: &mut Vec<u8>, args: &[Arg<'_>], ln: bool) {
                 push_uint(out, cap as u64);
                 out.push(b']');
                 push_hex(out, addr);
+            }
+            Arg::Iface { data } => {
+                out.push(b'(');
+                push_hex(out, data);
+                out.push(b',');
+                push_hex(out, data);
+                out.push(b')');
             }
             Arg::Str(s) => out.extend_from_slice(s),
             Arg::Nil => out.extend_from_slice(b"nil"),

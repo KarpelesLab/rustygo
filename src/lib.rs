@@ -14,7 +14,7 @@
 //! * [`panic`](mod@panic): Go panics carried on Rust unwinding.
 //! * `rt`: the process entry point for a Go `main` (`std` only).
 //! * [`prelude`]: what generated code imports.
-//! * `gc` and `heap`: GC roots and the collector; `std` only for now.
+//! * [`gc`] and [`heap`]: GC roots and the collector.
 //! * [`trace`]: how the collector walks a value's references.
 //!
 //! Still to come, by milestone: slices, maps, closures and interfaces (M1); goroutines, channels and timers (M2);
@@ -29,15 +29,17 @@
 #![no_std]
 
 extern crate alloc;
+
+#[macro_use]
+mod tls;
 #[cfg(feature = "std")]
 extern crate std;
 
 pub mod defers;
 pub mod func;
-#[cfg(feature = "std")]
 pub mod gc;
-#[cfg(feature = "std")]
 pub mod heap;
+pub mod iface;
 pub mod ops;
 pub mod panic;
 pub mod place;

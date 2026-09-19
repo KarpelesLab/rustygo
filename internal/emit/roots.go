@@ -162,7 +162,7 @@ func (f *fnEmitter) collectRoots() {
 // or a string. Such a value goes in a plain root slot.
 func holdsRef(t types.Type) bool {
 	switch u := t.Underlying().(type) {
-	case *types.Pointer, *types.Slice, *types.Signature:
+	case *types.Pointer, *types.Slice, *types.Signature, *types.Interface:
 		return true
 	case *types.Basic:
 		return u.Info()&types.IsString != 0
@@ -217,7 +217,7 @@ func safePoint(instr ssa.Instruction) bool {
 	case *ssa.Convert:
 		// string <-> []byte and []rune both copy into a new object.
 		return isString(instr.Type()) || isString(instr.X.Type())
-	case *ssa.MakeSlice, *ssa.MakeClosure, *ssa.Defer:
+	case *ssa.MakeSlice, *ssa.MakeClosure, *ssa.Defer, *ssa.MakeInterface:
 		return true
 	}
 	return false
@@ -232,8 +232,13 @@ func predIndex(b, pred *ssa.BasicBlock) int {
 	return -1
 }
 
-// reversePostorder numbers the blocks reachable from the entry.
+// reversePostorder numbers the blocks reachable from the function's entry.
 func reversePostorder(fn *ssa.Function) map[*ssa.BasicBlock]int {
+	return reversePostorderFrom(fn.Blocks[0])
+}
+
+// reversePostorderFrom numbers the blocks reachable from entry.
+func reversePostorderFrom(entry *ssa.BasicBlock) map[*ssa.BasicBlock]int {
 	var post []*ssa.BasicBlock
 	seen := map[*ssa.BasicBlock]bool{}
 	var dfs func(b *ssa.BasicBlock)
@@ -246,7 +251,7 @@ func reversePostorder(fn *ssa.Function) map[*ssa.BasicBlock]int {
 		}
 		post = append(post, b)
 	}
-	dfs(fn.Blocks[0])
+	dfs(entry)
 	rpo := make(map[*ssa.BasicBlock]int, len(post))
 	for i, b := range post {
 		rpo[b] = len(post) - 1 - i

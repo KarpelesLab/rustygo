@@ -13,6 +13,7 @@
 //! once interfaces exist.
 
 use crate::func::Env;
+use crate::gc::Frame;
 use crate::trace::{Trace, Tracer};
 use alloc::vec::Vec;
 use core::cell::RefCell;
@@ -54,14 +55,20 @@ impl Defers {
     #[cfg(feature = "std")]
     pub fn run(&self) {
         let mut pending: Option<alloc::boxed::Box<dyn core::any::Any + Send>> = None;
-        loop {
-            let Some((f, env)) = self.list.borrow_mut().pop() else {
-                break;
-            };
-            if let Err(p) = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| f(env))) {
-                pending = Some(p);
+        // Once popped, the call's environment is no longer reachable through
+        // the list, so it is rooted here while it runs.
+        let frame = Frame::<1>::new();
+        frame.scope(|| {
+            loop {
+                let Some((f, env)) = self.list.borrow_mut().pop() else {
+                    break;
+                };
+                frame.set(0, &env);
+                if let Err(p) = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| f(env))) {
+                    pending = Some(p);
+                }
             }
-        }
+        });
         if let Some(p) = pending {
             std::panic::resume_unwind(p);
         }
@@ -70,11 +77,15 @@ impl Defers {
     /// Runs the deferred calls, last deferred first (no unwinding here).
     #[cfg(not(feature = "std"))]
     pub fn run(&self) {
-        loop {
-            let Some((f, env)) = self.list.borrow_mut().pop() else {
-                break;
-            };
-            f(env);
-        }
+        let frame = Frame::<1>::new();
+        frame.scope(|| {
+            loop {
+                let Some((f, env)) = self.list.borrow_mut().pop() else {
+                    break;
+                };
+                frame.set(0, &env);
+                f(env);
+            }
+        });
     }
 }

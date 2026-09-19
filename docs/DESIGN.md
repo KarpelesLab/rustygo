@@ -64,7 +64,7 @@ teaching `go list` a GOARCH it rejects.
 | `func(...)` | `Func<fn(Env, ..) -> ..>` | code pointer + environment; the captured env is a traced place struct |
 | `struct` | `struct` + emitted `impl Trace` | field order preserved; `Gc<T>` when heap-allocated |
 | `*T` | `Ptr<T>` | see interior pointers |
-| `interface{...}` | `Iface { typ: &'static TypeDesc, val: Word }` | vtable hangs off `TypeDesc` |
+| `interface{...}` | `Iface { desc: &'static TypeDesc, data: Data }` | the concrete value is boxed; `TypeDesc` carries the method table |
 | `unsafe.Pointer` | `Ptr<Opaque>` | restricted; see §7 |
 | generics | monomorphized by `go/ssa` | no Rust generics needed |
 
@@ -200,7 +200,13 @@ runtime's accessor API has to be sound for *any* code the emitter produces, so:
 `reflect` is not optional: `fmt` and `encoding/json` are in every program.
 
 * Emit a `TypeDesc` for every type the program instantiates: kind, size, field
-  names and offsets, tags, method table, element/key types.
+  names and offsets, tags, method table, element/key types. **M1 emits one for
+  every concrete type that reaches an interface**: its Go name, its method set
+  as (id, wrapper) pairs, how to compare two values, and how `print` and
+  `panic` render one. A method id numbers a distinct name and signature across
+  the program, so a call through an interface finds the concrete method
+  without knowing which interface it came from — an itab per (interface,
+  type) pair, and devirtualization, are M6.
 * `reflect.Value` becomes `(&'static TypeDesc, Ptr<Opaque>)` — exactly the
   runtime's existing object model, so field and element access reuses the same
   bounds-checked paths.

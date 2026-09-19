@@ -8,27 +8,147 @@
 //! when interfaces exist, it carries the panic value as an `any`, so `recover`
 //! can hand it back and runtime errors satisfy `runtime.Error`.
 
+use crate::iface::{Data, ErasedFn, Iface, MethodId, TypeDesc};
 use crate::print::{self, Arg};
+use crate::string::GoStr;
 use alloc::format;
 use alloc::string::String;
 use alloc::vec::Vec;
 
-/// Payload of a Rust unwind that implements a Go panic.
-#[derive(Debug, Clone, PartialEq, Eq)]
+/// Payload of a Rust unwind that implements a Go panic: the value `recover`
+/// hands back, and the text gc prints after `panic: `.
+#[derive(Clone)]
 pub struct GoPanic {
     text: Vec<u8>,
+    value: Iface,
 }
 
 impl GoPanic {
     /// Builds a payload from the text gc prints after `panic: `. Go strings
     /// are arbitrary bytes, so the text is too.
     pub fn new(text: impl Into<Vec<u8>>) -> Self {
-        GoPanic { text: text.into() }
+        GoPanic {
+            text: text.into(),
+            value: Iface::nil(),
+        }
+    }
+
+    /// The same, carrying the value `recover` returns.
+    pub fn with_value(text: impl Into<Vec<u8>>, value: Iface) -> Self {
+        GoPanic {
+            text: text.into(),
+            value,
+        }
     }
 
     /// The text gc prints after `panic: `.
     pub fn text(&self) -> &[u8] {
         &self.text
+    }
+
+    /// The value `recover` returns.
+    pub fn value(&self) -> Iface {
+        self.value
+    }
+}
+
+// The runtime's own error type, as `recover` hands it back: a value whose
+// Error() and String() return gc's message. Its method ids come from the
+// emitter, which numbers every method in the program, so the descriptor is
+// built once at startup.
+rt_global! {
+    static RUNTIME_ERROR: core::cell::Cell<Option<&'static TypeDesc>> =
+        core::cell::Cell::new(None);
+}
+
+/// Teaches the runtime the ids of `Error() string` and `String() string`, so
+/// a recovered runtime error satisfies `error` like gc's does. Generated
+/// `main` calls this before anything else.
+pub fn init_runtime_errors(error_id: MethodId, string_id: MethodId) {
+    fn message(d: Data) -> GoStr {
+        d.cast::<crate::place::Slot<GoStr>>().load()
+    }
+    let methods: &'static [(MethodId, ErasedFn)] =
+        alloc::boxed::Box::leak(alloc::boxed::Box::new(if error_id <= string_id {
+            [
+                (error_id, ErasedFn::new(message as *const ())),
+                (string_id, ErasedFn::new(message as *const ())),
+            ]
+        } else {
+            [
+                (string_id, ErasedFn::new(message as *const ())),
+                (error_id, ErasedFn::new(message as *const ())),
+            ]
+        }));
+    let desc: &'static TypeDesc = alloc::boxed::Box::leak(alloc::boxed::Box::new(TypeDesc {
+        name: "runtime.Error",
+        methods,
+        equal: Some(|a, b| message(a) == message(b)),
+        print: |d, out| out.extend_from_slice(message(d).bytes()),
+    }));
+    RUNTIME_ERROR.with(|c| c.set(Some(desc)));
+}
+
+/// The interface value for a runtime error's message, if the program has one.
+fn runtime_error_value(msg: &str) -> Iface {
+    match RUNTIME_ERROR.with(|c| c.get()) {
+        Some(desc) => {
+            let s = GoStr::from_bytes(msg.as_bytes());
+            // Boxing allocates again, so the string needs a root of its own
+            // until the interface value holds it.
+            let frame = crate::gc::Frame::<1>::new();
+            frame.scope(|| {
+                frame.set(0, &s);
+                Iface::new(
+                    desc,
+                    Data::of(crate::place::Ptr::<crate::place::Slot<GoStr>>::alloc(s)),
+                )
+            })
+        }
+        None => Iface::nil(),
+    }
+}
+
+// The panic currently being handled on this goroutine, between the unwind
+// and either `recover` or the resume.
+#[cfg(feature = "std")]
+rt_global! {
+    static CURRENT: core::cell::RefCell<Option<GoPanic>> =
+        core::cell::RefCell::new(None);
+}
+
+/// Takes over a caught panic so the deferred calls can `recover` it.
+///
+/// A Rust panic that is not a Go panic is a runtime or emitter bug, and
+/// keeps unwinding.
+#[cfg(feature = "std")]
+pub fn begin(payload: alloc::boxed::Box<dyn core::any::Any + Send>) {
+    match payload.downcast::<GoPanic>() {
+        Ok(p) => CURRENT.with(|c| *c.borrow_mut() = Some(*p)),
+        Err(other) => std::panic::resume_unwind(other),
+    }
+}
+
+/// `recover()`: the value of the panic being handled, and an end to it.
+#[cfg(feature = "std")]
+pub fn recover() -> Iface {
+    CURRENT
+        .with(|c| c.borrow_mut().take())
+        .map_or(Iface::nil(), |p| p.value())
+}
+
+/// Whether the panic being handled was recovered.
+#[cfg(feature = "std")]
+pub fn recovered() -> bool {
+    CURRENT.with(|c| c.borrow().is_none())
+}
+
+/// Carries on unwinding with the panic being handled.
+#[cfg(feature = "std")]
+pub fn resume() -> ! {
+    match CURRENT.with(|c| c.borrow_mut().take()) {
+        Some(p) => go_panic(p),
+        None => unreachable!("resume without a panic in flight"),
     }
 }
 
@@ -153,7 +273,9 @@ pub fn go_panic(p: GoPanic) -> ! {
 /// Raises a Go runtime error.
 #[cold]
 pub fn runtime_error(e: RuntimeError) -> ! {
-    go_panic(GoPanic::new(e.message()))
+    let msg = e.message();
+    let value = runtime_error_value(&msg);
+    go_panic(GoPanic::with_value(msg, value))
 }
 
 /// `panic(v)` for a value of a predeclared type, printed as gc's
@@ -181,6 +303,33 @@ pub fn panic_custom(type_name: &str, v: Arg<'_>) -> ! {
         text.push(b')');
     }
     go_panic(GoPanic::new(text))
+}
+
+/// `panic(v)` where the value is an interface: its type descriptor knows how
+/// gc prints it (an `error` prints `Error()`, a named basic type prints
+/// `main.T(v)`, and so on).
+#[cold]
+pub fn panic_iface(v: Iface) -> ! {
+    if v.is_nil() {
+        panic_nil();
+    }
+    // Rendering the value calls back into generated code — an error's
+    // Error(), which may allocate — so the value needs a root meanwhile.
+    let frame = crate::gc::Frame::<1>::new();
+    let mut text = Vec::new();
+    frame.scope(|| {
+        frame.set(0, &v);
+        v.print_to(&mut text);
+    });
+    // gc indents the continuation lines of a multi-line panic value.
+    let mut indented = Vec::with_capacity(text.len());
+    for b in text {
+        indented.push(b);
+        if b == b'\n' {
+            indented.push(b'\t');
+        }
+    }
+    go_panic(GoPanic::with_value(indented, v))
 }
 
 /// `panic(nil)`.

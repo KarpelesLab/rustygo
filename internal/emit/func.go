@@ -98,7 +98,17 @@ func (e *emitter) function(fn *ssa.Function) {
 	}
 	f.body()
 	if f.hasDefers {
-		f.out.WriteString("    }));\n    __defers.run();\n    match __r {\n        Ok(v) => v,\n        Err(p) => std::panic::resume_unwind(p),\n    }\n")
+		f.out.WriteString("    }));\n    match __r {\n        Ok(v) => { __defers.run(); v }\n        Err(p) => {\n            rustygo::panic::begin(p);\n            __defers.run();\n")
+		if fn.Recover != nil {
+			// A deferred call recovered: Go resumes at the recover block,
+			// which reads the named results back.
+			f.out.WriteString("            if rustygo::panic::recovered() {\n")
+			f.recoverPath("                ")
+			f.out.WriteString("            }\n            rustygo::panic::resume()\n")
+		} else {
+			f.out.WriteString("            rustygo::panic::resume()\n")
+		}
+		f.out.WriteString("        }\n    }\n")
 	}
 	if len(f.roots) > 0 {
 		f.out.WriteString("    })\n")
@@ -201,9 +211,6 @@ func (f *fnEmitter) body() {
 // hasVar reports whether v gets a local.
 func (f *fnEmitter) hasVar(v ssa.Value) bool {
 	if t, ok := v.Type().(*types.Tuple); ok && t.Len() == 0 {
-		return false
-	}
-	if mi, ok := v.(*ssa.MakeInterface); ok && onlyPanicUses(mi) {
 		return false
 	}
 	return !deadLoad(v)
@@ -327,6 +334,44 @@ func (f *fnEmitter) assign(v ssa.Value, expr string) string {
 		return fmt.Sprintf("%s.store(%s);", v.Name(), expr)
 	}
 	return v.Name() + " = " + expr + ";" + strings.TrimSuffix(f.rootSet(v, " "), "\n")
+}
+
+// typeAssert renders `x.(T)`, with or without the comma-ok form.
+func (f *fnEmitter) typeAssert(v *ssa.TypeAssert) string {
+	x := f.val(v.X)
+	// The static type of the operand, as gc names it in the panic message.
+	from := goIfaceName(v.X.Type())
+	if it, ok := v.AssertedType.Underlying().(*types.Interface); ok {
+		ids, names := f.e.ifaceMethods(it)
+		want := goName(v.AssertedType)
+		if !v.CommaOk {
+			return fmt.Sprintf("(%s).assert_iface(%s, %s, %q, %q)", x, ids, names, want, from)
+		}
+		return fmt.Sprintf("{ let __i = %s; if __i.implements(%s) { (__i, true) } else { (GoValue::zero(), false) } }", x, ids)
+	}
+	desc := f.e.typeDesc(v.AssertedType, v.Pos())
+	place := f.place(v.AssertedType, v.Pos())
+	if !v.CommaOk {
+		return fmt.Sprintf("(%s).assert_concrete(&%s, %q).cast::<%s>().load()", x, desc, from, place)
+	}
+	return fmt.Sprintf("{ let (__d, __ok) = (%s).try_concrete(&%s); if __ok { (__d.cast::<%s>().load(), true) } else { (GoValue::zero(), false) } }",
+		x, desc, place)
+}
+
+// recoverPath emits the blocks go/ssa reaches only after a recover. They
+// read the function's named results, which live in places created before the
+// body ran, so the values a deferred call assigned are the ones returned.
+func (f *fnEmitter) recoverPath(ind string) {
+	saveLoop, saveOut := f.loop, f.out
+	f.out = strings.Builder{}
+	if !f.structuredFrom(f.fn.Recover) {
+		f.e.errorf(f.fn.Pos(), "a recover block with irreducible control flow is not supported yet")
+	}
+	body := f.out.String()
+	f.out, f.loop = saveOut, saveLoop
+	for _, line := range strings.Split(strings.TrimRight(body, "\n"), "\n") {
+		f.out.WriteString(ind + strings.TrimPrefix(line, "    ") + "\n")
+	}
 }
 
 // deferSlot is the key under which a function's defer list takes a root
@@ -475,11 +520,14 @@ func (f *fnEmitter) expr(v ssa.Value) string {
 		}
 		return it + ".advance()"
 	case *ssa.MakeInterface:
-		// Only reachable as a panic operand, which panic() handles itself.
-		if onlyPanicUses(v) {
-			return ""
-		}
-		f.errorf(v.Pos(), "interfaces are not supported yet (roadmap M1)")
+		// gc boxes the concrete value; the interface holds its address.
+		place := f.place(v.X.Type(), v.Pos())
+		return fmt.Sprintf("Iface::new(&%s, Data::of(Ptr::<%s>::alloc(%s)))",
+			f.e.typeDesc(v.X.Type(), v.Pos()), place, f.val(v.X))
+	case *ssa.ChangeInterface:
+		return f.val(v.X)
+	case *ssa.TypeAssert:
+		return f.typeAssert(v)
 	case *ssa.MakeClosure:
 		fn := v.Fn.(*ssa.Function)
 		st := f.e.envStruct(fn)
@@ -498,21 +546,10 @@ func (f *fnEmitter) expr(v ssa.Value) string {
 		f.errorf(v.Pos(), "maps are not supported yet (roadmap M1)")
 	case *ssa.MakeChan, *ssa.Select:
 		f.errorf(v.Pos(), "channels are not supported yet (roadmap M2)")
-	case *ssa.TypeAssert, *ssa.ChangeInterface:
-		f.errorf(v.Pos(), "interfaces are not supported yet (roadmap M1)")
 	default:
 		f.errorf(v.Pos(), "instruction %T is not supported yet", v)
 	}
 	return ""
-}
-
-func onlyPanicUses(v ssa.Value) bool {
-	for _, r := range *v.Referrers() {
-		if _, ok := r.(*ssa.Panic); !ok {
-			return false
-		}
-	}
-	return true
 }
 
 // index returns the checked usize index expression for i against length n.
@@ -679,13 +716,12 @@ func floatToInt(x string, to types.BasicKind) string {
 
 func (f *fnEmitter) call(v *ssa.Call) string {
 	c := v.Common()
-	if c.IsInvoke() {
-		f.errorf(v.Pos(), "interface method calls are not supported yet (roadmap M1)")
-		return ""
-	}
 	args := make([]string, len(c.Args))
 	for i, a := range c.Args {
 		args[i] = f.val(a)
+	}
+	if c.IsInvoke() {
+		return f.invoke(c, args, v.Pos())
 	}
 	if b, ok := c.Value.(*ssa.Builtin); ok {
 		return f.builtin(b, c, v.Type(), v.Pos(), args)
@@ -704,7 +740,7 @@ func (f *fnEmitter) builtin(b *ssa.Builtin, c *ssa.CallCommon, resultType types.
 	case "print", "println":
 		parts := make([]string, len(c.Args))
 		for i, a := range c.Args {
-			parts[i] = f.printArgOf(a.Type(), args[i], a.Pos())
+			parts[i] = f.e.printArgOf(a.Type(), args[i], a.Pos())
 		}
 		return fmt.Sprintf("rustygo::print::%s(&[%s])", b.Name(), strings.Join(parts, ", "))
 	case "len", "cap":
@@ -716,6 +752,8 @@ func (f *fnEmitter) builtin(b *ssa.Builtin, c *ssa.CallCommon, resultType types.
 				return fmt.Sprintf("(%s).len()", args[0])
 			}
 		}
+	case "recover":
+		return "rustygo::panic::recover()"
 	case "append":
 		// go/ssa always passes the elements as one slice (or a string, for
 		// append([]byte, string...)).
@@ -746,29 +784,16 @@ func (f *fnEmitter) printArg(a ssa.Value) string {
 	if b := basicInfo(a.Type()); b != nil && b.Kind() == types.UntypedNil {
 		return "rustygo::print::Arg::Nil"
 	}
-	return f.printArgOf(a.Type(), f.val(a), a.Pos())
+	return f.e.printArgOf(a.Type(), f.val(a), a.Pos())
 }
 
 // printArgOf is printArg for an operand already rendered as an expression.
-func (f *fnEmitter) printArgOf(t types.Type, x string, pos token.Pos) string {
-	if b := basicInfo(t); b != nil && b.Kind() == types.UntypedNil {
-		return "rustygo::print::Arg::Nil"
-	}
-	a := struct {
-		Type func() types.Type
-		Pos  func() token.Pos
-	}{func() types.Type { return t }, func() token.Pos { return pos }}
-	if _, ok := a.Type().Underlying().(*types.Pointer); ok {
-		return fmt.Sprintf("rustygo::print::Arg::Pointer((%s).addr())", x)
-	}
-	if _, ok := a.Type().Underlying().(*types.Signature); ok {
-		return fmt.Sprintf("rustygo::print::Arg::Pointer((%s).addr())", x)
-	}
-	if _, ok := a.Type().Underlying().(*types.Slice); ok {
-		return fmt.Sprintf("rustygo::print::Arg::Slice { len: (%s).len(), cap: (%s).cap(), addr: (%s).addr() }", x, x, x)
-	}
-	b := basicInfo(a.Type())
-	if b != nil {
+func (e *emitter) printArgOf(t types.Type, x string, pos token.Pos) string {
+	u := t.Underlying()
+	if b, ok := u.(*types.Basic); ok {
+		if b.Kind() == types.UntypedNil {
+			return "rustygo::print::Arg::Nil"
+		}
 		info := b.Info()
 		switch {
 		case info&types.IsBoolean != 0:
@@ -785,33 +810,23 @@ func (f *fnEmitter) printArgOf(t types.Type, x string, pos token.Pos) string {
 			return fmt.Sprintf("rustygo::print::Arg::Float64(%s)", x)
 		}
 	}
-	f.errorf(a.Pos(), "printing a %s is not supported yet", a.Type())
+	switch u.(type) {
+	case *types.Pointer, *types.Signature:
+		return fmt.Sprintf("rustygo::print::Arg::Pointer((%s).addr())", x)
+	case *types.Interface:
+		return fmt.Sprintf("rustygo::print::Arg::Iface { data: (%s).data().addr() }", x)
+	case *types.Slice:
+		return fmt.Sprintf("rustygo::print::Arg::Slice { len: (%s).len(), cap: (%s).cap(), addr: (%s).addr() }", x, x, x)
+	}
+	e.errorf(pos, "printing a %s is not supported yet", t)
 	return "rustygo::print::Arg::Nil"
 }
 
 func (f *fnEmitter) panic(p *ssa.Panic) string {
-	mi, ok := p.X.(*ssa.MakeInterface)
-	if !ok {
-		if c, ok := p.X.(*ssa.Const); ok && c.IsNil() {
-			return "rustygo::panic::panic_nil();"
-		}
-		f.errorf(p.Pos(), "panic with a %s value is not supported yet (roadmap M1)", p.X.Type())
-		return ""
+	if c, ok := p.X.(*ssa.Const); ok && c.IsNil() {
+		return "rustygo::panic::panic_nil();"
 	}
-	t := mi.X.Type()
-	if basicInfo(t) == nil {
-		f.errorf(p.Pos(), "panic with a %s value is not supported yet (roadmap M1)", t)
-		return ""
-	}
-	arg := f.printArg(mi.X)
-	if n, ok := types.Unalias(t).(*types.Named); ok {
-		name := n.Obj().Name()
-		if pkg := n.Obj().Pkg(); pkg != nil {
-			name = pkg.Name() + "." + name
-		}
-		return fmt.Sprintf("rustygo::panic::panic_custom(%q, %s);", name, arg)
-	}
-	return fmt.Sprintf("rustygo::panic::panic_value(%s);", arg)
+	return fmt.Sprintf("rustygo::panic::panic_iface(%s);", f.val(p.X))
 }
 
 // val returns the expression for an operand.

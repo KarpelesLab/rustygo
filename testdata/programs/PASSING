@@ -30,3 +30,5 @@ gcstress
 slices
 closures
 defers
+interfaces
+recover
