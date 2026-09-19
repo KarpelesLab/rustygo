@@ -1,6 +1,6 @@
 [package]
 name = "rustygo"
-version = "0.0.1"
+version = "0.0.2"
 edition = "2024"
 rust-version = "1.89"
 description = "Runtime for Go packages compiled to Rust by the rustygo compiler"
