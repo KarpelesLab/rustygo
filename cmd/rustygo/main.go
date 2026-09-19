@@ -8,14 +8,17 @@
 package main
 
 import (
+	"errors"
 	"flag"
 	"fmt"
 	"maps"
 	"os"
+	"path"
+	"runtime"
 	"runtime/debug"
 	"slices"
 
-	"github.com/KarpelesLab/rustygo/internal/emit"
+	"github.com/KarpelesLab/rustygo/internal/build"
 	"github.com/KarpelesLab/rustygo/internal/load"
 	"golang.org/x/tools/go/ssa"
 )
@@ -40,10 +43,12 @@ func main() {
 	cmd, args := os.Args[1], os.Args[2:]
 	var err error
 	switch cmd {
-	case "build", "emit":
-		err = runEmit(cmd, args)
+	case "build":
+		err = runBuild(args)
+	case "emit":
+		err = runEmit(args)
 	case "test":
-		err = fmt.Errorf("test: %w", emit.ErrNotImplemented)
+		err = errors.New("test: not implemented yet (roadmap M3)")
 	case "ssa":
 		err = runSSA(args)
 	case "version":
@@ -60,18 +65,35 @@ func main() {
 	}
 }
 
-func runEmit(cmd string, args []string) error {
-	fs := flag.NewFlagSet(cmd, flag.ExitOnError)
-	out := fs.String("o", "out", "output directory")
+func runEmit(args []string) error {
+	fs := flag.NewFlagSet("emit", flag.ExitOnError)
+	out := fs.String("o", "out", "output directory for the crate")
 	fs.Parse(args)
 	res, err := load.Load("", patterns(fs.Args())...)
 	if err != nil {
 		return err
 	}
-	if err := emit.Crate(res, emit.Options{OutDir: *out}); err != nil {
-		return fmt.Errorf("%s: %w", cmd, err)
+	return build.Emit(res, *out)
+}
+
+func runBuild(args []string) error {
+	fs := flag.NewFlagSet("build", flag.ExitOnError)
+	out := fs.String("o", "", "output file (default: the package's last path element)")
+	fs.Parse(args)
+	res, err := load.Load("", patterns(fs.Args())...)
+	if err != nil {
+		return err
 	}
-	return nil
+	if *out == "" {
+		if len(res.Pkgs) != 1 {
+			return fmt.Errorf("-o is required with more than one package")
+		}
+		*out = path.Base(res.Pkgs[0].Pkg.Path())
+		if runtime.GOOS == "windows" {
+			*out += ".exe"
+		}
+	}
+	return build.Binary(res, *out)
 }
 
 func runSSA(args []string) error {

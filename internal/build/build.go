@@ -1,0 +1,160 @@
+// Package build drives a whole compilation: emit the Rust crate, then build
+// it with cargo.
+package build
+
+import (
+	"bytes"
+	"crypto/sha256"
+	"encoding/hex"
+	"errors"
+	"fmt"
+	"io/fs"
+	"os"
+	"os/exec"
+	"path/filepath"
+	"runtime"
+	"sort"
+
+	"github.com/KarpelesLab/rustygo"
+	"github.com/KarpelesLab/rustygo/internal/emit"
+	"github.com/KarpelesLab/rustygo/internal/load"
+)
+
+// CacheDir is where rustygo keeps the extracted runtime, generated crates and
+// the shared cargo target directory: $RUSTYGO_CACHE, or rustygo/ under the
+// user cache directory.
+func CacheDir() (string, error) {
+	if d := os.Getenv("RUSTYGO_CACHE"); d != "" {
+		return d, nil
+	}
+	d, err := os.UserCacheDir()
+	if err != nil {
+		return "", err
+	}
+	return filepath.Join(d, "rustygo"), nil
+}
+
+// RuntimeDir extracts the embedded runtime crate, once per content hash, and
+// returns its directory.
+func RuntimeDir() (string, error) {
+	cache, err := CacheDir()
+	if err != nil {
+		return "", err
+	}
+	files := map[string][]byte{}
+	err = fs.WalkDir(rustygo.Runtime, ".", func(path string, d fs.DirEntry, err error) error {
+		if err != nil || d.IsDir() {
+			return err
+		}
+		files[path], err = fs.ReadFile(rustygo.Runtime, path)
+		return err
+	})
+	if err != nil {
+		return "", err
+	}
+	names := make([]string, 0, len(files))
+	for n := range files {
+		names = append(names, n)
+	}
+	sort.Strings(names)
+	h := sha256.New()
+	for _, n := range names {
+		fmt.Fprintf(h, "%s\x00%d\x00", n, len(files[n]))
+		h.Write(files[n])
+	}
+	dir := filepath.Join(cache, "runtime-"+hex.EncodeToString(h.Sum(nil))[:16])
+	if _, err := os.Stat(filepath.Join(dir, "Cargo.toml")); err == nil {
+		return dir, nil
+	}
+	if err := os.MkdirAll(cache, 0o755); err != nil {
+		return "", err
+	}
+	tmp, err := os.MkdirTemp(cache, "runtime-tmp-")
+	if err != nil {
+		return "", err
+	}
+	defer os.RemoveAll(tmp)
+	for _, n := range names {
+		p := filepath.Join(tmp, filepath.FromSlash(n))
+		if err := os.MkdirAll(filepath.Dir(p), 0o755); err != nil {
+			return "", err
+		}
+		if err := os.WriteFile(p, files[n], 0o644); err != nil {
+			return "", err
+		}
+	}
+	if err := os.Rename(tmp, dir); err != nil {
+		// Lost a race with another extraction of the same content.
+		if _, statErr := os.Stat(filepath.Join(dir, "Cargo.toml")); statErr == nil {
+			return dir, nil
+		}
+		return "", err
+	}
+	return dir, nil
+}
+
+// Emit writes the crate for res into dir.
+func Emit(res *load.Result, dir string) error {
+	rt, err := RuntimeDir()
+	if err != nil {
+		return err
+	}
+	return emit.Crate(res, emit.Options{OutDir: dir, RuntimePath: rt, BinName: "main"})
+}
+
+// Binary compiles res to a native executable at output.
+func Binary(res *load.Result, output string) error {
+	rt, err := RuntimeDir()
+	if err != nil {
+		return err
+	}
+	cache, err := CacheDir()
+	if err != nil {
+		return err
+	}
+	// One work directory per main package; one binary name per work
+	// directory, so builds sharing the cargo target directory never
+	// overwrite each other's output.
+	var key string
+	for _, p := range res.Pkgs {
+		key += p.Pkg.Path() + "\x00"
+	}
+	sum := sha256.Sum256([]byte(key))
+	id := hex.EncodeToString(sum[:])[:16]
+	work := filepath.Join(cache, "work", id)
+	bin := "p" + id
+	if err := emit.Crate(res, emit.Options{OutDir: work, RuntimePath: rt, BinName: bin}); err != nil {
+		return err
+	}
+
+	target := filepath.Join(cache, "target")
+	cmd := exec.Command("cargo", "build", "--release", "--quiet", "--manifest-path", filepath.Join(work, "Cargo.toml"))
+	cmd.Env = append(os.Environ(), "CARGO_TARGET_DIR="+target)
+	var stderr bytes.Buffer
+	cmd.Stderr = &stderr
+	cmd.Stdout = &stderr
+	if err := cmd.Run(); err != nil {
+		return fmt.Errorf("cargo build failed (crate in %s): %w\n%s", work, err, stderr.Bytes())
+	}
+	if runtime.GOOS == "windows" {
+		bin += ".exe"
+	}
+	return copyFile(filepath.Join(target, "release", bin), output)
+}
+
+func copyFile(src, dst string) error {
+	data, err := os.ReadFile(src)
+	if err != nil {
+		return err
+	}
+	if dir := filepath.Dir(dst); dir != "" {
+		if err := os.MkdirAll(dir, 0o755); err != nil {
+			return err
+		}
+	}
+	// Remove first: overwriting a running or read-only binary in place fails.
+	if err := os.Remove(dst); err != nil && !errors.Is(err, fs.ErrNotExist) {
+		return err
+	}
+	return os.WriteFile(dst, data, 0o755)
+}

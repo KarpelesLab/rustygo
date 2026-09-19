@@ -1,0 +1,641 @@
+package emit
+
+import (
+	"fmt"
+	"go/constant"
+	"go/token"
+	"go/types"
+	"math"
+	"strconv"
+	"strings"
+
+	"golang.org/x/tools/go/ssa"
+)
+
+// fnEmitter writes one function.
+type fnEmitter struct {
+	e   *emitter
+	fn  *ssa.Function
+	out strings.Builder
+	// loop is set when the body has more than one block and runs as a
+	// dispatch loop over block indices.
+	loop bool
+}
+
+func (e *emitter) function(fn *ssa.Function) {
+	f := &fnEmitter{e: e, fn: fn}
+	name := e.fnPaths[fn]
+	name = name[strings.LastIndex(name, "::")+2:]
+	m := e.module(fn.Pkg)
+	if fn.Pkg == nil && fn.Origin() != nil {
+		m = e.module(fn.Origin().Pkg)
+	}
+
+	if fn.Pkg != nil && e.res.Std[fn.Pkg.Pkg] {
+		e.errorf(fn.Pos(), "package %s: the standard library is not compiled yet (roadmap M3)", fn.Pkg.Pkg.Path())
+		return
+	}
+	if len(fn.FreeVars) > 0 {
+		e.errorf(fn.Pos(), "closures are not supported yet (roadmap M1)")
+		return
+	}
+	if fn.Blocks == nil {
+		e.errorf(fn.Pos(), "%s has no Go body (assembly or linkname), not supported yet", fn)
+		return
+	}
+
+	params := make([]string, len(fn.Params))
+	for i, p := range fn.Params {
+		params[i] = fmt.Sprintf("a%d: %s", i, f.typ(p.Type(), p.Pos()))
+	}
+	ret := ""
+	if res := fn.Signature.Results(); res.Len() == 1 {
+		ret = " -> " + f.typ(res.At(0).Type(), fn.Pos())
+	} else if res.Len() > 1 {
+		ret = " -> " + f.typ(res, fn.Pos())
+	}
+	fmt.Fprintf(&f.out, "\n// Go: %s\npub fn %s(%s)%s {\n", fn.String(), name, strings.Join(params, ", "), ret)
+	f.body()
+	f.out.WriteString("}\n")
+	m.buf.WriteString(f.out.String())
+}
+
+func (f *fnEmitter) typ(t types.Type, pos token.Pos) string {
+	return f.e.types.rust(t, f.e, f.pos(pos))
+}
+
+func (f *fnEmitter) place(t types.Type, pos token.Pos) string {
+	return f.e.types.place(t, f.e, f.pos(pos))
+}
+
+// pos falls back to the function's position when an instruction has none.
+func (f *fnEmitter) pos(pos token.Pos) token.Pos {
+	if !pos.IsValid() {
+		return f.fn.Pos()
+	}
+	return pos
+}
+
+func (f *fnEmitter) errorf(pos token.Pos, format string, args ...any) {
+	f.e.errorf(f.pos(pos), format, args...)
+}
+
+func (f *fnEmitter) body() {
+	// Every SSA value is a mutable local, zero-initialized up front: with
+	// blocks dispatched from a loop, rustc cannot prove definite assignment,
+	// and every Go type has a zero value anyway.
+	for _, b := range f.fn.Blocks {
+		for _, instr := range b.Instrs {
+			v, ok := instr.(ssa.Value)
+			if !ok || !f.hasVar(v) {
+				continue
+			}
+			fmt.Fprintf(&f.out, "    let mut %s: %s = GoValue::zero();\n", v.Name(), f.valueType(v))
+		}
+	}
+	f.loop = len(f.fn.Blocks) > 1
+	if !f.loop {
+		f.block(f.fn.Blocks[0], "    ")
+		return
+	}
+	f.out.WriteString("    let mut blk: usize = 0;\n    loop {\n        match blk {\n")
+	for _, b := range f.fn.Blocks {
+		fmt.Fprintf(&f.out, "            %d => {\n", b.Index)
+		f.block(b, "                ")
+		f.out.WriteString("            }\n")
+	}
+	f.out.WriteString("            _ => unreachable!(),\n        }\n    }\n")
+}
+
+// hasVar reports whether v gets a local.
+func (f *fnEmitter) hasVar(v ssa.Value) bool {
+	if t, ok := v.Type().(*types.Tuple); ok && t.Len() == 0 {
+		return false
+	}
+	if mi, ok := v.(*ssa.MakeInterface); ok && onlyPanicUses(mi) {
+		return false
+	}
+	return true
+}
+
+// valueType is the Rust type of the local holding v.
+func (f *fnEmitter) valueType(v ssa.Value) string {
+	switch v := v.(type) {
+	case *ssa.Range:
+		if !isString(v.X.Type()) {
+			f.errorf(v.Pos(), "range over %s is not supported yet (roadmap M1)", v.X.Type())
+		}
+		return "StrIter"
+	case *ssa.Next:
+		return "(bool, i64, i32)"
+	}
+	return f.typ(v.Type(), v.Pos())
+}
+
+func (f *fnEmitter) block(b *ssa.BasicBlock, ind string) {
+	for _, instr := range b.Instrs {
+		switch instr := instr.(type) {
+		case *ssa.Phi, *ssa.DebugRef:
+			// Phis are assigned on the incoming edges.
+		case *ssa.Jump:
+			f.out.WriteString(f.edge(b, b.Succs[0], ind))
+		case *ssa.If:
+			fmt.Fprintf(&f.out, "%sif %s {\n", ind, f.val(instr.Cond))
+			f.out.WriteString(f.edge(b, b.Succs[0], ind+"    "))
+			fmt.Fprintf(&f.out, "%s} else {\n", ind)
+			f.out.WriteString(f.edge(b, b.Succs[1], ind+"    "))
+			fmt.Fprintf(&f.out, "%s}\n", ind)
+		case *ssa.Return:
+			f.out.WriteString(ind + f.ret(instr) + "\n")
+		default:
+			if s := f.instr(instr); s != "" {
+				f.out.WriteString(ind + s + "\n")
+			}
+		}
+	}
+}
+
+// edge assigns the phis of succ for the edge from pred, then transfers
+// control to succ.
+func (f *fnEmitter) edge(pred, succ *ssa.BasicBlock, ind string) string {
+	var s strings.Builder
+	var phis []*ssa.Phi
+	for _, instr := range succ.Instrs {
+		if phi, ok := instr.(*ssa.Phi); ok {
+			phis = append(phis, phi)
+		}
+	}
+	if len(phis) > 0 {
+		idx := -1
+		for i, p := range succ.Preds {
+			if p == pred {
+				idx = i
+				break
+			}
+		}
+		// A parallel copy: read every incoming value before writing any phi.
+		for i, phi := range phis {
+			fmt.Fprintf(&s, "%slet e%d = %s;\n", ind, i, f.val(phi.Edges[idx]))
+		}
+		for i, phi := range phis {
+			fmt.Fprintf(&s, "%s%s = e%d;\n", ind, phi.Name(), i)
+		}
+	}
+	fmt.Fprintf(&s, "%sblk = %d;\n%scontinue;\n", ind, succ.Index, ind)
+	return s.String()
+}
+
+func (f *fnEmitter) ret(r *ssa.Return) string {
+	switch len(r.Results) {
+	case 0:
+		return "return;"
+	case 1:
+		return "return " + f.val(r.Results[0]) + ";"
+	}
+	parts := make([]string, len(r.Results))
+	for i, v := range r.Results {
+		parts[i] = f.val(v)
+	}
+	return "return (" + strings.Join(parts, ", ") + ");"
+}
+
+// instr returns the statement for a non-terminator instruction.
+func (f *fnEmitter) instr(instr ssa.Instruction) string {
+	if v, ok := instr.(ssa.Value); ok {
+		expr := f.expr(v)
+		if expr == "" {
+			return ""
+		}
+		if !f.hasVar(v) {
+			return expr + ";"
+		}
+		return v.Name() + " = " + expr + ";"
+	}
+	switch instr := instr.(type) {
+	case *ssa.Store:
+		return fmt.Sprintf("(%s).store(%s);", f.val(instr.Addr), f.val(instr.Val))
+	case *ssa.Panic:
+		return f.panic(instr)
+	case *ssa.Go:
+		f.errorf(instr.Pos(), "go statements are not supported yet (roadmap M2)")
+	case *ssa.Defer, *ssa.RunDefers:
+		f.errorf(instr.Pos(), "defer is not supported yet (roadmap M1)")
+	case *ssa.Send:
+		f.errorf(instr.Pos(), "channels are not supported yet (roadmap M2)")
+	case *ssa.MapUpdate:
+		f.errorf(instr.Pos(), "maps are not supported yet (roadmap M1)")
+	default:
+		f.errorf(instr.Pos(), "instruction %T is not supported yet", instr)
+	}
+	return ""
+}
+
+// expr returns the right-hand side for a value-producing instruction.
+func (f *fnEmitter) expr(v ssa.Value) string {
+	switch v := v.(type) {
+	case *ssa.Alloc:
+		return fmt.Sprintf("Ptr::<%s>::alloc(GoValue::zero())", f.place(v.Type().(*types.Pointer).Elem(), v.Pos()))
+	case *ssa.BinOp:
+		return f.binop(v)
+	case *ssa.UnOp:
+		return f.unop(v)
+	case *ssa.Call:
+		return f.call(v)
+	case *ssa.ChangeType:
+		return f.val(v.X)
+	case *ssa.Convert:
+		return f.convert(v)
+	case *ssa.Extract:
+		return fmt.Sprintf("%s.%d", f.val(v.Tuple), v.Index)
+	case *ssa.Field:
+		return fmt.Sprintf("(%s).%s", f.val(v.X), f.e.types.field(v.X.Type(), v.Field, f.e, v.Pos()))
+	case *ssa.FieldAddr:
+		st := v.X.Type().Underlying().(*types.Pointer).Elem()
+		return fmt.Sprintf("Ptr::from_ref(&(%s).get().%s)", f.val(v.X), f.e.types.field(st, v.Field, f.e, v.Pos()))
+	case *ssa.IndexAddr:
+		if p, ok := v.X.Type().Underlying().(*types.Pointer); ok {
+			if arr, ok := p.Elem().Underlying().(*types.Array); ok {
+				return fmt.Sprintf("Ptr::from_ref(&(%s).get()[%s])", f.val(v.X), f.index(v.Index, arr.Len()))
+			}
+		}
+		f.errorf(v.Pos(), "indexing %s is not supported yet (roadmap M1)", v.X.Type())
+	case *ssa.Index:
+		switch t := v.X.Type().Underlying().(type) {
+		case *types.Array:
+			return fmt.Sprintf("(%s)[%s]", f.val(v.X), f.index(v.Index, t.Len()))
+		case *types.Basic:
+			if t.Info()&types.IsString != 0 {
+				if isUnsigned(v.Index.Type()) {
+					return fmt.Sprintf("(%s).at_u(%s as u64)", f.val(v.X), f.val(v.Index))
+				}
+				return fmt.Sprintf("(%s).at(%s as i64)", f.val(v.X), f.val(v.Index))
+			}
+		}
+		f.errorf(v.Pos(), "indexing %s is not supported yet (roadmap M1)", v.X.Type())
+	case *ssa.Slice:
+		if !isString(v.X.Type()) {
+			f.errorf(v.Pos(), "slicing %s is not supported yet (roadmap M1)", v.X.Type())
+			return ""
+		}
+		lo := "0i64"
+		if v.Low != nil {
+			lo = f.val(v.Low) + " as i64"
+		}
+		hi := "None"
+		if v.High != nil {
+			hi = "Some(" + f.val(v.High) + " as i64)"
+		}
+		return fmt.Sprintf("(%s).slice(%s, %s)", f.val(v.X), lo, hi)
+	case *ssa.Range:
+		return fmt.Sprintf("(%s).iter()", f.val(v.X))
+	case *ssa.Next:
+		if !v.IsString {
+			f.errorf(v.Pos(), "range over maps is not supported yet (roadmap M1)")
+			return ""
+		}
+		return v.Iter.Name() + ".advance()"
+	case *ssa.MakeInterface:
+		// Only reachable as a panic operand, which panic() handles itself.
+		if onlyPanicUses(v) {
+			return ""
+		}
+		f.errorf(v.Pos(), "interfaces are not supported yet (roadmap M1)")
+	case *ssa.MakeClosure:
+		f.errorf(v.Pos(), "closures are not supported yet (roadmap M1)")
+	case *ssa.MakeSlice, *ssa.SliceToArrayPointer:
+		f.errorf(v.Pos(), "slices are not supported yet (roadmap M1)")
+	case *ssa.MakeMap, *ssa.Lookup:
+		f.errorf(v.Pos(), "maps are not supported yet (roadmap M1)")
+	case *ssa.MakeChan, *ssa.Select:
+		f.errorf(v.Pos(), "channels are not supported yet (roadmap M2)")
+	case *ssa.TypeAssert, *ssa.ChangeInterface:
+		f.errorf(v.Pos(), "interfaces are not supported yet (roadmap M1)")
+	default:
+		f.errorf(v.Pos(), "instruction %T is not supported yet", v)
+	}
+	return ""
+}
+
+func onlyPanicUses(v ssa.Value) bool {
+	for _, r := range *v.Referrers() {
+		if _, ok := r.(*ssa.Panic); !ok {
+			return false
+		}
+	}
+	return true
+}
+
+// index returns the checked usize index expression for i against length n.
+func (f *fnEmitter) index(i ssa.Value, n int64) string {
+	if isUnsigned(i.Type()) {
+		return fmt.Sprintf("rustygo::ops::index_u(%s as u64, %d)", f.val(i), n)
+	}
+	return fmt.Sprintf("rustygo::ops::index(%s as i64, %d)", f.val(i), n)
+}
+
+func (f *fnEmitter) binop(v *ssa.BinOp) string {
+	x, y := f.val(v.X), f.val(v.Y)
+	b := basicInfo(v.X.Type())
+	isInt := b != nil && b.Info()&types.IsInteger != 0
+	switch v.Op {
+	case token.EQL, token.NEQ, token.LSS, token.LEQ, token.GTR, token.GEQ:
+		return fmt.Sprintf("(%s %s %s)", x, v.Op, y)
+	case token.SHL, token.SHR:
+		var count string
+		if isUnsigned(v.Y.Type()) {
+			count = y + " as u64"
+		} else {
+			count = "rustygo::ops::shift_count(" + y + " as i64)"
+		}
+		method := "go_shl"
+		if v.Op == token.SHR {
+			method = "go_shr"
+		}
+		return fmt.Sprintf("(%s).%s(%s)", x, method, count)
+	}
+	if b == nil {
+		f.errorf(v.Pos(), "operator %s on %s is not supported", v.Op, v.X.Type())
+		return ""
+	}
+	if b.Info()&types.IsString != 0 && v.Op == token.ADD {
+		return fmt.Sprintf("(%s).concat(%s)", x, y)
+	}
+	if b.Info()&types.IsComplex != 0 {
+		f.errorf(v.Pos(), "complex numbers are not supported yet (roadmap M1)")
+		return ""
+	}
+	if isInt {
+		switch v.Op {
+		case token.ADD:
+			return fmt.Sprintf("(%s).wrapping_add(%s)", x, y)
+		case token.SUB:
+			return fmt.Sprintf("(%s).wrapping_sub(%s)", x, y)
+		case token.MUL:
+			return fmt.Sprintf("(%s).wrapping_mul(%s)", x, y)
+		case token.QUO:
+			return fmt.Sprintf("(%s).go_div(%s)", x, y)
+		case token.REM:
+			return fmt.Sprintf("(%s).go_rem(%s)", x, y)
+		case token.AND_NOT:
+			return fmt.Sprintf("(%s & !%s)", x, y)
+		}
+	}
+	switch v.Op {
+	case token.ADD, token.SUB, token.MUL, token.QUO, token.AND, token.OR, token.XOR:
+		return fmt.Sprintf("(%s %s %s)", x, v.Op, y)
+	}
+	f.errorf(v.Pos(), "operator %s on %s is not supported", v.Op, v.X.Type())
+	return ""
+}
+
+func (f *fnEmitter) unop(v *ssa.UnOp) string {
+	x := f.val(v.X)
+	switch v.Op {
+	case token.MUL:
+		return fmt.Sprintf("(%s).load()", x)
+	case token.NOT, token.XOR:
+		return fmt.Sprintf("(!%s)", x)
+	case token.SUB:
+		if b := basicInfo(v.X.Type()); b != nil && b.Info()&types.IsInteger != 0 {
+			return fmt.Sprintf("(%s).wrapping_neg()", x)
+		}
+		return fmt.Sprintf("(-%s)", x)
+	case token.ARROW:
+		f.errorf(v.Pos(), "channels are not supported yet (roadmap M2)")
+		return ""
+	}
+	f.errorf(v.Pos(), "unary %s is not supported", v.Op)
+	return ""
+}
+
+func (f *fnEmitter) convert(v *ssa.Convert) string {
+	from, to := basicInfo(v.X.Type()), basicInfo(v.Type())
+	x := f.val(v.X)
+	if from != nil && to != nil {
+		fi, ti := from.Info(), to.Info()
+		switch {
+		case fi&types.IsInteger != 0 && ti&types.IsString != 0:
+			return fmt.Sprintf("GoStr::from_rune(%s as i64)", x)
+		case fi&types.IsFloat != 0 && ti&types.IsInteger != 0:
+			return floatToInt(x, to.Kind())
+		case fi&(types.IsInteger|types.IsFloat) != 0 && ti&(types.IsInteger|types.IsFloat) != 0:
+			return fmt.Sprintf("(%s as %s)", x, basicTypes[to.Kind()])
+		}
+	}
+	f.errorf(v.Pos(), "conversion from %s to %s is not supported yet", v.X.Type(), v.Type())
+	return ""
+}
+
+// floatToInt converts a float expression to an integer kind the way gc
+// does on the target architecture (rustygo::ops::float).
+func floatToInt(x string, to types.BasicKind) string {
+	wide := "(" + x + " as f64)"
+	switch to {
+	case types.Int, types.Int64:
+		return "rustygo::ops::float::to_i64" + wide
+	case types.Int32:
+		return "rustygo::ops::float::to_i32" + wide
+	case types.Uint, types.Uint64, types.Uintptr:
+		return "rustygo::ops::float::to_u64" + wide
+	case types.Uint32:
+		return "rustygo::ops::float::to_u32" + wide
+	}
+	return fmt.Sprintf("(rustygo::ops::float::to_i32%s as %s)", wide, basicTypes[to])
+}
+
+func (f *fnEmitter) call(v *ssa.Call) string {
+	c := v.Common()
+	if c.IsInvoke() {
+		f.errorf(v.Pos(), "interface method calls are not supported yet (roadmap M1)")
+		return ""
+	}
+	args := make([]string, len(c.Args))
+	for i, a := range c.Args {
+		args[i] = f.val(a)
+	}
+	if b, ok := c.Value.(*ssa.Builtin); ok {
+		return f.builtin(v, b, args)
+	}
+	callee := c.StaticCallee()
+	if callee == nil {
+		f.errorf(v.Pos(), "calls through function values are not supported yet (roadmap M1)")
+		return ""
+	}
+	return fmt.Sprintf("%s(%s)", f.e.fnPath(callee), strings.Join(args, ", "))
+}
+
+func (f *fnEmitter) builtin(v *ssa.Call, b *ssa.Builtin, args []string) string {
+	c := v.Common()
+	switch b.Name() {
+	case "print", "println":
+		parts := make([]string, len(c.Args))
+		for i, a := range c.Args {
+			parts[i] = f.printArg(a)
+		}
+		return fmt.Sprintf("rustygo::print::%s(&[%s])", b.Name(), strings.Join(parts, ", "))
+	case "len":
+		if isString(c.Args[0].Type()) {
+			return fmt.Sprintf("(%s).len()", args[0])
+		}
+	case "min", "max":
+		if bi := basicInfo(v.Type()); bi != nil && bi.Info()&(types.IsInteger|types.IsString) != 0 {
+			expr := args[0]
+			for _, a := range args[1:] {
+				expr = fmt.Sprintf("core::cmp::%s(%s, %s)", b.Name(), expr, a)
+			}
+			return expr
+		}
+	}
+	f.errorf(v.Pos(), "builtin %s on these operands is not supported yet", b.Name())
+	return ""
+}
+
+// printArg classifies an operand of print/println (and of panic).
+func (f *fnEmitter) printArg(a ssa.Value) string {
+	if b := basicInfo(a.Type()); b != nil && b.Kind() == types.UntypedNil {
+		return "rustygo::print::Arg::Nil"
+	}
+	x := f.val(a)
+	if _, ok := a.Type().Underlying().(*types.Pointer); ok {
+		return fmt.Sprintf("rustygo::print::Arg::Pointer((%s).addr())", x)
+	}
+	b := basicInfo(a.Type())
+	if b != nil {
+		info := b.Info()
+		switch {
+		case info&types.IsBoolean != 0:
+			return fmt.Sprintf("rustygo::print::Arg::Bool(%s)", x)
+		case info&types.IsString != 0:
+			return fmt.Sprintf("rustygo::print::Arg::Str((%s).bytes())", x)
+		case info&types.IsUnsigned != 0:
+			return fmt.Sprintf("rustygo::print::Arg::Uint(%s as u64)", x)
+		case info&types.IsInteger != 0:
+			return fmt.Sprintf("rustygo::print::Arg::Int(%s as i64)", x)
+		case b.Kind() == types.Float32:
+			return fmt.Sprintf("rustygo::print::Arg::Float32(%s)", x)
+		case info&types.IsFloat != 0:
+			return fmt.Sprintf("rustygo::print::Arg::Float64(%s)", x)
+		}
+	}
+	f.errorf(a.Pos(), "printing a %s is not supported yet", a.Type())
+	return "rustygo::print::Arg::Nil"
+}
+
+func (f *fnEmitter) panic(p *ssa.Panic) string {
+	mi, ok := p.X.(*ssa.MakeInterface)
+	if !ok {
+		if c, ok := p.X.(*ssa.Const); ok && c.IsNil() {
+			return "rustygo::panic::panic_nil();"
+		}
+		f.errorf(p.Pos(), "panic with a %s value is not supported yet (roadmap M1)", p.X.Type())
+		return ""
+	}
+	t := mi.X.Type()
+	if basicInfo(t) == nil {
+		f.errorf(p.Pos(), "panic with a %s value is not supported yet (roadmap M1)", t)
+		return ""
+	}
+	arg := f.printArg(mi.X)
+	if n, ok := types.Unalias(t).(*types.Named); ok {
+		name := n.Obj().Name()
+		if pkg := n.Obj().Pkg(); pkg != nil {
+			name = pkg.Name() + "." + name
+		}
+		return fmt.Sprintf("rustygo::panic::panic_custom(%q, %s);", name, arg)
+	}
+	return fmt.Sprintf("rustygo::panic::panic_value(%s);", arg)
+}
+
+// val returns the expression for an operand.
+func (f *fnEmitter) val(val ssa.Value) string {
+	switch v := val.(type) {
+	case *ssa.Const:
+		return f.constant(v)
+	case *ssa.Parameter:
+		for i, p := range f.fn.Params {
+			if p == v {
+				return fmt.Sprintf("a%d", i)
+			}
+		}
+	case *ssa.Global:
+		return f.e.globalPath(v) + "()"
+	case *ssa.Function:
+		f.errorf(v.Pos(), "function values are not supported yet (roadmap M1)")
+		return "()"
+	case *ssa.FreeVar:
+		f.errorf(v.Pos(), "closures are not supported yet (roadmap M1)")
+		return "()"
+	case ssa.Instruction:
+		return val.Name()
+	}
+	f.errorf(val.Pos(), "operand %T is not supported", val)
+	return "()"
+}
+
+func (f *fnEmitter) constant(c *ssa.Const) string {
+	if c.Value == nil {
+		return fmt.Sprintf("<%s as GoValue>::zero()", f.typ(c.Type(), c.Pos()))
+	}
+	b := basicInfo(c.Type())
+	if b == nil {
+		f.errorf(c.Pos(), "constant of type %s is not supported", c.Type())
+		return "()"
+	}
+	rt := basicTypes[b.Kind()]
+	switch {
+	case b.Info()&types.IsBoolean != 0:
+		return strconv.FormatBool(constant.BoolVal(c.Value))
+	case b.Info()&types.IsString != 0:
+		return "GoStr::lit(" + byteString(constant.StringVal(c.Value)) + ")"
+	case b.Info()&types.IsUnsigned != 0:
+		u, _ := constant.Uint64Val(c.Value)
+		return fmt.Sprintf("%d%s", u, rt)
+	case b.Info()&types.IsInteger != 0:
+		i, _ := constant.Int64Val(c.Value)
+		if i == math.MinInt64 {
+			return "i64::MIN"
+		}
+		if i < 0 {
+			return fmt.Sprintf("(%d%s)", i, rt)
+		}
+		return fmt.Sprintf("%d%s", i, rt)
+	case b.Kind() == types.Float32:
+		x, _ := constant.Float32Val(c.Value)
+		return fmt.Sprintf("f32::from_bits(%#x)", math.Float32bits(x))
+	case b.Info()&types.IsFloat != 0:
+		x, _ := constant.Float64Val(c.Value)
+		return fmt.Sprintf("f64::from_bits(%#x)", math.Float64bits(x))
+	}
+	f.errorf(c.Pos(), "constant of type %s is not supported yet", c.Type())
+	return "()"
+}
+
+// byteString renders s as a Rust byte-string literal.
+func byteString(s string) string {
+	var b strings.Builder
+	b.WriteString(`b"`)
+	for i := 0; i < len(s); i++ {
+		c := s[i]
+		switch {
+		case c == '"' || c == '\\':
+			b.WriteByte('\\')
+			b.WriteByte(c)
+		case c >= 0x20 && c < 0x7f:
+			b.WriteByte(c)
+		default:
+			fmt.Fprintf(&b, `\x%02x`, c)
+		}
+	}
+	b.WriteByte('"')
+	return b.String()
+}
+
+func isString(t types.Type) bool {
+	b := basicInfo(t)
+	return b != nil && b.Info()&types.IsString != 0
+}
+
+func isUnsigned(t types.Type) bool {
+	b := basicInfo(t)
+	return b != nil && b.Info()&types.IsUnsigned != 0
+}

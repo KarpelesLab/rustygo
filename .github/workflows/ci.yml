@@ -155,6 +155,16 @@ jobs:
         with:
           go-version-file: go.mod
 
+      # The differential harness (internal/difftest) builds every test
+      # program with cargo.
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache
+        uses: Swatinem/rust-cache@v2
+        with:
+          key: compiler-${{ matrix.os }}
+
       - name: gofmt
         if: runner.os == 'Linux'
         run: test -z "$(gofmt -l .)" || { gofmt -l .; exit 1; }
@@ -162,5 +172,5 @@ jobs:
       - name: go vet
         run: go vet ./...
 
-      - name: go test
+      - name: go test (includes gc vs rustygo on testdata/programs)
         run: go test ./...

@@ -6,14 +6,17 @@
 //!
 //! This crate is at the M0 spike stage (see `docs/ROADMAP.md`). What exists:
 //!
+//! * [`value`] and [`place`]: Go values, addressable storage and pointers.
+//! * [`string`]: Go strings.
 //! * [`ops`]: Go integer semantics that differ from Rust's (shifts,
-//!   division).
+//!   division) and bounds checks.
 //! * [`print`]: the builtin `print` / `println`.
 //! * [`panic`](mod@panic): Go panics carried on Rust unwinding.
 //! * `rt`: the process entry point for a Go `main` (`std` only).
+//! * [`prelude`]: what generated code imports.
 //!
-//! Still to come, by milestone: the collector, `Gc<T>` / `Ptr<T>`, strings,
-//! slices, maps and interfaces (M1); goroutines, channels and timers (M2);
+//! M0 allocates without collecting; everything leaks. Still to come, by
+//! milestone: the collector, slices, maps, closures and interfaces (M1); goroutines, channels and timers (M2);
 //! the `syscall` layer and netpoller (M3).
 //!
 //! # Features
@@ -30,6 +33,10 @@ extern crate std;
 
 pub mod ops;
 pub mod panic;
+pub mod place;
+pub mod prelude;
 pub mod print;
 #[cfg(feature = "std")]
 pub mod rt;
+pub mod string;
+pub mod value;

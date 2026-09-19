@@ -64,19 +64,30 @@ teaching `go list` a GOARCH it rejects.
 | `unsafe.Pointer` | `Ptr<Opaque>` | restricted; see §7 |
 | generics | monomorphized by `go/ssa` | no Rust generics needed |
 
-### Interior pointers
+### Values, places and interior pointers
 
-`&s.Field`, `&arr[i]` and `&slice[i]` are legal Go and must keep the whole
-object alive. `Ptr<T>` is therefore a fat pointer:
+Every Go type has two Rust forms (implemented in M0, `src/value.rs` and
+`src/place.rs`):
 
-```rust
-pub struct Ptr<T> { base: Gc<Obj>, offset: u32, _t: PhantomData<T> }
-```
+* The **value** form is a plain `Copy` type. Go values copy bitwise and have
+  no destructors, so this always works.
+* The **place** form is addressable storage for that value. Scalars, strings
+  and pointers live in a `Slot<T>` (a cell accessed only by copying in and
+  out). A struct lives in an emitted struct with one place per field. An
+  array `[N]T` lives in `[P; N]`.
 
-Loads and stores go through the runtime, which bounds-checks against the
-object's layout descriptor. This is the main reason generated code can avoid
-`unsafe` — and the main reason it costs more than native Go. Escape analysis
-(M6) is what claws that back for locals that never escape.
+A Go pointer is a `Ptr<P>`, a reference to a place, with nil as its zero value.
+`&s.Field` and `&arr[i]` therefore need no offsets and no layout descriptors:
+they are ordinary pointers to the field's or element's own place. `&slice[i]`
+works the same way from M1. Loading `*p` for a whole struct reads each field
+place, and storing writes each one.
+
+This replaces the byte-offset fat pointer of the first draft
+(`Ptr { base, offset }`, with runtime bounds checks against a layout
+descriptor). Place types keep every access typed and need no layout checks.
+In M1 a `Ptr` also carries the handle of its enclosing object, which is what
+keeps the whole object alive; the place reference stays as it is. Escape
+analysis (M6) turns non-escaping places back into plain Rust locals.
 
 ### Field access and aliasing
 
@@ -86,10 +97,10 @@ Rust, a data race through non-atomic accesses is undefined behavior, even where
 Go gives it a defined (if unhelpful) meaning for word-sized values. The
 runtime's accessor API has to be sound for *any* code the emitter produces, so:
 
-* No Rust reference into a `Gc` object outlives a single load or store, and no
-  call happens while one is held. A `with_mut` closure contains only
-  straight-line field arithmetic, and `p.x = f(p)` evaluates `f(p)` into a
-  temporary first.
+* No Rust reference into Go storage is handed to generated code except the
+  `&'static` place references inside `Ptr`, and those allow only `load` and
+  `store`, which copy. `p.x = f(p)` is a call, then a store; nothing is
+  borrowed across the call. (M0 does exactly this: slots are `Cell`s.)
 * Concurrent access is still open. Plain loads and stores are UB under a Go data
   race; relaxed atomics for every heap word are sound but block some
   optimizations. M0 measures the difference and decides (§13).

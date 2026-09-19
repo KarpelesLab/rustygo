@@ -1,0 +1,28 @@
+# Programs that must keep passing the differential test (gc vs rustygo).
+# The list only grows: a listed program that fails is a CI failure.
+arith
+arrays
+bounds
+consts
+divzero
+floatconv
+floats
+generics
+globals
+goto
+hello
+loops
+multipkg
+multiret
+namedtypes
+negshift
+nilptr
+panicint
+panicnamed
+panicstr
+pointers
+recursion
+strbounds
+strings
+structs
+switches

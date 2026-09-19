@@ -12,6 +12,7 @@ import (
 	"fmt"
 	"go/types"
 	"os"
+	"strings"
 
 	"golang.org/x/tools/go/packages"
 	"golang.org/x/tools/go/ssa"
@@ -27,6 +28,8 @@ type Result struct {
 	// Pkgs are the SSA packages for the requested patterns, in the order
 	// go/packages returned them.
 	Pkgs []*ssa.Package
+	// Std holds the standard-library packages among everything loaded.
+	Std map[*types.Package]bool
 }
 
 // Load type-checks the packages matching patterns (relative to dir, or the
@@ -60,18 +63,27 @@ func Load(dir string, patterns ...string) (*Result, error) {
 		}
 	}
 
+	std := map[*types.Package]bool{}
+	packages.Visit(pkgs, nil, func(p *packages.Package) {
+		if isStd(p) {
+			std[p.Types] = true
+		}
+	})
+
 	prog, ssaPkgs := ssautil.AllPackages(pkgs, ssa.InstantiateGenerics)
 	prog.Build()
-	return &Result{Prog: prog, Pkgs: ssaPkgs}, nil
+	return &Result{Prog: prog, Pkgs: ssaPkgs, Std: std}, nil
 }
 
-func joinTags() string {
-	s := ""
-	for i, t := range Tags {
-		if i > 0 {
-			s += ","
-		}
-		s += t
+// isStd reports whether p is in the standard library: it belongs to no
+// module, and its first path element has no dot (so it is not a GOPATH
+// import path either).
+func isStd(p *packages.Package) bool {
+	if p.Module != nil || p.PkgPath == "command-line-arguments" {
+		return false
 	}
-	return s
+	first, _, _ := strings.Cut(p.PkgPath, "/")
+	return !strings.Contains(first, ".")
 }
+
+func joinTags() string { return strings.Join(Tags, ",") }

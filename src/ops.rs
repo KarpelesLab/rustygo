@@ -10,8 +10,141 @@
 //!
 //! Generated code widens every shift count to `u64` first. Counts of a signed
 //! type go through [`shift_count`], which rejects negative values.
+//!
+//! Also here: index and slice bounds checks with gc's messages, and
+//! float-to-integer conversions matching gc per architecture ([`float`]).
 
 use crate::panic::{RuntimeError, runtime_error};
+
+/// Checks a signed index against a length, panicking with Go's message.
+#[inline]
+pub fn index(i: i64, len: usize) -> usize {
+    if i < 0 || i as u64 >= len as u64 {
+        runtime_error(RuntimeError::Index { index: i, len });
+    }
+    i as usize
+}
+
+/// Checks an unsigned index against a length, panicking with Go's message.
+#[inline]
+pub fn index_u(i: u64, len: usize) -> usize {
+    if i >= len as u64 {
+        runtime_error(RuntimeError::IndexU { index: i, len });
+    }
+    i as usize
+}
+
+/// Checks `[lo:hi]` against a length, as gc does: the high bound first, then
+/// the low bound against it. A missing `hi` means `len`.
+pub fn slice_bounds(lo: i64, hi: Option<i64>, len: usize) -> (usize, usize) {
+    let h = match hi {
+        Some(h) => {
+            if h < 0 || h as u64 > len as u64 {
+                runtime_error(RuntimeError::SliceHigh { high: h, len });
+            }
+            h as usize
+        }
+        None => len,
+    };
+    if lo < 0 || lo as u64 > h as u64 {
+        runtime_error(RuntimeError::SliceLow { low: lo, high: h });
+    }
+    (lo as usize, h)
+}
+
+/// Float-to-integer conversions, matching gc on each architecture.
+///
+/// Go leaves out-of-range and NaN conversions implementation-specific, and gc
+/// simply uses the hardware instruction. On x86-64 that is `CVTTSD2SQ` /
+/// `CVTTSD2SL`, which yield the minimum integer for anything they cannot
+/// represent. On aarch64 it is `FCVTZS` / `FCVTZU`, which saturate and send
+/// NaN to 0, exactly like Rust's `as`.
+///
+/// gc converts to the narrow types through a wider one: `int8`/`int16`/
+/// `uint8`/`uint16` through int32, and `uint32` through int64. A float32
+/// operand is widened to float64 first, which is exact.
+pub mod float {
+    /// `CVTTSD2SQ`: truncate to i64, or `i64::MIN` if out of range or NaN.
+    #[cfg(target_arch = "x86_64")]
+    #[inline]
+    fn cvt64(x: f64) -> i64 {
+        // -2^63 <= x < 2^63, false for NaN.
+        if (-9223372036854775808.0..9223372036854775808.0).contains(&x) {
+            x as i64
+        } else {
+            i64::MIN
+        }
+    }
+
+    /// `CVTTSD2SL`: truncate to i32, or `i32::MIN` if out of range or NaN.
+    #[cfg(target_arch = "x86_64")]
+    #[inline]
+    fn cvt32(x: f64) -> i32 {
+        // -2^31 - 1 itself truncates out of range, and `as` then saturates
+        // it to i32::MIN, the same answer as the hardware's.
+        if (-2147483649.0..2147483648.0).contains(&x) {
+            x as i32
+        } else {
+            i32::MIN
+        }
+    }
+
+    #[cfg(not(target_arch = "x86_64"))]
+    #[inline]
+    fn cvt64(x: f64) -> i64 {
+        x as i64
+    }
+
+    #[cfg(not(target_arch = "x86_64"))]
+    #[inline]
+    fn cvt32(x: f64) -> i32 {
+        x as i32
+    }
+
+    /// `int64(x)`, `int(x)`.
+    #[inline]
+    pub fn to_i64(x: f64) -> i64 {
+        cvt64(x)
+    }
+
+    /// `int32(x)`; `int16(x)` and `int8(x)` truncate this.
+    #[inline]
+    pub fn to_i32(x: f64) -> i32 {
+        cvt32(x)
+    }
+
+    /// `uint64(x)`, `uint(x)`, `uintptr(x)`.
+    #[inline]
+    pub fn to_u64(x: f64) -> u64 {
+        #[cfg(target_arch = "x86_64")]
+        {
+            // gc's sequence: below 2^63 convert directly; otherwise (NaN
+            // included) convert x - 2^63 and set the top bit.
+            if x < 9223372036854775808.0 {
+                cvt64(x) as u64
+            } else {
+                cvt64(x - 9223372036854775808.0) as u64 | 1 << 63
+            }
+        }
+        #[cfg(not(target_arch = "x86_64"))]
+        {
+            x as u64
+        }
+    }
+
+    /// `uint32(x)`.
+    #[inline]
+    pub fn to_u32(x: f64) -> u32 {
+        #[cfg(target_arch = "x86_64")]
+        {
+            cvt64(x) as u32
+        }
+        #[cfg(not(target_arch = "x86_64"))]
+        {
+            x as u32
+        }
+    }
+}
 
 /// Converts a signed shift count to the unsigned count the [`GoInt`] shifts
 /// take, panicking with Go's runtime error if it is negative.
@@ -114,6 +247,53 @@ mod tests {
                 shift_count(-1);
             }),
             "runtime error: negative shift amount"
+        );
+    }
+
+    #[test]
+    fn index_and_slice_messages_match_gc() {
+        assert_eq!(index(2, 3), 2);
+        assert_eq!(slice_bounds(1, None, 5), (1, 5));
+        let cases: [(&str, fn()); 7] = [
+            ("runtime error: index out of range [-1]", || {
+                index(-1, 5);
+            }),
+            (
+                "runtime error: index out of range [10] with length 5",
+                || {
+                    index(10, 5);
+                },
+            ),
+            (
+                "runtime error: index out of range [9223372036854775808] with length 5",
+                || {
+                    index_u(1 << 63, 5);
+                },
+            ),
+            (
+                "runtime error: slice bounds out of range [:10] with length 5",
+                || {
+                    slice_bounds(0, Some(10), 5);
+                },
+            ),
+            ("runtime error: slice bounds out of range [3:2]", || {
+                slice_bounds(3, Some(2), 5);
+            }),
+            ("runtime error: slice bounds out of range [10:5]", || {
+                slice_bounds(10, None, 5);
+            }),
+            ("runtime error: slice bounds out of range [:-1]", || {
+                slice_bounds(0, Some(-1), 5);
+            }),
+        ];
+        for (want, f) in cases {
+            assert_eq!(panic_text(f), want);
+        }
+        assert_eq!(
+            panic_text(|| {
+                slice_bounds(-1, None, 5);
+            }),
+            "runtime error: slice bounds out of range [-1:]"
         );
     }
 

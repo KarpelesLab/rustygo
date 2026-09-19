@@ -9,9 +9,12 @@
 a Rust runtime, and end up with Go and Rust code in *one* binary that share
 real types — no cgo, no FFI, no `unsafe` in anything you write.
 
-> **Status: scaffolding, M0 starting.** The front end loads Go packages into
-> SSA, and the runtime has its first pieces (Go integer semantics, builtin
-> `println`, panics). No Go code compiles to Rust yet. The plan is
+> **Status: M0 spike in progress.** Single-goroutine Go programs using
+> integers, floats, strings, structs, arrays, pointers, methods, generics and
+> multiple packages compile to Rust and run. Their output, panics and exit
+> codes are identical to gc's, and the differential harness checks that on
+> every commit. Not yet: garbage collection (everything leaks), slices, maps,
+> interfaces, closures, `defer`, goroutines and the standard library. The plan is
 > [docs/DESIGN.md](docs/DESIGN.md) for the architecture,
 > [docs/RATIONALE.md](docs/RATIONALE.md) for why this shape and not another,
 > and [docs/ROADMAP.md](docs/ROADMAP.md) for the milestones.
@@ -137,8 +140,11 @@ The runtime is a single crate. Its optional parts are cargo features (`std`,
 by the emitter, not by a derive macro, so no proc-macro crate is needed.
 
 ```sh
-go run ./cmd/rustygo ssa ./some/pkg   # the SSA the emitter will consume
-cargo test                            # runtime unit tests
+go run ./cmd/rustygo build -o hello ./testdata/programs/hello   # needs cargo
+go run ./cmd/rustygo emit -o out ./testdata/programs/hello      # inspect the Rust
+go run ./cmd/rustygo ssa ./testdata/programs/hello              # the SSA it came from
+go test ./...                                                   # includes the gc-vs-rustygo harness
+cargo test                                                      # runtime unit tests
 ```
 
 Rust MSRV is 1.89 (edition 2024). The compiler targets the Go release pinned in
