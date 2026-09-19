@@ -28,7 +28,22 @@ type structInfo struct {
 }
 
 func newTypeReg() *typeReg {
-	return &typeReg{ns: namespace{}}
+	// Generated types share a module with `use rustygo::prelude::*`, so a Go
+	// type may not take a name the prelude already binds — a Go type called
+	// `Env` would otherwise shadow the runtime's.
+	ns := namespace{}
+	for _, name := range preludeNames {
+		ns[name] = true
+	}
+	return &typeReg{ns: ns}
+}
+
+// preludeNames are the items `rustygo::prelude` brings into every generated
+// module. Keep in sync with src/prelude.rs.
+var preludeNames = []string{
+	"Defers", "Env", "Func", "Data", "ErasedFn", "Iface", "MethodId", "TypeDesc",
+	"GoKey", "GoMap", "MapIter", "Place", "Ptr", "Slot", "Slice", "GoStr",
+	"StrIter", "Trace", "Tracer", "GoValue", "GoInt",
 }
 
 // rust returns the Rust value type for t.
@@ -149,9 +164,15 @@ func (r *typeReg) structInfo(st *types.Struct, hint string, e *emitter, pos toke
 		fmt.Fprintf(&eq, " && GoKey::go_eq(&self.%s, &other.%s)", f, f)
 	}
 	n := si.name
+	// Only a comparable struct gets equality: Go rejects `==` on a struct
+	// holding a slice, map or func, and so does the generated type.
+	derive := "#[derive(Clone, Copy)]"
+	if types.Comparable(st) {
+		derive = "#[derive(Clone, Copy, PartialEq)]"
+	}
 	fmt.Fprintf(&r.buf, `
 // Go: %s
-#[derive(Clone, Copy, PartialEq)]
+%s
 pub struct %s {
 %s}
 
@@ -185,7 +206,7 @@ impl Trace for %s_P {
     fn trace(&self, t: &mut Tracer<'_>) {
 %s    }
 }
-%s`, types.TypeString(st, nil), n, def.String(), n, n, zero.String(),
+%s`, types.TypeString(st, nil), derive, n, def.String(), n, n, zero.String(),
 		n, place.String(), n, n, n, n, newP.String(), n, n, load.String(), n, store.String(),
 		n, trace.String(), n, trace.String(), keyImpl(n, st, hash.String(), eq.String()))
 	return si

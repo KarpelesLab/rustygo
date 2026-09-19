@@ -24,8 +24,7 @@ import (
 
 // methodID returns the id of a method name and signature.
 func (e *emitter) methodID(fn *types.Func) uint32 {
-	sig := fn.Type().(*types.Signature)
-	key := fn.Name() + "|" + types.TypeString(types.NewSignatureType(nil, nil, nil, sig.Params(), sig.Results(), sig.Variadic()), qualifiedPath)
+	key := fn.Name() + "|" + signatureKey(fn.Type().(*types.Signature))
 	if !fn.Exported() && fn.Pkg() != nil {
 		key = fn.Pkg().Path() + "." + key
 	}
@@ -38,6 +37,33 @@ func (e *emitter) methodID(fn *types.Func) uint32 {
 		e.methodIDs[key] = id
 	}
 	return id
+}
+
+// signatureKey renders a signature by its types alone. Parameter names must
+// not take part: an interface may declare `Eval(env *Env) int` while the
+// method implementing it is written `Eval(*Env) int`, and the two have to
+// come out with the same id.
+func signatureKey(sig *types.Signature) string {
+	var b strings.Builder
+	b.WriteByte('(')
+	for i := 0; i < sig.Params().Len(); i++ {
+		if i > 0 {
+			b.WriteByte(',')
+		}
+		b.WriteString(types.TypeString(sig.Params().At(i).Type(), qualifiedPath))
+	}
+	if sig.Variadic() {
+		b.WriteString("...")
+	}
+	b.WriteString(")(")
+	for i := 0; i < sig.Results().Len(); i++ {
+		if i > 0 {
+			b.WriteByte(',')
+		}
+		b.WriteString(types.TypeString(sig.Results().At(i).Type(), qualifiedPath))
+	}
+	b.WriteByte(')')
+	return b.String()
 }
 
 // qualifiedPath names packages by import path, so ids are stable and
