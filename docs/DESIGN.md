@@ -219,6 +219,30 @@ runtime's accessor API has to be sound for *any* code the emitter produces, so:
 * **Known gap:** `reflect.StructOf` / `MapOf` and other runtime type
   construction need heap-allocated descriptors; possible, but deferred.
 
+**As built (M3).** `reflect` is rustygo's own package, swapped in through the
+overlay (§8), and it is ordinary Go: a `Type` is a descriptor address, a
+`Value` is `{d, p unsafe.Pointer}`, and reading a field or an element is a
+pointer computed from the descriptor's offsets and dereferenced. The runtime
+answers 25 questions about a descriptor (`src/reflect.rs`) and the emitter
+fills them in:
+
+* Kind, size, align, name, string, package path, element and key types, and
+  whether the type is comparable.
+* Fields: name, package path, type, **offset**, tag and embeddedness. The
+  offsets are the ones go/types computes with gc's own `types.Sizes`, so a
+  struct reflects identically under both compilers.
+* Boxing: `box_value` copies the bytes at an address into a fresh object, so
+  `Value.Interface()` hands back a real interface value.
+* Maps, which have no fixed layout to walk, get a per-map-type `MapOps`
+  (`len`, `iter`, `next`, `index`) generated beside the descriptor. Keys and
+  values come back as addresses of freshly boxed copies, which is what lets
+  Go-side reflection treat a map like any other value.
+
+That is enough for `fmt` to compile and run unmodified — the whole of
+`Printf`'s `%v`/`%+v`/`%#v`/`%T`, `Stringer`, `error` and `%w` wrapping — and
+for `reflect.DeepEqual` and `Swapper`. `Value.Call`, `New`, `Zero`,
+`MakeSlice` and `Type.Method`/`Implements` are not in yet.
+
 ## 7. `unsafe.Pointer` and package `unsafe`
 
 Supported, as gc supports it (revised in M1; the first draft rejected
@@ -257,6 +281,20 @@ reinterpretation):
   packages are substituted through an overlay GOROOT, as TinyGo does.
 * `syscall` sits on Rust `std` — which is what makes fullrust and purestd
   reachable without a second port.
+* **The file layer, as built (M3).** The standard library's whole `syscall`
+  package funnels into one function that gc writes in assembly,
+  `internal/runtime/syscall/linux.Syscall6`. rustygo provides it as a raw
+  system call (`src/syscall.rs`: the `syscall` instruction on x86-64, `svc #0`
+  on aarch64) returning gc's `(r1, r2, errno)`. Above it, `syscall`, `os`,
+  `io/fs`, `time` and `internal/poll` are the real packages, compiled
+  unmodified, so `os.Stdout`, `os.Args`, `os.Getenv`, `os.Exit` and file I/O
+  are Go code reaching the kernel the way gc's does. The pieces gc puts in
+  its runtime instead of in `syscall` — `exit`, `nanosleep`, `walltime`,
+  `nanotime`, `fcntl`, `args`, `envs`, the `entersyscall`/`exitsyscall` pair,
+  and the exit hooks `os.Exit` runs — are rustygo's runtime overlay, each one
+  a `go:linkname` push to the name the standard library expects. A blocking
+  call blocks the thread, which with one goroutine is the whole program; the
+  netpoller is M2/M3 work.
 * Packages with both a cgo and a pure-Go path (`os/user`, `net`'s resolver)
   take the pure-Go path by default. With cgo enabled (§9a) on a target that
   has a C toolchain, they take their cgo path instead; on the libc-free

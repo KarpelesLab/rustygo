@@ -122,6 +122,12 @@ impl<P> Slice<P> {
 }
 
 impl<P: Place + Trace> Slice<P> {
+    /// The nil slice, as an inherent method.
+    #[inline]
+    pub fn zero() -> Self {
+        <Self as GoValue>::zero()
+    }
+
     /// `make([]T, len, cap)`. A safe point: it allocates.
     pub fn make(len: i64, cap: i64) -> Slice<P> {
         let (len, cap) = ops::make_bounds(len, cap);

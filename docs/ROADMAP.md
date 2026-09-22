@@ -215,8 +215,8 @@ work fails too, decision gate 1 says stop.
   directions; leaf assembly has Rust intrinsics; and package initializers
   skip building variables nothing reads, which took `strings.ToUpper` from
   140,605 emitted lines of Rust to 4,029.
-* The next wall is M3's, not M1's: `fmt` needs `reflect` (DESIGN §6) and
-  `os` needs `internal/poll` and `syscall`.
+* The next wall was M3's, not M1's, and it has since come down: see the M3
+  status below — `reflect`, the file layer and `fmt` are in.
 
 ## M2 — Goroutines, channels, `sync`, timers
 
@@ -298,6 +298,33 @@ work fails too, decision gate 1 says stop.
   variant's latency and RSS against gc are published.
 * Stdlib build time and a small program's incremental rebuild time are recorded
   (decision gate 3).
+
+**Status (2026-09-22): `reflect`, the file layer and `fmt` are in.**
+
+* `reflect` is rustygo's own package in the overlay, written in ordinary Go
+  over 25 runtime questions about a type descriptor
+  ([DESIGN §6](DESIGN.md#6-reflect-and-type-descriptors)). Struct field
+  offsets are gc's, computed by go/types with gc's `types.Sizes`, so a struct
+  reflects identically under both compilers.
+* **`fmt` compiles and runs unmodified**: `%v`, `%+v`, `%#v`, `%T`, `%q`,
+  `%x`, width and precision, `Stringer`, `error`, and `fmt.Errorf("%w")`
+  wrapping, over structs, slices and maps — matching gc byte for byte
+  (`testdata/programs/fmtbasics`).
+* **The file layer reaches the kernel.** `internal/runtime/syscall.Syscall6`
+  is a raw system call in Rust inline assembly (x86-64 and aarch64), and
+  `syscall`, `os`, `io/fs` and `time` are the real packages above it. So
+  `fmt.Println`, `os.Stdout`/`Stderr`, `os.Args`, `os.Getenv`, `os.Exit` with
+  its exit hooks, and `time.Now`/`Sleep` all work
+  (`testdata/programs/stdlib2`).
+* Go's own `test/` directory is at **67 of 141 (48%)**, up from 41 before
+  this work; the remaining failures are mostly channels and goroutines (M2),
+  plus the parts of `reflect` listed below.
+* Decision gate 2 (`reflect` impractical) is answered: not impractical. A
+  descriptor per concrete type, with the map operations generated beside it,
+  carries `fmt` without a single change to the standard library's source.
+* Not yet: `Value.Call`/`New`/`Zero`/`MakeSlice`, `Type.Method`/`Implements`,
+  `encoding/json`, the netpoller and `net/http`, `rustygo test` and the
+  service tests.
 
 ## M4 — Interop, both directions
 

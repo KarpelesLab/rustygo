@@ -48,10 +48,12 @@ pub mod panic;
 pub mod place;
 pub mod prelude;
 pub mod print;
+pub mod reflect;
 #[cfg(feature = "std")]
 pub mod rt;
 pub mod slice;
 pub mod string;
+pub mod syscall;
 pub mod trace;
 pub mod unsafe_ptr;
 pub mod value;

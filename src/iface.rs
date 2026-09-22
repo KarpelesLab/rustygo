@@ -51,6 +51,17 @@ impl ErasedFn {
 pub struct TypeDesc {
     /// As Go prints it: `main.Point`, `int`, `*main.Node`.
     pub name: &'static str,
+    /// The declared name alone (`Point`), empty for an unnamed type.
+    pub short: &'static str,
+    /// The defining package's import path, empty for an unnamed or
+    /// predeclared type.
+    pub pkg_path: &'static str,
+    /// The kind, numbered as `reflect.Kind` is.
+    pub kind: u8,
+    /// Size and alignment in bytes, as gc lays the type out (DESIGN §7).
+    pub size: usize,
+    /// The type's alignment in bytes.
+    pub align: usize,
     /// The type's method set, sorted by id.
     pub methods: &'static [(MethodId, ErasedFn)],
     /// Compares two values of this type, or `None` if Go says the type is
@@ -61,9 +72,72 @@ pub struct TypeDesc {
     pub hash: Option<fn(Data) -> u64>,
     /// Appends the value as `print` and `panic` render it.
     pub print: fn(Data, &mut Vec<u8>),
+    /// Copies a value at an address into a fresh heap object, which is how
+    /// reflection hands one back as an interface.
+    pub box_value: fn(crate::unsafe_ptr::UPtr) -> Data,
+    /// The element type of a pointer, slice, array, map or channel.
+    pub elem: Option<&'static TypeDesc>,
+    /// A map's key type.
+    pub key: Option<&'static TypeDesc>,
+    /// An array's length.
+    pub len: usize,
+    /// A struct's fields, in declaration order.
+    pub fields: &'static [FieldDesc],
+    /// A map's accessors: our maps are hash tables, not memory gc's layout
+    /// rules describe, so reflection reaches them through these.
+    pub map_ops: Option<&'static MapOps>,
+}
+
+/// One field of a struct type, as reflection sees it.
+pub struct FieldDesc {
+    /// The field's name.
+    pub name: &'static str,
+    /// The defining package's path, for an unexported field.
+    pub pkg_path: &'static str,
+    /// The field's type.
+    pub typ: &'static TypeDesc,
+    /// Its offset in the struct, in bytes.
+    pub offset: usize,
+    /// Its struct tag, as written.
+    pub tag: &'static str,
+    /// Whether it is embedded (anonymous).
+    pub embedded: bool,
+}
+
+/// Type-erased access to a map value, generated per map type.
+pub struct MapOps {
+    /// `len(m)`.
+    pub len: fn(Data) -> i64,
+    /// Starts an iteration, returning an opaque cursor.
+    pub iter: fn(Data) -> Data,
+    /// Advances a cursor: `(ok, key, value)`, each boxed.
+    pub next: fn(Data) -> (bool, Data, Data),
+    /// `m[k]`, with the key given boxed: `(value, ok)`.
+    pub index: fn(Data, Data) -> (Data, bool),
 }
 
 impl TypeDesc {
+    /// A descriptor with nothing filled in, to be updated with the fields a
+    /// type actually has: `TypeDesc { name: "int", ..TypeDesc::DEFAULT }`.
+    pub const DEFAULT: TypeDesc = TypeDesc {
+        name: "",
+        short: "",
+        pkg_path: "",
+        kind: 0,
+        size: 0,
+        align: 1,
+        methods: &[],
+        equal: None,
+        hash: None,
+        print: |_, out| out.extend_from_slice(b"<value>"),
+        box_value: |_| Data::NONE,
+        elem: None,
+        key: None,
+        len: 0,
+        fields: &[],
+        map_ops: None,
+    };
+
     fn method(&self, id: MethodId) -> Option<ErasedFn> {
         self.methods
             .binary_search_by_key(&id, |(i, _)| *i)

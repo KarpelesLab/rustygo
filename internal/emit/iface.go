@@ -114,9 +114,152 @@ func (e *emitter) typeDesc(t types.Type, pos token.Pos) string {
 		equal = fmt.Sprintf("Some(|a, b| a.cast::<%s>().load() == b.cast::<%s>().load())", place, place)
 		hash = fmt.Sprintf("Some(|d| GoKey::go_hash(&d.cast::<%s>().load()))", place)
 	}
-	fmt.Fprintf(&e.types.buf, "\npub static %s: TypeDesc = TypeDesc {\n    name: %q,\n    methods: &[%s],\n    equal: %s,\n    hash: %s,\n    print: |d, out| { %s },\n};\n",
-		name, goName(t), methods, equal, hash, e.printValue(t, place, pos))
+	var b strings.Builder
+	fmt.Fprintf(&b, "\npub static %s: TypeDesc = TypeDesc {\n    name: %q,\n    short: %q,\n    pkg_path: %q,\n    kind: %d,\n    size: %d,\n    align: %d,\n    methods: &[%s],\n    equal: %s,\n    hash: %s,\n    print: |d, out| { %s },\n    box_value: |p| Data::of(Ptr::<%s>::alloc(unsafe { p.to_ptr::<%s>() }.load())),\n",
+		name, goName(t), shortName(t), pkgPath(t), reflectKind(t), e.sizeof(t), e.alignof(t),
+		methods, equal, hash, e.printValue(t, place, pos), place, place)
+	// What reflection needs to walk a value's structure.
+	switch u := t.Underlying().(type) {
+	case *types.Pointer:
+		fmt.Fprintf(&b, "    elem: Some(&%s),\n", e.typeDesc(u.Elem(), pos))
+	case *types.Slice:
+		fmt.Fprintf(&b, "    elem: Some(&%s),\n", e.typeDesc(u.Elem(), pos))
+	case *types.Array:
+		fmt.Fprintf(&b, "    elem: Some(&%s),\n    len: %d,\n", e.typeDesc(u.Elem(), pos), u.Len())
+	case *types.Map:
+		fmt.Fprintf(&b, "    elem: Some(&%s),\n    key: Some(&%s),\n    map_ops: Some(&%s),\n",
+			e.typeDesc(u.Elem(), pos), e.typeDesc(u.Key(), pos), e.mapOps(u, pos))
+	case *types.Struct:
+		fmt.Fprintf(&b, "    fields: &[%s],\n", e.fieldDescs(t, u, pos))
+	}
+	b.WriteString("    ..TypeDesc::DEFAULT\n};\n")
+	e.types.buf.WriteString(b.String())
 	return path
+}
+
+// shortName is the type's declared name alone, or "" if it has none.
+func shortName(t types.Type) string {
+	if n, ok := types.Unalias(t).(*types.Named); ok {
+		return n.Obj().Name()
+	}
+	if b, ok := t.(*types.Basic); ok {
+		return types.Typ[b.Kind()].Name()
+	}
+	return ""
+}
+
+// pkgPath is the import path of the package defining a named type.
+func pkgPath(t types.Type) string {
+	if n, ok := types.Unalias(t).(*types.Named); ok && n.Obj().Pkg() != nil {
+		return n.Obj().Pkg().Path()
+	}
+	return ""
+}
+
+// reflectKind numbers a type as reflect.Kind does.
+func reflectKind(t types.Type) int {
+	switch u := t.Underlying().(type) {
+	case *types.Basic:
+		if k, ok := basicKinds[u.Kind()]; ok {
+			return k
+		}
+	case *types.Array:
+		return 17
+	case *types.Chan:
+		return 18
+	case *types.Signature:
+		return 19
+	case *types.Interface:
+		return 20
+	case *types.Map:
+		return 21
+	case *types.Pointer:
+		return 22
+	case *types.Slice:
+		return 23
+	case *types.Struct:
+		return 25
+	}
+	return 0 // reflect.Invalid
+}
+
+// basicKinds maps the predeclared types to reflect.Kind's numbering.
+var basicKinds = map[types.BasicKind]int{
+	types.Bool: 1, types.Int: 2, types.Int8: 3, types.Int16: 4, types.Int32: 5,
+	types.Int64: 6, types.Uint: 7, types.Uint8: 8, types.Uint16: 9, types.Uint32: 10,
+	types.Uint64: 11, types.Uintptr: 12, types.Float32: 13, types.Float64: 14,
+	types.Complex64: 15, types.Complex128: 16, types.String: 24, types.UnsafePointer: 26,
+}
+
+// sizeof and alignof are gc's, which is how rustygo lays types out too.
+func (e *emitter) sizeof(t types.Type) int64  { return e.sizes.Sizeof(t) }
+func (e *emitter) alignof(t types.Type) int64 { return e.sizes.Alignof(t) }
+
+// fieldDescs renders a struct's fields for reflection, with gc's offsets.
+func (e *emitter) fieldDescs(named types.Type, st *types.Struct, pos token.Pos) string {
+	vars := make([]*types.Var, st.NumFields())
+	for i := range vars {
+		vars[i] = st.Field(i)
+	}
+	offsets := e.sizes.Offsetsof(vars)
+	parts := make([]string, st.NumFields())
+	for i, f := range vars {
+		pkg := ""
+		if !f.Exported() && f.Pkg() != nil {
+			pkg = f.Pkg().Path()
+		}
+		parts[i] = fmt.Sprintf("FieldDesc { name: %q, pkg_path: %q, typ: &%s, offset: %d, tag: %q, embedded: %v }",
+			f.Name(), pkg, e.typeDesc(f.Type(), pos), offsets[i], st.Tag(i), f.Embedded())
+	}
+	return strings.Join(parts, ", ")
+}
+
+// mapOps emits the accessors reflection uses on a map of this type, and
+// returns the static's path. Our maps are hash tables, so unlike other types
+// they cannot be read by address arithmetic.
+func (e *emitter) mapOps(mt *types.Map, pos token.Pos) string {
+	key := "mapops:" + types.TypeString(mt, qualifiedPath)
+	if p, ok := e.wrappers[key]; ok {
+		return p
+	}
+	name := e.types.ns.claim("MO_" + mangle(strings.NewReplacer("*", "ptr_", ".", "_", "/", "_", "[", "_", "]", "_", " ", "_").Replace(types.TypeString(mt, qualifiedPath))))
+	if e.wrappers == nil {
+		e.wrappers = map[string]string{}
+	}
+	e.wrappers[key] = "crate::ty::" + name
+
+	kPlace, vPlace := e.types.place(mt.Key(), e, pos), e.types.place(mt.Elem(), e, pos)
+	kRust, vRust := e.types.rust(mt.Key(), e, pos), e.types.rust(mt.Elem(), e, pos)
+	mapType := fmt.Sprintf("GoMap<%s, %s>", kRust, vRust)
+	iterType := fmt.Sprintf("MapIter<%s, %s>", kRust, vRust)
+	fmt.Fprintf(&e.types.buf, `
+pub static %s: MapOps = MapOps {
+    len: |d| d.cast::<Slot<%s>>().load().len(),
+    iter: |d| Data::of(Ptr::<Slot<%s>>::alloc(d.cast::<Slot<%s>>().load().iter())),
+    next: |d| {
+        let it = d.cast::<Slot<%s>>();
+        let mut cur = it.load();
+        let (ok, k, v) = cur.advance();
+        it.store(cur);
+        // Boxing the value allocates, which can collect the key's box before
+        // the caller ever sees it, so the key is rooted across it.
+        let key = Ptr::<%s>::alloc(k);
+        let __roots = rustygo::gc::Frame::<1>::new();
+        __roots.scope(|| {
+            __roots.set(0, &key);
+            (ok, Data::of(key), Data::of(Ptr::<%s>::alloc(v)))
+        })
+    },
+    index: |d, k| {
+        let (v, ok) = d
+            .cast::<Slot<%s>>()
+            .load()
+            .get_ok(k.cast::<%s>().load());
+        (Data::of(Ptr::<%s>::alloc(v)), ok)
+    },
+};
+`, name, mapType, iterType, mapType, iterType, kPlace, vPlace, mapType, kPlace, vPlace)
+	return "crate::ty::" + name
 }
 
 // methodTable renders t's method set as (id, wrapper) pairs sorted by id.
@@ -126,6 +269,11 @@ func (e *emitter) methodTable(t types.Type, pos token.Pos) string {
 		path string
 	}
 	var entries []entry
+	if types.IsInterface(t) {
+		// An interface value's methods come from its dynamic type, so the
+		// interface type itself has no table.
+		return ""
+	}
 	mset := types.NewMethodSet(t)
 	for i := 0; i < mset.Len(); i++ {
 		sel := mset.At(i)
@@ -194,6 +342,10 @@ func (e *emitter) methodWrapper(recvType types.Type, sel *types.Selection, pos t
 // anything else `(main.T) 0xaddr`.
 func (e *emitter) printValue(t types.Type, place string, pos token.Pos) string {
 	load := fmt.Sprintf("d.cast::<%s>().load()", place)
+	if types.IsInterface(t) {
+		// Whatever it holds knows how to print itself.
+		return fmt.Sprintf("(%s).print_to(out);", load)
+	}
 	if m := implementsStringMethod(t, "Error"); m != nil {
 		return fmt.Sprintf("let s = %s(d); out.extend_from_slice(s.bytes());", e.methodWrapper(t, m, pos))
 	}

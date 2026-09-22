@@ -38,3 +38,7 @@ complex
 unsafeptr
 stdlib1
 initdeps
+reflectbasics
+fmtbasics
+stdlib2
+procexit

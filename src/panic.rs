@@ -61,31 +61,40 @@ rt_global! {
         core::cell::Cell::new(None);
 }
 
-/// Teaches the runtime the ids of `Error() string` and `String() string`, so
-/// a recovered runtime error satisfies `error` like gc's does. Generated
-/// `main` calls this before anything else.
-pub fn init_runtime_errors(error_id: MethodId, string_id: MethodId) {
+/// Teaches the runtime the ids of `Error() string`, `String() string` and
+/// `RuntimeError()`, so a recovered runtime error satisfies both `error` and
+/// `runtime.Error` like gc's does. Generated `main` calls this before
+/// anything else.
+pub fn init_runtime_errors(error_id: MethodId, string_id: MethodId, runtime_error_id: MethodId) {
     fn message(d: Data) -> GoStr {
         d.cast::<crate::place::Slot<GoStr>>().load()
     }
-    let methods: &'static [(MethodId, ErasedFn)] =
-        alloc::boxed::Box::leak(alloc::boxed::Box::new(if error_id <= string_id {
-            [
-                (error_id, ErasedFn::new(message as *const ())),
-                (string_id, ErasedFn::new(message as *const ())),
-            ]
-        } else {
-            [
-                (string_id, ErasedFn::new(message as *const ())),
-                (error_id, ErasedFn::new(message as *const ())),
-            ]
-        }));
+    // `RuntimeError()` says nothing and returns nothing: it exists so that
+    // only the runtime's own errors satisfy `runtime.Error`.
+    fn runtime_error_marker(_: Data) {}
+    let mut ms = alloc::vec![
+        (error_id, ErasedFn::new(message as *const ())),
+        (string_id, ErasedFn::new(message as *const ())),
+        (
+            runtime_error_id,
+            ErasedFn::new(runtime_error_marker as *const ())
+        ),
+    ];
+    // The method table is searched by id, so it has to be sorted.
+    ms.sort_unstable_by_key(|&(id, _)| id);
+    let methods: &'static [(MethodId, ErasedFn)] = alloc::vec::Vec::leak(ms);
     let desc: &'static TypeDesc = alloc::boxed::Box::leak(alloc::boxed::Box::new(TypeDesc {
         name: "runtime.Error",
+        short: "Error",
+        pkg_path: "runtime",
+        kind: 24, // reflect.String: the value is its message
+        size: size_of::<GoStr>(),
+        align: align_of::<GoStr>(),
         methods,
         equal: Some(|a, b| message(a) == message(b)),
         hash: Some(|d| crate::map::GoKey::go_hash(&message(d))),
         print: |d, out| out.extend_from_slice(message(d).bytes()),
+        ..TypeDesc::DEFAULT
     }));
     RUNTIME_ERROR.with(|c| c.set(Some(desc)));
 }
@@ -311,9 +320,18 @@ pub fn go_panic(p: GoPanic) -> ! {
 }
 
 /// Raises a Go runtime error.
+///
+/// With `RUSTYGO_TRACE=1` it first writes a Rust backtrace to stderr, which
+/// is how a runtime error is located until Go-level traces arrive (M3).
 #[cold]
 pub fn runtime_error(e: RuntimeError) -> ! {
     let msg = e.message();
+    #[cfg(feature = "std")]
+    if std::env::var_os("RUSTYGO_TRACE").is_some_and(|v| v == "1") {
+        let trace = std::backtrace::Backtrace::force_capture();
+        let report = alloc::format!("rustygo: {msg}\n{trace}\n");
+        let _ = std::io::Write::write_all(&mut std::io::stderr().lock(), report.as_bytes());
+    }
     let value = runtime_error_value(&msg);
     go_panic(GoPanic::with_value(msg, value))
 }

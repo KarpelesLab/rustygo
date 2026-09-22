@@ -24,6 +24,83 @@ var intrinsics = map[string]func(args []string) string{
 	"sync.runtime_LoadAcquintptr":  func(a []string) string { return a[0] + ".load()" },
 	"sync.runtime_StoreReluintptr": func(a []string) string { return fmt.Sprintf("%s.store(%s)", a[0], a[1]) },
 
+	// reflect, answered from the runtime's type descriptors (src/reflect.rs).
+	"reflect.ifaceType": func(a []string) string {
+		return fmt.Sprintf("rustygo::reflect::type_of(%s)", a[0])
+	},
+	"reflect.ifaceData": func(a []string) string {
+		return fmt.Sprintf("rustygo::reflect::data_of(%s)", a[0])
+	},
+	"reflect.makeIface": func(a []string) string {
+		return fmt.Sprintf("rustygo::reflect::make_iface(%s, %s)", a[0], a[1])
+	},
+	"reflect.descKind": func(a []string) string {
+		return fmt.Sprintf("rustygo::reflect::kind(%s)", a[0])
+	},
+	"reflect.descSize": func(a []string) string {
+		return fmt.Sprintf("rustygo::reflect::size(%s)", a[0])
+	},
+	"reflect.descAlign": func(a []string) string {
+		return fmt.Sprintf("rustygo::reflect::align(%s)", a[0])
+	},
+	"reflect.descName": func(a []string) string {
+		return fmt.Sprintf("rustygo::reflect::name(%s)", a[0])
+	},
+	"reflect.descString": func(a []string) string {
+		return fmt.Sprintf("rustygo::reflect::type_string(%s)", a[0])
+	},
+	"reflect.descPkgPath": func(a []string) string {
+		return fmt.Sprintf("rustygo::reflect::pkg_path(%s)", a[0])
+	},
+	"reflect.descElem": func(a []string) string {
+		return fmt.Sprintf("rustygo::reflect::elem(%s)", a[0])
+	},
+	"reflect.descKey": func(a []string) string {
+		return fmt.Sprintf("rustygo::reflect::key(%s)", a[0])
+	},
+	"reflect.descLen": func(a []string) string {
+		return fmt.Sprintf("rustygo::reflect::len(%s)", a[0])
+	},
+	"reflect.descComparable": func(a []string) string {
+		return fmt.Sprintf("rustygo::reflect::comparable(%s)", a[0])
+	},
+	"reflect.descNumField": func(a []string) string {
+		return fmt.Sprintf("rustygo::reflect::num_field(%s)", a[0])
+	},
+	"reflect.descFieldName": func(a []string) string {
+		return fmt.Sprintf("rustygo::reflect::field_name(%s, %s as i64)", a[0], a[1])
+	},
+	"reflect.descFieldPkgPath": func(a []string) string {
+		return fmt.Sprintf("rustygo::reflect::field_pkg_path(%s, %s as i64)", a[0], a[1])
+	},
+	"reflect.descFieldType": func(a []string) string {
+		return fmt.Sprintf("rustygo::reflect::field_type(%s, %s as i64)", a[0], a[1])
+	},
+	"reflect.descFieldOffset": func(a []string) string {
+		return fmt.Sprintf("rustygo::reflect::field_offset(%s, %s as i64)", a[0], a[1])
+	},
+	"reflect.descFieldTag": func(a []string) string {
+		return fmt.Sprintf("rustygo::reflect::field_tag(%s, %s as i64)", a[0], a[1])
+	},
+	"reflect.descFieldEmbedded": func(a []string) string {
+		return fmt.Sprintf("rustygo::reflect::field_embedded(%s, %s as i64)", a[0], a[1])
+	},
+	"reflect.descBox": func(a []string) string {
+		return fmt.Sprintf("rustygo::reflect::box_value(%s, %s)", a[0], a[1])
+	},
+	"reflect.mapLen": func(a []string) string {
+		return fmt.Sprintf("rustygo::reflect::map_len(%s, %s)", a[0], a[1])
+	},
+	"reflect.mapIter": func(a []string) string {
+		return fmt.Sprintf("rustygo::reflect::map_iter(%s, %s)", a[0], a[1])
+	},
+	"reflect.mapNext": func(a []string) string {
+		return fmt.Sprintf("rustygo::reflect::map_next(%s, %s)", a[0], a[1])
+	},
+	"reflect.mapIndex": func(a []string) string {
+		return fmt.Sprintf("rustygo::reflect::map_index(%s, %s, %s)", a[0], a[1], a[2])
+	},
+
 	// internal/reflectlite, answered from the runtime's type descriptors.
 	"internal/reflectlite.typeOf": func(a []string) string {
 		return fmt.Sprintf("UPtr::from_addr((%s).desc_addr())", a[0])
@@ -33,6 +110,36 @@ var intrinsics = map[string]func(args []string) string{
 	},
 	"internal/reflectlite.descName": func(a []string) string {
 		return fmt.Sprintf("rustygo::iface::desc_name(%s)", a[0])
+	},
+
+	// The process itself: arguments, environment, and the fcntl gc puts in
+	// its runtime.
+	"runtime.args": func([]string) string { return "rustygo::rt::args()" },
+	"runtime.nanosleep": func(a []string) string {
+		return fmt.Sprintf("rustygo::rt::nanosleep(%s)", a[0])
+	},
+	"runtime.exit": func(a []string) string {
+		return fmt.Sprintf("rustygo::rt::exit(%s)", a[0])
+	},
+	"runtime.walltime": func([]string) string { return "rustygo::rt::walltime()" },
+	"runtime.envs":     func([]string) string { return "rustygo::rt::envs()" },
+	"runtime.fcntl": func(a []string) string {
+		return fmt.Sprintf("rustygo::rt::fcntl(%s, %s, %s)", a[0], a[1], a[2])
+	},
+
+	// The one raw system call the standard library funnels through.
+	"internal/runtime/syscall/linux.Syscall6": func(a []string) string {
+		return fmt.Sprintf("rustygo::syscall::syscall6(%s, %s, %s, %s, %s, %s, %s)",
+			a[0], a[1], a[2], a[3], a[4], a[5], a[6])
+	},
+	// The clone/vfork probe: rustygo starts no processes yet, so it reports
+	// ENOSYS and Go takes its fallback path.
+	"syscall.rawVforkSyscall": func([]string) string {
+		return "(u64::MAX, 38u64)"
+	},
+	"syscall.rawSyscallNoError": func(a []string) string {
+		return fmt.Sprintf("{ let (r1, r2, _) = rustygo::syscall::syscall6(%s, %s, %s, %s, 0, 0, 0); (r1, r2) }",
+			a[0], a[1], a[2], a[3])
 	},
 
 	// internal/bytealg: gc's assembly, done with Rust's slice routines.

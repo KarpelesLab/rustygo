@@ -1161,6 +1161,10 @@ func (e *emitter) bodyless(fn *ssa.Function, name string, m *module) {
 			case isPointer(p.Type()) && isPointer(want):
 				elem := want.Underlying().(*types.Pointer).Elem()
 				args[i] = fmt.Sprintf("unsafe { UPtr::from_ptr(%s).to_ptr::<%s>() }", args[i], f.place(elem, fn.Pos()))
+			case types.Identical(p.Type().Underlying(), want.Underlying()):
+				// A named type and its underlying type have one
+				// representation, so the argument passes as it is: the
+				// runtime takes time.Sleep's Duration as an int64.
 			default:
 				e.errorf(fn.Pos(), "%s: go:linkname to %s with a %s parameter where it declares %s", key, impl, want, p.Type())
 			}
@@ -1188,7 +1192,10 @@ func (e *emitter) linkTarget(key string) *ssa.Function {
 		pkgPath, name := target[:dot], target[dot+1:]
 		if pkg := e.res.Prog.ImportedPackage(pkgPath); pkg != nil {
 			if fn := pkg.Func(name); fn != nil {
-				if fn.Blocks != nil {
+				// The target may itself be an intrinsic: the standard
+				// library links `time.runtimeNano` to `runtime.nanotime`,
+				// which rustygo answers in Rust.
+				if fn.Blocks != nil || intrinsics[target] != nil {
 					return fn
 				}
 				key = pkgPath + "." + name

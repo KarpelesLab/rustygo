@@ -37,6 +37,18 @@ pub fn nanotime() -> i64 {
         .as_nanos() as i64
 }
 
+/// Sleeps for at least `ns` nanoseconds, as `time.Sleep`.
+///
+/// gc parks the goroutine and runs the others. rustygo has one goroutine
+/// (roadmap M2), so there is nothing else to run and sleeping the thread is
+/// the same thing.
+pub fn nanosleep(ns: i64) {
+    if ns <= 0 {
+        return;
+    }
+    std::thread::sleep(std::time::Duration::from_nanos(ns as u64));
+}
+
 /// Runs a Go program: the package initializers, then `main.main`, then exit.
 ///
 /// The generated `fn main()` is a single call to this. An unrecovered Go panic
@@ -67,4 +79,85 @@ pub fn run_main(init: fn(), main: fn()) -> ! {
             std::process::exit(2)
         }
     }
+}
+
+/// The process's arguments, as `os.Args`.
+pub fn args() -> crate::slice::Slice<crate::place::Slot<crate::string::GoStr>> {
+    strings(std::env::args_os().map(|a| bytes_of(a.as_encoded_bytes())))
+}
+
+/// The process's environment, as `KEY=value` strings.
+pub fn envs() -> crate::slice::Slice<crate::place::Slot<crate::string::GoStr>> {
+    strings(std::env::vars_os().map(|(k, v)| {
+        let mut entry = k.into_encoded_bytes();
+        entry.push(b'=');
+        entry.extend_from_slice(v.as_encoded_bytes());
+        bytes_of(&entry)
+    }))
+}
+
+/// A Go string holding a copy of these bytes. The OS hands us bytes, which
+/// is exactly what a Go string is.
+fn bytes_of(b: &[u8]) -> crate::string::GoStr {
+    crate::string::GoStr::from_bytes(b)
+}
+
+/// Collects strings into a Go slice, rooting what is built so far: every
+/// string allocates, and each allocation may collect.
+///
+/// A root slot holds a snapshot of the reference, not the local's address, so
+/// the slice has to be re-rooted after every `append`: the append leaves
+/// `out` pointing at a fresh backing array, and producing the next string
+/// allocates. Rooting only at the top of a `for` body would miss exactly
+/// that window, because the iterator's `next` runs before the body.
+fn strings(
+    mut items: impl Iterator<Item = crate::string::GoStr>,
+) -> crate::slice::Slice<crate::place::Slot<crate::string::GoStr>> {
+    let mut out = crate::slice::Slice::<crate::place::Slot<crate::string::GoStr>>::zero();
+    let frame = crate::gc::Frame::<2>::new();
+    frame.scope(|| {
+        loop {
+            frame.set(0, &out);
+            let Some(s) = items.next() else { break };
+            frame.set(1, &s);
+            out = out.append(s);
+        }
+    });
+    out
+}
+
+/// `fcntl(2)`, which gc puts in its runtime: `(value, errno)`.
+pub fn fcntl(fd: i32, cmd: i32, arg: i32) -> (i32, i32) {
+    #[cfg(all(target_os = "linux", target_arch = "x86_64"))]
+    const SYS_FCNTL: u64 = 72;
+    #[cfg(all(target_os = "linux", target_arch = "aarch64"))]
+    const SYS_FCNTL: u64 = 25;
+    #[cfg(not(target_os = "linux"))]
+    const SYS_FCNTL: u64 = 0;
+    let (r1, _, errno) =
+        crate::syscall::syscall6(SYS_FCNTL, fd as u64, cmd as u64, arg as u64, 0, 0, 0);
+    if errno != 0 {
+        return (-1, errno as i32);
+    }
+    (r1 as i32, 0)
+}
+
+/// The wall clock: whole seconds and nanoseconds since the Unix epoch, as
+/// gc's `walltime` reports them.
+pub fn walltime() -> (i64, i32) {
+    match std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH) {
+        Ok(d) => (d.as_secs() as i64, d.subsec_nanos() as i32),
+        Err(e) => {
+            let d = e.duration();
+            (-(d.as_secs() as i64), -(d.subsec_nanos() as i32))
+        }
+    }
+}
+
+/// Ends the process with this status, as `syscall.Exit`.
+///
+/// Nothing is flushed, because nothing is buffered: a Go program's writes
+/// have already reached the file descriptor. gc's `exit` is the same.
+pub fn exit(code: i32) -> ! {
+    std::process::exit(code)
 }

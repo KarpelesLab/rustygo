@@ -150,5 +150,52 @@ func rand() uint64 {
 	return hi ^ lo
 }
 
+// The scheduler bookkeeping around a system call, which M2 will make real:
+// with one goroutine there is nothing to hand off to.
+
+//go:linkname syscall_runtime_entersyscall syscall.runtime_entersyscall
+func syscall_runtime_entersyscall() {}
+
+//go:linkname syscall_runtime_exitsyscall syscall.runtime_exitsyscall
+func syscall_runtime_exitsyscall() {}
+
+// internal/poll's semaphores and netpoller. Regular files never reach the
+// poller (they are opened unpollable), and sockets wait for M2.
+
+//go:linkname poll_runtime_Semacquire internal/poll.runtime_Semacquire
+func poll_runtime_Semacquire(s *uint32) { semacquire(s) }
+
+//go:linkname poll_runtime_Semrelease internal/poll.runtime_Semrelease
+func poll_runtime_Semrelease(s *uint32) { semrelease(s) }
+
+//go:linkname poll_runtime_pollServerInit internal/poll.runtime_pollServerInit
+func poll_runtime_pollServerInit() {}
+
+//go:linkname poll_runtime_pollOpen internal/poll.runtime_pollOpen
+func poll_runtime_pollOpen(fd uintptr) (uintptr, int) {
+	return 0, 1 // as gc reports "not supported"
+}
+
+//go:linkname poll_runtime_pollClose internal/poll.runtime_pollClose
+func poll_runtime_pollClose(ctx uintptr) {}
+
+//go:linkname poll_runtime_pollReset internal/poll.runtime_pollReset
+func poll_runtime_pollReset(ctx uintptr, mode int) int { return 0 }
+
+//go:linkname poll_runtime_pollWait internal/poll.runtime_pollWait
+func poll_runtime_pollWait(ctx uintptr, mode int) int { return 0 }
+
+//go:linkname poll_runtime_pollWaitCanceled internal/poll.runtime_pollWaitCanceled
+func poll_runtime_pollWaitCanceled(ctx uintptr, mode int) {}
+
+//go:linkname poll_runtime_pollSetDeadline internal/poll.runtime_pollSetDeadline
+func poll_runtime_pollSetDeadline(ctx uintptr, d int64, mode int) {}
+
+//go:linkname poll_runtime_pollUnblock internal/poll.runtime_pollUnblock
+func poll_runtime_pollUnblock(ctx uintptr) {}
+
+//go:linkname poll_runtime_isPollServerDescriptor internal/poll.runtime_isPollServerDescriptor
+func poll_runtime_isPollServerDescriptor(fd uintptr) bool { return false }
+
 // writeErr writes n bytes to standard error.
 func writeErr(p unsafe.Pointer, n int32)
