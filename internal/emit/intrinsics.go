@@ -112,6 +112,17 @@ var intrinsics = map[string]func(args []string) string{
 		return fmt.Sprintf("rustygo::iface::desc_name(%s)", a[0])
 	},
 
+	// Goroutines: the scheduler (src/sched.rs).
+	"runtime.Gosched":      func([]string) string { return "rustygo::sched::gosched()" },
+	"runtime.NumGoroutine": func([]string) string { return "rustygo::sched::count()" },
+	"runtime.yieldIfReady": func([]string) string { return "rustygo::sched::yield_now()" },
+	"runtime.semapark": func(a []string) string {
+		return fmt.Sprintf("rustygo::sched::park_on(%s as usize)", a[0])
+	},
+	"runtime.semawake": func(a []string) string {
+		return fmt.Sprintf("rustygo::sched::wake_one(%s as usize)", a[0])
+	},
+
 	// The process itself: arguments, environment, and the fcntl gc puts in
 	// its runtime.
 	"runtime.args": func([]string) string { return "rustygo::rt::args()" },

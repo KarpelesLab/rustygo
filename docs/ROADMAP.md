@@ -266,6 +266,31 @@ work fails too, decision gate 1 says stop.
   factor published instead of hidden.
 * 100k parked goroutines fit in a stated memory budget.
 
+**Status (2026-09-22): the single-threaded half of M2 is in.**
+
+* Goroutines are real stacks with a real context switch (x86-64 and aarch64,
+  naked assembly), reserved with a guard page below them. `go` hands the
+  scheduler the thunk and environment a `defer` builds, so the two share
+  their machinery.
+* Channels: buffered and synchronous, `close`, `range`, `len`/`cap`,
+  receiving from a closed channel, and `select` with and without a default,
+  choosing among ready cases at random. `sync.Mutex` and `sync.WaitGroup`
+  work, because the semaphores underneath them park on the scheduler.
+* Blocking with nothing left to run is Go's
+  `all goroutines are asleep - deadlock!`, reported the same way, and a panic
+  that escapes a goroutine ends the program as Go's does.
+* The GC root chain and the panic stack belong to the goroutine, not the
+  thread, and move with it across a switch: the collector traces the roots of
+  every parked goroutine, and both new programs pass under GC torture.
+* Windows is not there: its x64 calling convention makes `rdi`, `rsi` and
+  `xmm6`-`xmm15` callee-saved and keeps the stack's bounds in the thread
+  information block, so it needs a switch of its own (M5). A Windows build
+  compiles and says so rather than corrupting itself quietly.
+* Not yet: the M:N scheduler over threads, work stealing, preemption,
+  `GOMAXPROCS` above 1, timers (`time.Sleep` blocks the thread instead of
+  parking the goroutine; `time.NewTimer` is missing), `runtime.Goexit`,
+  `testing/synctest`, and the netpoller.
+
 ## M3 — Standard library bring-up
 
 * Compile the real stdlib with the `purego` tag, completing the inventory of

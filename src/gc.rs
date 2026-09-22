@@ -57,6 +57,14 @@ impl<K, V> Root for crate::map::GoMap<K, V> {
     }
 }
 
+#[cfg(feature = "std")]
+impl<T> Root for crate::chan::Chan<T> {
+    #[inline]
+    fn root_word(&self) -> usize {
+        self.addr() as usize
+    }
+}
+
 impl Root for crate::iface::Iface {
     #[inline]
     fn root_word(&self) -> usize {
@@ -231,9 +239,45 @@ pub unsafe fn parent_of(frame: usize) -> Option<usize> {
     }
 }
 
+/// Takes the thread's shadow stack away, leaving it empty.
+///
+/// The scheduler hands the chain to the goroutine taking over the thread:
+/// each goroutine has roots of its own, on its own stack (DESIGN §4).
+pub fn take_top() -> usize {
+    TOP.with(|top| top.replace(core::ptr::null())) as usize
+}
+
+/// Gives the thread the shadow stack of the goroutine taking over.
+pub fn put_top(chain: usize) {
+    TOP.with(|top| top.set(chain as *const Header));
+}
+
+/// Reports the roots on a parked goroutine's chain.
+///
+/// Only the scheduler has parked goroutines, and only `std` builds have a
+/// scheduler.
+///
+/// # Safety
+///
+/// `chain` must be a chain [`take_top`] returned, belonging to a stack that
+/// is parked: every frame on it is alive and none of them is changing.
+#[cfg(feature = "std")]
+pub(crate) unsafe fn trace_chain(chain: usize, t: &mut Tracer<'_>) {
+    // SAFETY: the caller's contract.
+    unsafe { walk(chain as *const Header, t) }
+}
+
 /// Reports every root on this thread's shadow stack to the collector.
 pub(crate) fn trace_roots(t: &mut Tracer<'_>) {
-    let mut p = TOP.with(|top| top.get());
+    // SAFETY: the thread's own chain: every frame on it is linked, so alive.
+    unsafe { walk(TOP.with(|top| top.get()), t) }
+}
+
+/// # Safety
+///
+/// `head` must be null or a linked frame chain whose frames are all alive.
+unsafe fn walk(head: *const Header, t: &mut Tracer<'_>) {
+    let mut p = head;
     while !p.is_null() {
         // SAFETY: see `depth`.
         let header = unsafe { &*p };

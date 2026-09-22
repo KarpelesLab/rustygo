@@ -44,7 +44,7 @@ func newTypeReg() *typeReg {
 // preludeNames are the items `rustygo::prelude` brings into every generated
 // module. Keep in sync with src/prelude.rs.
 var preludeNames = []string{
-	"Defers", "Env", "Func", "Data", "ErasedFn", "Iface", "MethodId", "TypeDesc",
+	"Chan", "Defers", "Env", "Func", "Data", "ErasedFn", "Iface", "MethodId", "TypeDesc",
 	"GoKey", "GoMap", "MapIter", "Place", "Ptr", "Slot", "Slice", "GoStr",
 	"StrIter", "Trace", "Tracer", "GoValue", "GoInt",
 }
@@ -85,6 +85,8 @@ func (r *typeReg) rust(t types.Type, e *emitter, pos token.Pos) string {
 		return "Iface"
 	case *types.Map:
 		return fmt.Sprintf("GoMap<%s, %s>", r.rust(t.Key(), e, pos), r.rust(t.Elem(), e, pos))
+	case *types.Chan:
+		return "Chan<" + r.rust(t.Elem(), e, pos) + ">"
 	case *types.Tuple:
 		parts := make([]string, t.Len())
 		for i := range parts {

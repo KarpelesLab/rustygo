@@ -340,7 +340,7 @@ type deferBody struct {
 	builtin  func(loaded []string) string
 }
 
-func (e *emitter) deferThunk(d *ssa.Defer, in *ssa.Function, argTypes []types.Type, body deferBody) (string, *structInfo) {
+func (e *emitter) deferThunk(pos token.Pos, in *ssa.Function, argTypes []types.Type, body deferBody) (string, *structInfo) {
 	var fields []*types.Var
 	var pkg *types.Package
 	if in.Pkg != nil {
@@ -350,7 +350,7 @@ func (e *emitter) deferThunk(d *ssa.Defer, in *ssa.Function, argTypes []types.Ty
 		fields = append(fields, types.NewField(token.NoPos, pkg, fmt.Sprintf("f%d", i), t, false))
 	}
 	st := types.NewStruct(fields, nil)
-	info := e.types.structInfo(st, in.Name()+"$deferred", e, d.Pos())
+	info := e.types.structInfo(st, in.Name()+"$deferred", e, pos)
 
 	m := e.module(in.Pkg)
 	name := m.ns.claim(mangle(in.Name() + "$defer"))

@@ -45,15 +45,18 @@ func KeepAlive(x any) { keepAliveSink = x; keepAliveSink = nil }
 
 var keepAliveSink any
 
-// Goroutines arrive in M2. Until then there is exactly one, and these report
-// that honestly.
+// Goroutines run on one OS thread for now (DESIGN §4), cooperatively:
+// Gosched hands the processor to the next one, and there is no second
+// thread to report.
 
-func Gosched()             {}
+func Gosched()
 func GOMAXPROCS(n int) int { return 1 }
 func NumCPU() int          { return 1 }
-func NumGoroutine() int    { return 1 }
 func LockOSThread()        {}
 func UnlockOSThread()      {}
+
+// NumGoroutine counts the goroutines that exist, as the scheduler sees them.
+func NumGoroutine() int
 
 // Goexit is not supported before goroutines exist.
 func Goexit() { panic("runtime.Goexit: not supported yet (roadmap M2)") }

@@ -46,3 +46,6 @@ stdlib2 linux
 procexit linux
 recoverrules
 runtimeerrors
+channels linux
+goroutines linux,darwin
+selects linux

@@ -178,7 +178,7 @@ func (f *fnEmitter) collectRoots() {
 // or a string. Such a value goes in a plain root slot.
 func holdsRef(t types.Type) bool {
 	switch u := t.Underlying().(type) {
-	case *types.Pointer, *types.Slice, *types.Signature, *types.Interface, *types.Map:
+	case *types.Pointer, *types.Slice, *types.Signature, *types.Interface, *types.Map, *types.Chan:
 		return true
 	case *types.Basic:
 		return u.Info()&types.IsString != 0 || u.Kind() == types.UnsafePointer
@@ -233,8 +233,21 @@ func safePoint(instr ssa.Instruction) bool {
 	case *ssa.Convert:
 		// string <-> []byte and []rune both copy into a new object.
 		return isString(instr.Type()) || isString(instr.X.Type())
-	case *ssa.MakeSlice, *ssa.MakeClosure, *ssa.Defer, *ssa.MakeInterface, *ssa.MakeMap:
+	case *ssa.MakeSlice, *ssa.MakeClosure, *ssa.MakeInterface, *ssa.MakeMap, *ssa.MakeChan:
 		return true
+	case *ssa.Defer, *ssa.Go:
+		// Both build an environment for the call's arguments, which
+		// allocates; `go` then hands it to a goroutine that may run and
+		// allocate before this one runs again.
+		return true
+	case *ssa.Send, *ssa.Select:
+		// A channel operation blocks, and every other goroutine runs while
+		// it does.
+		return true
+	case *ssa.UnOp:
+		// A receive blocks in the same way. The other unary operators, a
+		// pointer dereference among them, do nothing of the sort.
+		return instr.Op == token.ARROW
 	case *ssa.MapUpdate:
 		return true // inserting may grow the table
 	}

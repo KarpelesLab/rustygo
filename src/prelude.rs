@@ -1,5 +1,7 @@
 //! Everything generated code uses unqualified: `use rustygo::prelude::*;`.
 
+#[cfg(feature = "std")]
+pub use crate::chan::Chan;
 pub use crate::complex::{Complex, Complex64, Complex128};
 pub use crate::defers::Defers;
 pub use crate::func::{Env, Func};

@@ -6,6 +6,7 @@ use std::io::Write;
 /// gc's `fatal error: ` report, then exit status 2: for failures a program
 /// cannot recover from, such as every goroutine being blocked.
 pub fn fatal(msg: &[u8]) -> ! {
+    crate::stack::leak_all();
     let mut err = std::io::stderr().lock();
     let _ = err.write_all(b"fatal error: ");
     let _ = err.write_all(msg);
@@ -61,24 +62,31 @@ pub fn run_main(init: fn(), main: fn()) -> ! {
         main();
     });
     match result {
-        Ok(()) => std::process::exit(0),
-        Err(payload) => {
-            let mut err = std::io::stderr().lock();
-            match payload.downcast::<GoPanic>() {
-                Ok(p) => {
-                    let _ = err.write_all(b"panic: ");
-                    let _ = err.write_all(p.text());
-                    let _ = err.write_all(b"\n\ngoroutine 1 [running]:\n");
-                }
-                // A Rust panic that is not a Go panic is a runtime or emitter
-                // bug; Rust's hook has already printed the message.
-                Err(_) => {
-                    let _ = err.write_all(b"fatal error: unexpected Rust panic\n");
-                }
-            }
-            std::process::exit(2)
+        Ok(()) => exit(0),
+        Err(payload) => report_unrecovered(payload),
+    }
+}
+
+/// Reports a panic nothing recovered, the way gc does, and ends the process.
+///
+/// Every goroutine ends this way when its panic escapes: Go stops the whole
+/// program, because there is nobody left to tell.
+pub fn report_unrecovered(payload: alloc::boxed::Box<dyn core::any::Any + Send>) -> ! {
+    crate::stack::leak_all();
+    let mut err = std::io::stderr().lock();
+    match payload.downcast::<GoPanic>() {
+        Ok(p) => {
+            let _ = err.write_all(b"panic: ");
+            let _ = err.write_all(p.text());
+            let _ = err.write_all(b"\n\ngoroutine 1 [running]:\n");
+        }
+        // A Rust panic that is not a Go panic is a runtime or emitter bug;
+        // Rust's hook has already printed the message.
+        Err(_) => {
+            let _ = err.write_all(b"fatal error: unexpected Rust panic\n");
         }
     }
+    std::process::exit(2)
 }
 
 /// The process's arguments, as `os.Args`.
@@ -159,5 +167,6 @@ pub fn walltime() -> (i64, i32) {
 /// Nothing is flushed, because nothing is buffered: a Go program's writes
 /// have already reached the file descriptor. gc's `exit` is the same.
 pub fn exit(code: i32) -> ! {
+    crate::stack::leak_all();
     std::process::exit(code)
 }

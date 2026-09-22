@@ -82,8 +82,30 @@ func walltime() (sec int64, nsec int32)
 // program. time.NewTimer and the rest of the timer machinery wait for M2.
 func nanosleep(ns int64)
 
+// yieldIfReady hands the processor to another goroutine if one is ready,
+// and reports whether it did.
+func yieldIfReady() bool
+
 //go:linkname time_Sleep time.Sleep
-func time_Sleep(ns int64) { nanosleep(ns) }
+func time_Sleep(ns int64) {
+	if ns <= 0 {
+		return
+	}
+	// The sleeping time belongs to whichever goroutine can use it. Only when
+	// none can is it worth sleeping the thread they share. Timers, which
+	// would park this goroutine and wake it on a deadline, come with the
+	// netpoller (roadmap M2/M3).
+	deadline := nanotime() + ns
+	for {
+		left := deadline - nanotime()
+		if left <= 0 {
+			return
+		}
+		if !yieldIfReady() {
+			nanosleep(left)
+		}
+	}
+}
 
 // sigpipe is raised when a write to a closed pipe is ignored; with no signal
 // handling yet (M3) there is nothing to raise.

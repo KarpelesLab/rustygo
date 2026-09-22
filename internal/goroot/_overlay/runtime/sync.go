@@ -5,18 +5,29 @@ package runtime
 import "unsafe"
 
 // What package sync and internal/sync ask of the runtime, through
-// go:linkname. M1 has one goroutine, so a semaphore that would block can
-// never be released: that is gc's deadlock, reported the same way. M2's
-// scheduler replaces these.
+// go:linkname. A semaphore that cannot be taken parks the goroutine on the
+// address of its counter, and releasing it wakes the one that has waited
+// longest; with one thread and no preemption, nothing can run between the
+// test and the park (DESIGN §4).
+
+// semapark parks this goroutine on an address, and semawake readies the
+// goroutine that has waited longest on it.
+func semapark(addr uintptr)
+func semawake(addr uintptr)
 
 func semacquire(s *uint32) {
-	if *s == 0 {
-		fatal("all goroutines are asleep - deadlock!")
+	for *s == 0 {
+		// Parking with nothing left to run is gc's deadlock, reported the
+		// same way by the scheduler.
+		semapark(uintptr(unsafe.Pointer(s)))
 	}
 	*s--
 }
 
-func semrelease(s *uint32) { *s++ }
+func semrelease(s *uint32) {
+	*s++
+	semawake(uintptr(unsafe.Pointer(s)))
+}
 
 //go:linkname sync_runtime_Semacquire sync.runtime_Semacquire
 func sync_runtime_Semacquire(s *uint32) { semacquire(s) }

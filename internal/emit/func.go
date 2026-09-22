@@ -373,7 +373,7 @@ func (f *fnEmitter) instr(instr ssa.Instruction) string {
 	case *ssa.Panic:
 		return f.panic(instr)
 	case *ssa.Go:
-		f.errorf(instr.Pos(), "go statements are not supported yet (roadmap M2)")
+		return f.goStmt(instr)
 	case *ssa.Defer:
 		return f.deferStmt(instr)
 	case *ssa.RunDefers:
@@ -381,7 +381,7 @@ func (f *fnEmitter) instr(instr ssa.Instruction) string {
 		// back, so a defer that assigns to one is visible to the caller.
 		return "__defers.run();"
 	case *ssa.Send:
-		f.errorf(instr.Pos(), "channels are not supported yet (roadmap M2)")
+		return fmt.Sprintf("(%s).send(%s);", f.val(instr.Chan), f.val(instr.X))
 	case *ssa.MapUpdate:
 		return fmt.Sprintf("(%s).set(%s, %s);", f.val(instr.Map), f.val(instr.Key), f.val(instr.Value))
 	default:
@@ -454,10 +454,30 @@ func hasDefers(fn *ssa.Function) bool {
 
 // deferStmt stores a deferred call's arguments and pushes its thunk.
 func (f *fnEmitter) deferStmt(d *ssa.Defer) string {
-	c := d.Call
-	if c.IsInvoke() {
-		f.errorf(d.Pos(), "deferred interface method calls are not supported yet (roadmap M1)")
+	thunk, env := f.callThunk(&d.Call, d.Pos(), "deferred")
+	if thunk == "" {
 		return ""
+	}
+	return fmt.Sprintf("__defers.push(%s, %s);", thunk, env)
+}
+
+// goStmt starts a goroutine. Go evaluates the call's arguments now and runs
+// the call later, which is what a deferred call does too, so both are the
+// same thunk over the same environment — only where it is handed to differs.
+func (f *fnEmitter) goStmt(g *ssa.Go) string {
+	thunk, env := f.callThunk(&g.Call, g.Pos(), "started")
+	if thunk == "" {
+		return ""
+	}
+	return fmt.Sprintf("rustygo::sched::spawn(%s, %s);", thunk, env)
+}
+
+// callThunk renders a call whose arguments are evaluated now and whose body
+// runs later: the thunk to call, and the environment holding the arguments.
+func (f *fnEmitter) callThunk(c *ssa.CallCommon, pos token.Pos, what string) (string, string) {
+	if c.IsInvoke() {
+		f.errorf(pos, "%s interface method calls are not supported yet (roadmap M1)", what)
+		return "", ""
 	}
 	var argTypes []types.Type
 	var stored []string
@@ -469,7 +489,7 @@ func (f *fnEmitter) deferStmt(d *ssa.Defer) string {
 	} else if b, isBuiltin := c.Value.(*ssa.Builtin); isBuiltin {
 		builtinName = b
 	} else {
-		// A deferred call through a func value: store the value too.
+		// A call through a func value: store the value too.
 		indirect = true
 		argTypes = append(argTypes, c.Value.Type())
 		stored = append(stored, f.val(c.Value))
@@ -481,16 +501,17 @@ func (f *fnEmitter) deferStmt(d *ssa.Defer) string {
 	body := deferBody{target: target, indirect: indirect}
 	if builtinName != nil {
 		body.builtin = func(loaded []string) string {
-			return f.builtin(builtinName, &c, types.Typ[types.Invalid], d.Pos(), loaded)
+			return f.builtin(builtinName, c, types.Typ[types.Invalid], pos, loaded)
 		}
 	}
-	thunk, info := f.e.deferThunk(d, f.fn, argTypes, body)
+	thunk, info := f.e.deferThunk(pos, f.fn, argTypes, body)
 	fields := make([]string, len(stored))
 	for i, s := range stored {
 		fields[i] = fmt.Sprintf("%s: %s", info.fields[i], s)
 	}
-	return fmt.Sprintf("__defers.push(%s, Env::of(Ptr::<crate::ty::%s_P>::alloc(crate::ty::%s { %s })));",
-		thunk, info.name, info.name, strings.Join(fields, ", "))
+	env := fmt.Sprintf("Env::of(Ptr::<crate::ty::%s_P>::alloc(crate::ty::%s { %s }))",
+		info.name, info.name, strings.Join(fields, ", "))
+	return thunk, env
 }
 
 // expr returns the right-hand side for a value-producing instruction.
@@ -623,8 +644,12 @@ func (f *fnEmitter) expr(v ssa.Value) string {
 			return fmt.Sprintf("(%s).at(%s as i64)", f.val(v.X), f.val(v.Index))
 		}
 		f.errorf(v.Pos(), "lookup in %s is not supported", v.X.Type())
-	case *ssa.MakeChan, *ssa.Select:
-		f.errorf(v.Pos(), "channels are not supported yet (roadmap M2)")
+	case *ssa.MakeChan:
+		ct := v.Type().Underlying().(*types.Chan)
+		return fmt.Sprintf("Chan::<%s>::make(%s as i64)",
+			f.typ(ct.Elem(), v.Pos()), f.val(v.Size))
+	case *ssa.Select:
+		return f.selectStmt(v)
 	default:
 		f.errorf(v.Pos(), "instruction %T is not supported yet", v)
 	}
@@ -728,8 +753,10 @@ func (f *fnEmitter) unop(v *ssa.UnOp) string {
 		}
 		return fmt.Sprintf("(-%s)", x)
 	case token.ARROW:
-		f.errorf(v.Pos(), "channels are not supported yet (roadmap M2)")
-		return ""
+		if v.CommaOk {
+			return fmt.Sprintf("(%s).recv()", x)
+		}
+		return fmt.Sprintf("(%s).recv_value()", x)
 	}
 	f.errorf(v.Pos(), "unary %s is not supported", v.Op)
 	return ""
@@ -882,8 +909,12 @@ func (f *fnEmitter) builtin(b *ssa.Builtin, c *ssa.CallCommon, resultType types.
 		case *types.Slice:
 			return fmt.Sprintf("(%s).clear()", args[0])
 		}
+	case "close":
+		return fmt.Sprintf("(%s).close()", args[0])
 	case "len", "cap":
 		switch c.Args[0].Type().Underlying().(type) {
+		case *types.Chan:
+			return fmt.Sprintf("(%s).%s()", args[0], b.Name())
 		case *types.Map:
 			if b.Name() == "len" {
 				return fmt.Sprintf("(%s).len()", args[0])
@@ -1215,4 +1246,71 @@ func (e *emitter) linkTarget(key string) *ssa.Function {
 		return nil
 	}
 	return nil
+}
+
+// selectStmt renders a `select` as a poll over its cases.
+//
+// Go evaluates every channel operand (and every value to send) once, up
+// front, then chooses uniformly at random among the cases that are ready. The
+// poll starts at a random case for that reason; when none is ready, the
+// goroutine parks on all of the channels at once and tries again when any of
+// them moves. go/ssa's result is (chosen index, received ok, one value per
+// receive case), with -1 for the default case.
+func (f *fnEmitter) selectStmt(v *ssa.Select) string {
+	n := len(v.States)
+	var b strings.Builder
+	b.WriteString("{\n")
+	if n == 0 {
+		// `select {}` waits for nothing, for ever.
+		b.WriteString("        rustygo::sched::park_on_any(&[]);\n")
+	}
+	b.WriteString("        let mut __sel_i: i64 = -1;\n        let mut __sel_ok = false;\n")
+	recv := 0
+	for _, st := range v.States {
+		if st.Dir == types.RecvOnly {
+			ct := st.Chan.Type().Underlying().(*types.Chan)
+			fmt.Fprintf(&b, "        let mut __sel_r%d: %s = GoValue::zero();\n", recv, f.typ(ct.Elem(), st.Pos))
+			recv++
+		}
+	}
+	for i, st := range v.States {
+		fmt.Fprintf(&b, "        let __sel_c%d = %s;\n", i, f.val(st.Chan))
+		if st.Dir == types.SendOnly {
+			fmt.Fprintf(&b, "        let __sel_v%d = %s;\n", i, f.val(st.Send))
+		}
+	}
+	if n > 0 {
+		b.WriteString("        'sel: loop {\n")
+		fmt.Fprintf(&b, "            let __start = rustygo::sched::pick(%d);\n", n)
+		fmt.Fprintf(&b, "            for __k in 0..%d {\n                match (__start + __k) %% %d {\n", n, n)
+		recv = 0
+		for i, st := range v.States {
+			if st.Dir == types.RecvOnly {
+				fmt.Fprintf(&b, "                    %d => if (__sel_c%d).can_recv() { let (__v, __o) = (__sel_c%d).recv(); __sel_r%d = __v; __sel_ok = __o; __sel_i = %d; break 'sel; },\n",
+					i, i, i, recv, i)
+				recv++
+			} else {
+				fmt.Fprintf(&b, "                    %d => if (__sel_c%d).can_send() { (__sel_c%d).send(__sel_v%d); __sel_i = %d; break 'sel; },\n",
+					i, i, i, i, i)
+			}
+		}
+		b.WriteString("                    _ => {}\n                }\n            }\n")
+		if v.Blocking {
+			b.WriteString("            rustygo::sched::park_on_any(&[")
+			for i := range v.States {
+				fmt.Fprintf(&b, "(__sel_c%d).addr() as usize, ", i)
+			}
+			b.WriteString("]);\n")
+		} else {
+			// No case was ready and there is a default: its index is -1.
+			b.WriteString("            break 'sel;\n")
+		}
+		b.WriteString("        }\n")
+	}
+	b.WriteString("        (__sel_i, __sel_ok,")
+	for i := 0; i < recv; i++ {
+		fmt.Fprintf(&b, " __sel_r%d,", i)
+	}
+	b.WriteString(")\n    }")
+	return b.String()
 }

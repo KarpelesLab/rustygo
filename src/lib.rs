@@ -35,7 +35,10 @@ mod tls;
 #[cfg(feature = "std")]
 extern crate std;
 
+#[cfg(feature = "std")]
+pub mod chan;
 pub mod complex;
+pub mod context;
 pub mod defers;
 pub mod func;
 pub mod gc;
@@ -51,7 +54,10 @@ pub mod print;
 pub mod reflect;
 #[cfg(feature = "std")]
 pub mod rt;
+#[cfg(feature = "std")]
+pub mod sched;
 pub mod slice;
+pub mod stack;
 pub mod string;
 pub mod syscall;
 pub mod trace;

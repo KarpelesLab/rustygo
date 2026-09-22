@@ -151,6 +151,34 @@ pub(crate) fn trace_panics(t: &mut crate::trace::Tracer<'_>) {
 #[cfg(not(feature = "std"))]
 pub(crate) fn trace_panics(_: &mut crate::trace::Tracer<'_>) {}
 
+/// Takes this goroutine's panics away, leaving none.
+///
+/// A panic belongs to the goroutine handling it, so the scheduler moves the
+/// stack of them with the goroutine (DESIGN §4). Moving a `Vec` is three
+/// words and no allocation.
+#[cfg(feature = "std")]
+pub fn take_panics() -> alloc::vec::Vec<GoPanic> {
+    CURRENT.with(|c| core::mem::take(&mut *c.borrow_mut()))
+}
+
+/// Gives the thread the panics of the goroutine taking over.
+#[cfg(feature = "std")]
+pub fn put_panics(panics: alloc::vec::Vec<GoPanic>) {
+    CURRENT.with(|c| *c.borrow_mut() = panics);
+}
+
+/// Takes the running deferred call's recover boundary away.
+#[cfg(feature = "std")]
+pub fn take_boundary() -> (usize, usize) {
+    BOUNDARY.with(|b| b.replace((0, 0)))
+}
+
+/// Gives the thread the boundary of the goroutine taking over.
+#[cfg(feature = "std")]
+pub fn put_boundary(boundary: (usize, usize)) {
+    BOUNDARY.with(|b| b.set(boundary));
+}
+
 /// Takes over a caught panic so the deferred calls can `recover` it, and
 /// returns the depth to hand back to [`recovered`] and [`resume`].
 ///

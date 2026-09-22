@@ -60,7 +60,7 @@ teaching `go list` a GOARCH it rejects.
 | `[]T` | `Slice<P>`: pointer, len, cap over places of `T` | aliasing, reslicing and `append` growth as in Go |
 | `[N]T` | `[T; N]` | value type, copied on assignment |
 | `map[K]V` | `GoMap<K, V>` | handle to a heap object holding an open-addressing table; keys hash by Go's rules; iteration starts at a random bucket |
-| `chan T` | `Gc<Chan<T>>` | runtime, integrates with scheduler |
+| `chan T` | `Chan<T>` | handle to a heap object holding the buffer and the state blocked goroutines test |
 | `func(...)` | `Func<fn(Env, ..) -> ..>` | code pointer + environment; the captured env is a traced place struct |
 | `struct` | `struct` + emitted `impl Trace` | field order preserved; `Gc<T>` when heap-allocated |
 | `*T` | `Ptr<T>` | see interior pointers |
@@ -179,6 +179,33 @@ runtime's accessor API has to be sound for *any* code the emitter produces, so:
   neither other goroutines nor a stop-the-world collection.
 * **Channels and `select`** live in the runtime: same FIFO fairness, same
   blocking semantics, same random choice among ready cases.
+
+**As built (M2, first half).** One OS thread runs every goroutine,
+cooperatively. A goroutine is a stack (`src/stack.rs`: a reservation with a
+64 KiB guard below it) and a saved context (`src/context.rs`: the
+callee-saved registers and the stack pointer, in naked assembly for x86-64
+and aarch64). `go` hands the scheduler the same thunk-and-environment a
+`defer` builds, so the two share their machinery.
+
+The state that belongs to a goroutine rather than to the thread — its shadow
+stack of GC roots, and the panics it is handling — moves with it on every
+switch, which is what makes a panic on one goroutine invisible to another and
+lets the collector trace the roots of a goroutine that is parked. Blocking is
+a park: a channel that is not ready, a semaphore that is held,
+`runtime.Gosched`. When nothing is left to run, that is Go's
+`all goroutines are asleep - deadlock!`, reported the same way.
+
+Channels are heap objects like maps. Every goroutine blocked on one parks on
+the channel's address and re-tests its condition when woken, and every
+operation that changes a channel wakes all of them: more wakeups than Go's
+queues of waiters need, but it cannot lose one. `select` polls its cases from
+a random start, so a ready case cannot be starved, and parks on every channel
+at once when none is ready.
+
+Still to come in M2: the M:N scheduler over threads with work stealing and
+preemption, timers (`time.Sleep` blocks the thread rather than parking the
+goroutine, and `time.NewTimer` is not there at all), `runtime.Goexit`, and
+`testing/synctest`.
 * **Netpoller:** `epoll`/`kqueue`/IOCP (or Rust `std` blocking threads on
   constrained targets) driving the same parking primitives as channels.
 
