@@ -21,6 +21,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"runtime"
+	"slices"
 	"sort"
 	"strings"
 	"testing"
@@ -50,7 +51,7 @@ func TestPrograms(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	passing, err := readPassing(filepath.Join(dir, "PASSING"))
+	passing, listed, err := readPassing(filepath.Join(dir, "PASSING"))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -60,7 +61,7 @@ func TestPrograms(t *testing.T) {
 			names = append(names, e.Name())
 		}
 	}
-	for name := range passing {
+	for name := range listed {
 		if _, err := os.Stat(filepath.Join(dir, name)); err != nil {
 			t.Errorf("PASSING lists %q, which does not exist", name)
 		}
@@ -98,11 +99,13 @@ func TestPrograms(t *testing.T) {
 			switch {
 			case problem == "":
 				pass = append(pass, name)
-				if !passing[name] {
+				if !listed[name] {
 					newlyPassing = append(newlyPassing, name)
 				}
 			case passing[name]:
 				t.Errorf("%s regressed (listed in PASSING):\n%s", name, problem)
+			case listed[name]:
+				t.Skipf("not required on %s: %s", runtime.GOOS, firstLine(problem))
 			default:
 				t.Skipf("not passing yet: %s", firstLine(problem))
 			}
@@ -167,24 +170,36 @@ func diff(want, got outcome) string {
 	return b.String()
 }
 
-func readPassing(path string) (map[string]bool, error) {
+// readPassing reads the ratchet. A line is a program name, optionally
+// followed by the operating systems it is required on:
+//
+//	interp          — must pass everywhere
+//	stdlib2 linux   — must pass on linux, and is skipped elsewhere
+//
+// The second form is for programs that need a part of rustygo that only one
+// platform has yet, such as the file layer, which reaches the kernel through
+// Linux system calls and has no macOS or Windows port (roadmap M5).
+func readPassing(path string) (required, listed map[string]bool, err error) {
 	f, err := os.Open(path)
 	if errors.Is(err, os.ErrNotExist) {
-		return map[string]bool{}, nil
+		return map[string]bool{}, map[string]bool{}, nil
 	}
 	if err != nil {
-		return nil, err
+		return nil, nil, err
 	}
 	defer f.Close()
-	m := map[string]bool{}
+	m, all := map[string]bool{}, map[string]bool{}
 	sc := bufio.NewScanner(f)
 	for sc.Scan() {
 		line := strings.TrimSpace(sc.Text())
-		if line != "" && !strings.HasPrefix(line, "#") {
-			m[line] = true
+		if line == "" || strings.HasPrefix(line, "#") {
+			continue
 		}
+		name, oses, _ := strings.Cut(line, " ")
+		all[name] = true
+		m[name] = oses == "" || slices.Contains(strings.Split(strings.TrimSpace(oses), ","), runtime.GOOS)
 	}
-	return m, sc.Err()
+	return m, all, sc.Err()
 }
 
 func firstLine(s string) string {

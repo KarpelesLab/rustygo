@@ -32,6 +32,12 @@ Standing rules that apply from M0 on, instead of being added later:
   * IOCP completion I/O in place of readiness polling;
   * a `syscall` package built around handles and DLL calls.
 
+  Until then, what a platform cannot do yet is recorded rather than hidden:
+  a differential program may be listed in `testdata/programs/PASSING` with
+  the operating systems it is required on, and the file layer is Linux-only
+  so far — macOS and Windows reach the kernel through libc trampolines and
+  DLL calls, not the raw system calls rustygo has.
+
 ## The yardstick: Go's own test suite
 
 rustygo is as good as its pass rate on the tests the Go project already wrote

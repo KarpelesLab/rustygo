@@ -1,5 +1,7 @@
 # Programs that must keep passing the differential test (gc vs rustygo).
 # The list only grows: a listed program that fails is a CI failure.
+# A name followed by operating systems passes only there: the file layer
+# reaches the kernel through Linux system calls for now (roadmap M5).
 arith
 arrays
 bounds
@@ -39,8 +41,8 @@ unsafeptr
 stdlib1
 initdeps
 reflectbasics
-fmtbasics
-stdlib2
-procexit
+fmtbasics linux
+stdlib2 linux
+procexit linux
 recoverrules
 runtimeerrors
