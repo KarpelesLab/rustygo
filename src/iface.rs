@@ -16,7 +16,7 @@
 //! table rather than an itab. Both are the simple version; devirtualization
 //! and itabs are M6.
 
-use crate::panic::{GoPanic, go_panic};
+use crate::panic::runtime_error_msg;
 use crate::place::Ptr;
 use crate::trace::{Trace, Tracer};
 use crate::value::GoValue;
@@ -324,7 +324,7 @@ impl Iface {
     pub fn assert_concrete(self, want: &'static TypeDesc, iface_name: &str) -> Data {
         let (data, ok) = self.try_concrete(want);
         if !ok {
-            go_panic(GoPanic::new(match self.desc {
+            runtime_error_msg(match self.desc {
                 Some(d) => format!(
                     "interface conversion: {iface_name} is {}, not {}",
                     d.name, want.name
@@ -333,7 +333,7 @@ impl Iface {
                     "interface conversion: {iface_name} is nil, not {}",
                     want.name
                 ),
-            }));
+            });
         }
         data
     }
@@ -364,16 +364,16 @@ impl Iface {
         iface_name: &str,
     ) -> Iface {
         let Some(desc) = self.desc else {
-            go_panic(GoPanic::new(format!(
+            runtime_error_msg(format!(
                 "interface conversion: {iface_name} is nil, not {want}"
-            )))
+            ))
         };
         for (id, name) in ids.iter().zip(names) {
             if desc.method(*id).is_none() {
-                go_panic(GoPanic::new(format!(
+                runtime_error_msg(format!(
                     "interface conversion: {} is not {want}: missing method {name}",
                     desc.name
-                )));
+                ));
             }
         }
         self

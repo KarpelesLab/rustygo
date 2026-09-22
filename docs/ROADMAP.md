@@ -198,7 +198,13 @@ work fails too, decision gate 1 says stop.
   table that resolves interior pointers), slices, strings on the heap, maps,
   closures and func values, interfaces with dynamic dispatch and type
   switches, `defer`, `panic` and `recover`, and package globals as roots.
-* 34 differential programs match gc, every one of them also under GC torture
+* `recover` follows Go's rule exactly, down to the cases Go's own tests call
+  "here be dragons": a value only for the function a defer invoked, only that
+  frame's own panic, panics nesting rather than replacing each other, and
+  `defer recover()` recovering in one order and doing nothing in the other
+  ([DESIGN §5](DESIGN.md#5-control-flow-defer-panic-recover)). A program with
+  no `recover` pays nothing for it.
+* 44 differential programs match gc, every one of them also under GC torture
   (a collection at every allocation), which is what checks that the emitted
   roots are complete.
 * The exit program is there: `testdata/programs/interp`, a small expression
@@ -316,7 +322,7 @@ work fails too, decision gate 1 says stop.
   `fmt.Println`, `os.Stdout`/`Stderr`, `os.Args`, `os.Getenv`, `os.Exit` with
   its exit hooks, and `time.Now`/`Sleep` all work
   (`testdata/programs/stdlib2`).
-* Go's own `test/` directory is at **67 of 141 (48%)**, up from 41 before
+* Go's own `test/` directory is at **74 of 141 (52%)**, up from 41 before
   this work; the remaining failures are mostly channels and goroutines (M2),
   plus the parts of `reflect` listed below.
 * Decision gate 2 (`reflect` impractical) is answered: not impractical. A

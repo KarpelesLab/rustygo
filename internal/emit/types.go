@@ -173,6 +173,12 @@ func (r *typeReg) structInfo(st *types.Struct, hint string, e *emitter, pos toke
 		if containsRef(ft) {
 			fmt.Fprintf(&trace, "        self.%s.trace(t);\n", f)
 		}
+		// A blank field takes part in no comparison: Go compares the
+		// corresponding *non-blank* fields, so every `struct{ _ int }` value
+		// equals every other, and a map key must hash the same way.
+		if st.Field(i).Name() == "_" {
+			continue
+		}
 		fmt.Fprintf(&hash, " h = rustygo::map::mix(h, GoKey::go_hash(&self.%s));", f)
 		fmt.Fprintf(&eq, " && GoKey::go_eq(&self.%s, &other.%s)", f, f)
 	}
@@ -182,8 +188,21 @@ func (r *typeReg) structInfo(st *types.Struct, hint string, e *emitter, pos toke
 	// C layout on both forms: that is Go's struct layout, so an
 	// unsafe.Pointer reinterpretation sees the bytes gc would (DESIGN §7).
 	derive := "#[derive(Clone, Copy)]\n#[repr(C)]"
+	var eqImpl string
 	if types.Comparable(st) {
 		derive = "#[derive(Clone, Copy, PartialEq)]\n#[repr(C)]"
+		// A derive would compare the blank fields too, so a struct that has
+		// one gets `==` written out over the fields Go actually compares.
+		if hasBlankField(st) {
+			derive = "#[derive(Clone, Copy)]\n#[repr(C)]"
+			eqImpl = fmt.Sprintf(`
+impl PartialEq for %s {
+    fn eq(&self, other: &Self) -> bool {
+        true%s
+    }
+}
+`, si.name, eq.String())
+		}
 	}
 	fmt.Fprintf(&r.buf, `
 // Go: %s
@@ -222,10 +241,20 @@ impl Trace for %s_P {
     fn trace(&self, t: &mut Tracer<'_>) {
 %s    }
 }
-%s`, types.TypeString(st, nil), derive, n, def.String(), n, n, zero.String(),
+%s%s`, types.TypeString(st, nil), derive, n, def.String(), n, n, zero.String(),
 		n, place.String(), n, n, n, n, newP.String(), n, n, load.String(), n, store.String(),
-		n, trace.String(), n, trace.String(), keyImpl(n, st, hash.String(), eq.String()))
+		n, trace.String(), n, trace.String(), eqImpl, keyImpl(n, st, hash.String(), eq.String()))
 	return si
+}
+
+// hasBlankField reports whether any of st's fields is named `_`.
+func hasBlankField(st *types.Struct) bool {
+	for i := 0; i < st.NumFields(); i++ {
+		if st.Field(i).Name() == "_" {
+			return true
+		}
+	}
+	return false
 }
 
 // keyImpl renders the GoKey implementation of a comparable struct type, so

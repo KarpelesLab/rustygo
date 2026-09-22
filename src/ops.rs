@@ -174,15 +174,38 @@ pub fn slice3_bounds(
     (lo as usize, h, m)
 }
 
-/// Checks `make([]T, len, cap)`.
-pub fn make_bounds(len: i64, cap: i64) -> (usize, usize) {
-    if cap < 0 {
+/// gc's `maxAlloc`: one byte short of the address space its heap can cover,
+/// and so the largest object that can exist.
+const MAX_ALLOC: u64 = if usize::BITS >= 64 {
+    (1 << 48) - 1
+} else {
+    (1 << 31) - 1
+};
+
+/// Checks `make([]T, len, cap)`, where `elem` is the element size.
+///
+/// The diagnosis is gc's. When something is out of range it names the length
+/// if the length alone is bad, and the capacity otherwise: `make([]T, n)`
+/// passes `n` as both, and naming the length is clearer when the capacity was
+/// never written down (golang.org/issue/4085).
+pub fn make_bounds(len: i64, cap: i64, elem: usize) -> (usize, usize) {
+    if bad_count(cap, elem) || len < 0 || len > cap {
+        if bad_count(len, elem) {
+            runtime_error(RuntimeError::MakeLen { len });
+        }
         runtime_error(RuntimeError::MakeCap { cap });
     }
-    if len < 0 || len > cap {
-        runtime_error(RuntimeError::MakeLen { len });
-    }
     (len as usize, cap as usize)
+}
+
+/// Whether this many elements of this size cannot exist: a negative count, or
+/// more bytes than the heap can address. A zero-sized element never overflows,
+/// which is why `make([]struct{}, 1<<40)` is a legal Go program.
+fn bad_count(n: i64, elem: usize) -> bool {
+    n < 0
+        || (n as u64)
+            .checked_mul(elem as u64)
+            .is_none_or(|bytes| bytes > MAX_ALLOC)
 }
 
 /// Converts a signed shift count to the unsigned count the [`GoInt`] shifts

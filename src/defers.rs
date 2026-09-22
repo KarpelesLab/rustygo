@@ -49,23 +49,64 @@ impl Defers {
         self.list.borrow_mut().push((f, env));
     }
 
-    /// Runs the deferred calls, last deferred first.
+    /// Runs the deferred calls, last deferred first, on the way out of a
+    /// normal return.
+    ///
+    /// Usually nothing here can `recover`, the frame not being the one that
+    /// panicked. The exception is Go's: when this frame is itself the call a
+    /// panicking frame deferred, a `defer recover()` of its own recovers that
+    /// panic, because it runs as if called from this frame (test/recover1.go,
+    /// test6). [`crate::panic::Boundary::normal`] works out which case this is.
     ///
     /// If several panic, the last one wins and the rest still run, as in Go.
     #[cfg(feature = "std")]
     pub fn run(&self) {
+        self.drain(None);
+    }
+
+    /// Runs the deferred calls while this frame's panic is being handled, so
+    /// that a deferred call may `recover` it.
+    ///
+    /// It stops at the call that recovers: Go then resumes the frame, which
+    /// runs whatever is left of the list on its normal path.
+    #[cfg(feature = "std")]
+    pub fn run_panicking(&self, depth: usize) {
+        self.drain(Some(depth));
+    }
+
+    #[cfg(feature = "std")]
+    fn drain(&self, recoverable: Option<usize>) {
         let mut pending: Option<alloc::boxed::Box<dyn core::any::Any + Send>> = None;
         // Once popped, the call's environment is no longer reachable through
-        // the list, so it is rooted here while it runs.
-        let frame = Frame::<1>::new();
+        // the list, so it is rooted here while it runs. Slot 1 holds the
+        // value of a panic caught below.
+        let frame = Frame::<2>::new();
         frame.scope(|| {
+            let _boundary = match recoverable {
+                // A deferred call of this frame is the one that may recover,
+                // and this frame is the one just outside it.
+                Some(depth) => crate::panic::Boundary::panicking(frame.addr(), depth),
+                None => crate::panic::Boundary::normal(frame.addr()),
+            };
             loop {
                 let Some((f, env)) = self.list.borrow_mut().pop() else {
                     break;
                 };
                 frame.set(0, &env);
                 if let Err(p) = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| f(env))) {
+                    // The panic waits here while the rest of the list runs,
+                    // and those calls allocate: nothing else holds its value
+                    // until it reaches the panic stack.
+                    if let Some(go) = p.downcast_ref::<crate::panic::GoPanic>() {
+                        let value = go.value();
+                        frame.set(1, &value);
+                    }
                     pending = Some(p);
+                }
+                // Go resumes the frame as soon as a deferred call recovers;
+                // what is left of the list runs on its normal path.
+                if recoverable.is_some_and(crate::panic::recovered) {
+                    break;
                 }
             }
         });

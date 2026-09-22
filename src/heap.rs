@@ -256,6 +256,7 @@ pub fn collect() {
         }
         let mut tracer = Tracer::new(h);
         crate::gc::trace_roots(&mut tracer);
+        crate::panic::trace_panics(&mut tracer);
         let globals = tracer.heap.globals.clone();
         for (addr, size, trace) in globals {
             // SAFETY: a registered global lives for the rest of the program,

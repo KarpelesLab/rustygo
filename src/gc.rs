@@ -154,6 +154,16 @@ impl<const N: usize> Frame<N> {
         body()
     }
 
+    /// This frame's address, which identifies it while it is linked.
+    ///
+    /// `panic::recover` compares frame addresses: the chain of linked frames
+    /// is the Go call stack, so the frame just outside the caller's says
+    /// whether the caller is the function a defer invoked.
+    #[inline]
+    pub fn addr(&self) -> usize {
+        &self.header as *const Header as usize
+    }
+
     /// Records a reference in slot `i`.
     #[inline]
     pub fn set(&self, i: usize, v: &impl Root) {
@@ -184,6 +194,40 @@ impl Drop for FrameGuard<'_> {
         let prev = self.header.prev.get();
         TOP.with(|top| top.set(prev));
         self.header.linked.set(false);
+    }
+}
+
+/// The frame linked just outside the innermost one, or 0 if there is none.
+///
+/// With one frame per calling Go function, this is the caller's frame, which
+/// is what `panic::recover` needs: see [`Frame::addr`].
+#[inline]
+pub fn caller_frame() -> usize {
+    let p = TOP.with(|top| top.get());
+    if p.is_null() {
+        return 0;
+    }
+    // SAFETY: a linked frame is alive for as long as it is linked, and its
+    // `prev` is either another such frame or null.
+    unsafe { (*p).prev.get() as usize }
+}
+
+/// The frame `frame` was linked onto, or `None` if it was the outermost.
+///
+/// # Safety
+///
+/// `frame` must be the address of a frame that is still linked, as
+/// [`Frame::addr`] returned it.
+pub unsafe fn parent_of(frame: usize) -> Option<usize> {
+    if frame == 0 {
+        return None;
+    }
+    // SAFETY: the caller's contract.
+    let prev = unsafe { (*(frame as *const Header)).prev.get() };
+    if prev.is_null() {
+        None
+    } else {
+        Some(prev as usize)
     }
 }
 

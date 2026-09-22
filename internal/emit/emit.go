@@ -54,12 +54,14 @@ type Options struct {
 // variables anything outside initialization reads, so the second can skip
 // building the rest (deadinit.go).
 func Crate(res *load.Result, opt Options) error {
-	first, err := run(res, nil)
+	first, err := run(res, nil, nil)
 	if err != nil {
 		return err
 	}
 	live := liveInitGlobals(first.inits, first.readGlobals)
-	e, err := run(res, live)
+	// The first pass also collects the program's functions, which is what
+	// says who must link a shadow-stack frame for `recover` (recover.go).
+	e, err := run(res, live, framesForRecover(first.emitted))
 	if err != nil {
 		return err
 	}
@@ -67,8 +69,9 @@ func Crate(res *load.Result, opt Options) error {
 }
 
 // run emits the whole program into memory. liveGlobals, when set, lets
-// package initializers skip variables nothing else reads.
-func run(res *load.Result, liveGlobals map[*ssa.Global]bool) (*emitter, error) {
+// package initializers skip variables nothing else reads; needsFrame, when
+// set, names the functions that link a frame whatever their roots.
+func run(res *load.Result, liveGlobals map[*ssa.Global]bool, needsFrame map[*ssa.Function]bool) (*emitter, error) {
 	var mainPkg *ssa.Package
 	for _, p := range res.Pkgs {
 		if p != nil && p.Pkg.Name() == "main" {
@@ -93,6 +96,7 @@ func run(res *load.Result, liveGlobals map[*ssa.Global]bool) (*emitter, error) {
 		types:   newTypeReg(),
 
 		liveGlobals: liveGlobals,
+		needsFrame:  needsFrame,
 		readGlobals: map[*ssa.Global]bool{},
 		calledFrom:  map[*ssa.Function]*ssa.Function{},
 		sizes:       types.SizesFor("gc", build.Default.GOARCH),
@@ -118,6 +122,7 @@ func run(res *load.Result, liveGlobals map[*ssa.Global]bool) (*emitter, error) {
 // function: a bug in the emitter should report where it was, not panic.
 func (e *emitter) emitFunction(fn *ssa.Function) {
 	e.current = fn
+	e.emitted = append(e.emitted, fn)
 	defer func() {
 		if r := recover(); r != nil {
 			e.errorf(fn.Pos(), "internal error compiling %s: %v", fn, r)
@@ -133,6 +138,10 @@ type emitter struct {
 	// this run, the globals read outside package initializers.
 	liveGlobals map[*ssa.Global]bool
 	readGlobals map[*ssa.Global]bool
+	// emitted lists every function this run emitted, and needsFrame the
+	// functions the previous run says must link a frame (recover.go).
+	emitted    []*ssa.Function
+	needsFrame map[*ssa.Function]bool
 	// inits are the package initializers this run emitted.
 	inits []*ssa.Function
 	// current is the function being emitted, and calledFrom remembers which

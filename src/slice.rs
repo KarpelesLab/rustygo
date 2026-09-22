@@ -130,7 +130,7 @@ impl<P: Place + Trace> Slice<P> {
 
     /// `make([]T, len, cap)`. A safe point: it allocates.
     pub fn make(len: i64, cap: i64) -> Slice<P> {
-        let (len, cap) = ops::make_bounds(len, cap);
+        let (len, cap) = ops::make_bounds(len, cap, size_of::<P>());
         Slice {
             ptr: heap::allocate_array::<P>(cap).as_ptr(),
             len,

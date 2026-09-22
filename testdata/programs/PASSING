@@ -42,3 +42,5 @@ reflectbasics
 fmtbasics
 stdlib2
 procexit
+recoverrules
+runtimeerrors

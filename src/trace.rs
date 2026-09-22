@@ -33,6 +33,12 @@ pub fn trace_fn<T: Trace>() -> TraceFn {
 /// object's payload.
 pub fn trace_array_fn<T: Trace>() -> TraceFn {
     |p, bytes, t| {
+        // A zero-sized element holds no references, and there is no count of
+        // them to compute: `[]struct{}` is a real Go type, and its backing
+        // array is zero bytes however long the slice is.
+        if size_of::<T>() == 0 {
+            return;
+        }
         let n = bytes / size_of::<T>();
         // SAFETY: the object holds `n` initialized, contiguous `T`s: that is
         // how `heap::allocate_array` laid it out.

@@ -119,46 +119,162 @@ fn runtime_error_value(msg: &str) -> Iface {
     }
 }
 
-// The panic currently being handled on this goroutine, between the unwind
-// and either `recover` or the resume.
+// The panics being handled on this goroutine, outermost first. A panic
+// raised while another is being handled does not replace it: Go lets the
+// inner one be recovered and then carries on with the outer, so each frame
+// that catches an unwind adds its own and takes it back off.
 #[cfg(feature = "std")]
 rt_global! {
-    static CURRENT: core::cell::RefCell<Option<GoPanic>> =
-        core::cell::RefCell::new(None);
+    static CURRENT: core::cell::RefCell<alloc::vec::Vec<GoPanic>> =
+        core::cell::RefCell::new(alloc::vec::Vec::new());
 }
 
-/// Takes over a caught panic so the deferred calls can `recover` it.
+/// Traces the values of the panics being handled.
+///
+/// A panic's value is a reference like any other, and between the unwind and
+/// the `recover` the panic stack is the only thing holding it: the frame that
+/// raised it has gone. Deferred calls run in between, and they allocate.
+#[cfg(feature = "std")]
+pub(crate) fn trace_panics(t: &mut crate::trace::Tracer<'_>) {
+    // A collection cannot happen while the stack is borrowed — pushing and
+    // popping a panic allocates nothing on the Go heap — but a torn borrow
+    // would be a crash, so it is asked for rather than assumed.
+    CURRENT.with(|c| {
+        if let Ok(panics) = c.try_borrow() {
+            for p in panics.iter() {
+                crate::trace::Trace::trace(&p.value, t);
+            }
+        }
+    });
+}
+
+#[cfg(not(feature = "std"))]
+pub(crate) fn trace_panics(_: &mut crate::trace::Tracer<'_>) {}
+
+/// Takes over a caught panic so the deferred calls can `recover` it, and
+/// returns the depth to hand back to [`recovered`] and [`resume`].
 ///
 /// A Rust panic that is not a Go panic is a runtime or emitter bug, and
 /// keeps unwinding.
 #[cfg(feature = "std")]
-pub fn begin(payload: alloc::boxed::Box<dyn core::any::Any + Send>) {
+pub fn begin(payload: alloc::boxed::Box<dyn core::any::Any + Send>) -> usize {
     match payload.downcast::<GoPanic>() {
-        Ok(p) => CURRENT.with(|c| *c.borrow_mut() = Some(*p)),
+        Ok(p) => CURRENT.with(|c| {
+            let mut v = c.borrow_mut();
+            v.push(*p);
+            v.len() - 1
+        }),
         Err(other) => std::panic::resume_unwind(other),
     }
 }
 
+// The frame of the `Defers::run` that is invoking a deferred call, and the
+// depth of the panic that call may recover. The frame tells the deferred
+// call apart from anything it goes on to call; the depth says which panic is
+// its own, so a second `recover` in the same call cannot reach the panic of
+// a frame further out.
+#[cfg(feature = "std")]
+rt_global! {
+    static BOUNDARY: core::cell::Cell<(usize, usize)> = core::cell::Cell::new((0, 0));
+}
+
+/// Marks the deferred calls of one frame as running, and restores the
+/// previous mark when dropped — a panic inside a deferred call runs the
+/// deferred calls of frames further out, each with a boundary of its own.
+#[cfg(feature = "std")]
+pub struct Boundary((usize, usize));
+
+#[cfg(feature = "std")]
+impl Boundary {
+    /// The deferred calls of a panicking frame are running. `frame` is the
+    /// address of the scope invoking them — the frame just outside each call —
+    /// and `depth` is the panic they may recover, as [`begin`] returned it.
+    #[inline]
+    pub fn panicking(frame: usize, depth: usize) -> Boundary {
+        Boundary(BOUNDARY.with(|b| b.replace((frame, depth))))
+    }
+
+    /// The deferred calls of a frame that is returning normally are running.
+    ///
+    /// Nothing recovers, unless this frame is itself the call a panicking
+    /// frame deferred: then Go treats a `defer recover()` here as a call from
+    /// this frame, and it recovers that panic. That case is exactly the frame
+    /// just outside this scope having been invoked by the panicking scope, so
+    /// the boundary becomes that frame — which is what a deferred `recover`
+    /// sees as its caller, while anything deeper sees this scope instead.
+    #[inline]
+    pub fn normal(frame: usize) -> Boundary {
+        let (outer, depth) = BOUNDARY.with(|b| b.get());
+        let mut b = (0, 0);
+        if outer != 0 {
+            // SAFETY: `frame` is a linked frame, alive for as long as it is
+            // linked, and so is the frame it was linked onto.
+            let caller = unsafe { crate::gc::parent_of(frame) };
+            if caller.is_some_and(|c| unsafe { crate::gc::parent_of(c) } == Some(outer)) {
+                b = (caller.unwrap_or(0), depth);
+            }
+        }
+        Boundary(BOUNDARY.with(|c| c.replace(b)))
+    }
+}
+
+#[cfg(feature = "std")]
+impl Drop for Boundary {
+    #[inline]
+    fn drop(&mut self) {
+        BOUNDARY.with(|b| b.set(self.0));
+    }
+}
+
 /// `recover()`: the value of the panic being handled, and an end to it.
+///
+/// Go's rule, which programs do depend on: a value comes back only when
+/// `recover` is called *directly* by a function that a defer invoked. The
+/// caller's frame is the one the collector already tracks, so the test is
+/// whether the frame just outside it belongs to the `Defers::run` that is
+/// running the call. Anything that deferred function calls has a frame of
+/// its own in between and recovers nothing; nor does `defer recover()`,
+/// whose `recover` runs with no Go frame of its own at all.
 #[cfg(feature = "std")]
 pub fn recover() -> Iface {
-    CURRENT
-        .with(|c| c.borrow_mut().take())
-        .map_or(Iface::nil(), |p| p.value())
+    let (frame, depth) = BOUNDARY.with(|b| b.get());
+    if frame == 0 || crate::gc::caller_frame() != frame {
+        return Iface::nil();
+    }
+    let p = CURRENT.with(|c| {
+        let mut v = c.borrow_mut();
+        // Only this call's own panic, and only while it is still in flight:
+        // once recovered, `recover` says nil however often it is called.
+        if v.len() == depth + 1 { v.pop() } else { None }
+    });
+    p.map_or(Iface::nil(), |p| p.value())
 }
 
-/// Whether the panic being handled was recovered.
+/// Whether the panic begun at `depth` was recovered.
 #[cfg(feature = "std")]
-pub fn recovered() -> bool {
-    CURRENT.with(|c| c.borrow().is_none())
+pub fn recovered(depth: usize) -> bool {
+    CURRENT.with(|c| c.borrow().len() <= depth)
 }
 
-/// Carries on unwinding with the panic being handled.
+/// Carries on unwinding with the panic begun at `depth`.
 #[cfg(feature = "std")]
-pub fn resume() -> ! {
-    match CURRENT.with(|c| c.borrow_mut().take()) {
+pub fn resume(depth: usize) -> ! {
+    let p = CURRENT.with(|c| {
+        let mut v = c.borrow_mut();
+        if v.len() <= depth {
+            // Recovered: the caller was meant to resume at its recover block
+            // instead. Taking the next panic down would carry on with a
+            // panic belonging to a frame further out.
+            return None;
+        }
+        // Anything above this panic belongs to a frame that has already
+        // unwound past its own handler.
+        v.truncate(depth + 1);
+        v.pop()
+    });
+    match p {
         Some(p) => go_panic(p),
-        None => unreachable!("resume without a panic in flight"),
+        None => unreachable!("resume of a panic that was already recovered"),
     }
 }
 
@@ -325,7 +441,16 @@ pub fn go_panic(p: GoPanic) -> ! {
 /// is how a runtime error is located until Go-level traces arrive (M3).
 #[cold]
 pub fn runtime_error(e: RuntimeError) -> ! {
-    let msg = e.message();
+    runtime_error_msg(e.message())
+}
+
+/// The same, for a runtime error whose message the caller builds: a failed
+/// type assertion, which gc reports as a `*runtime.TypeAssertionError`.
+///
+/// What matters beyond the text is that the value `recover` hands back
+/// satisfies `error` and `runtime.Error`, as every runtime error does.
+#[cold]
+pub fn runtime_error_msg(msg: String) -> ! {
     #[cfg(feature = "std")]
     if std::env::var_os("RUSTYGO_TRACE").is_some_and(|v| v == "1") {
         let trace = std::backtrace::Backtrace::force_capture();

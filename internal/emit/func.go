@@ -28,6 +28,8 @@ type fnEmitter struct {
 	// hasDefers is set when the function defers, which wraps its body and
 	// gives the defer list a root slot.
 	hasDefers bool
+	// frame is set when the function links a shadow-stack frame.
+	frame bool
 	// dead holds a package initializer's instructions that only build
 	// variables nothing reads (deadinit.go); they are not emitted.
 	dead map[ssa.Instruction]bool
@@ -76,7 +78,13 @@ func (e *emitter) function(fn *ssa.Function) {
 	if f.hasDefers {
 		f.out.WriteString("    let __defers = Defers::new();\n")
 	}
-	if len(f.roots) > 0 {
+	// A function that can reach a `recover` links a shadow-stack frame even
+	// with nothing to root: the chain of frames is the Go call stack, and
+	// that is what tells `recover` whether its caller is the function a
+	// defer invoked, rather than something that function went on to call
+	// (DESIGN §5, recover.go).
+	f.frame = len(f.roots) > 0 || e.needsFrame[fn]
+	if f.frame {
 		fmt.Fprintf(&f.out, "    let __roots = rustygo::gc::Frame::<%d>::new();\n", len(f.roots))
 		for v, k := range f.rootsInOrder() {
 			if v == deferSlot {
@@ -103,19 +111,21 @@ func (e *emitter) function(fn *ssa.Function) {
 	}
 	f.body()
 	if f.hasDefers {
-		f.out.WriteString("    }));\n    match __r {\n        Ok(v) => { __defers.run(); v }\n        Err(p) => {\n            rustygo::panic::begin(p);\n            __defers.run();\n")
+		f.out.WriteString("    }));\n    match __r {\n        Ok(v) => { __defers.run(); v }\n        Err(p) => {\n            let __d = rustygo::panic::begin(p);\n            __defers.run_panicking(__d);\n")
 		if fn.Recover != nil {
 			// A deferred call recovered: Go resumes at the recover block,
-			// which reads the named results back.
-			f.out.WriteString("            if rustygo::panic::recovered() {\n")
+			// which reads the named results back. Whatever is left of the
+			// defer list runs first, on the normal path, because that is
+			// where the resumed frame would run it.
+			f.out.WriteString("            if rustygo::panic::recovered(__d) {\n                __defers.run();\n")
 			f.recoverPath("                ")
-			f.out.WriteString("            }\n            rustygo::panic::resume()\n")
+			f.out.WriteString("            }\n            rustygo::panic::resume(__d)\n")
 		} else {
-			f.out.WriteString("            rustygo::panic::resume()\n")
+			f.out.WriteString("            rustygo::panic::resume(__d)\n")
 		}
 		f.out.WriteString("        }\n    }\n")
 	}
-	if len(f.roots) > 0 {
+	if f.frame {
 		f.out.WriteString("    })\n")
 	}
 	f.out.WriteString("}\n")

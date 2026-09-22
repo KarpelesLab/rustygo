@@ -195,7 +195,24 @@ runtime's accessor API has to be sound for *any* code the emitter produces, so:
   payload from inside a deferred call. Requires `panic = "unwind"`.
 * Runtime panics (nil dereference, index out of range, divide by zero, failed
   type assertion, closed-channel send) map to the same payload with Go's
-  messages, because programs match on them.
+  messages, because programs match on them. The payload also carries the
+  value `recover` returns, which for these is gc's: an `error` that is also a
+  `runtime.Error`.
+* **`recover`'s rule, exactly** (Go's own tests call this territory "here be
+  dragons", and they are part of rustygo's measured set). A value comes back
+  only when `recover` is called *directly* by a function that a defer
+  invoked, and only for that frame's own panic. Panics nest — one raised
+  while another is being handled — so the runtime keeps a stack of them, not
+  one. The frames the collector already tracks answer "directly": the chain
+  of linked frames is the Go call stack, so a deferred call's frame sits on
+  the one the defer machinery linked, while anything it calls has a frame of
+  its own in between. To keep the chain complete, a function that can reach a
+  `recover` through any number of calls links a frame even with nothing to
+  root; a program with no `recover` anywhere links no extra frames and pays
+  nothing (`internal/emit/recover.go`). When a deferred call does recover,
+  the frame resumes and runs the rest of its defer list on its normal path,
+  which is what makes `defer recover()` recover in one order and do nothing
+  in the other.
 * `goto` and labeled `break`/`continue` come out of `go/ssa` as ordinary CFG
   edges and are reconstructed by the structuring pass (§1).
 
