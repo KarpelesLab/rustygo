@@ -235,10 +235,15 @@ impl Context {
     }
 }
 
+// Only where a switch exists: a platform without one reports that and ends
+// the process, which is not something a test can call.
 #[cfg(all(
     test,
     feature = "std",
-    any(target_arch = "x86_64", target_arch = "aarch64")
+    any(
+        all(target_arch = "x86_64", not(windows)),
+        all(target_arch = "aarch64", not(windows))
+    )
 ))]
 mod tests {
     use super::*;
