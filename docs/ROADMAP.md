@@ -352,13 +352,16 @@ work fails too, decision gate 1 says stop.
   and reads and writes over a socket, with the goroutines parked on the
   descriptors by the netpoller (`testdata/programs/netdial`). Timers work
   too, `time.After` and `Ticker` among them.
-* `net/http` gets through the compiler — every function it reaches has a
-  body — and then `rustc` is killed compiling the result: 855,000 lines of
-  Rust in one crate. Twice, in fact: once at `opt-level=3`, and again at
-  `opt-level=1` with 256 codegen units, which ran 45 minutes and passed
-  6.5 GB before the kernel took it. Splitting the standard library into its
-  own crates, listed above as build caching, is what unblocks it, and
-  lowering the optimization level is not a way around it.
+* **`net/http` builds and serves a request.** It compiles in two and a half
+  minutes across 26 crates, a listener accepts, the request is parsed, and the
+  handler runs and writes its response. What does not yet finish is the
+  delivery of that response to the client: the connection is still waiting
+  when the program is killed. That is the next thread to pull.
+* Getting there took the crate split (above), constant tables as static data,
+  read and write deadlines in the netpoller, and `sync.Cond`, which was a
+  stub that reported deadlock — `net/http` aborts a read in progress by
+  giving it a deadline in the past and waiting on a Cond for the reader to
+  notice, so neither piece was optional.
 * The pieces `net` needed on the way: weak pointers (held strongly, so
   nothing interned is ever collected), `unique` reimplemented over an
   ordinary map because gc's reads its own type descriptors, the FIPS 140

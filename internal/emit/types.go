@@ -19,7 +19,10 @@ import (
 type typeReg struct {
 	structs typeutil.Map // *types.Struct -> *structInfo
 	ns      namespace
-	buf     bytes.Buffer
+	// One buffer of type definitions per band, each becoming that crate's
+	// `ty` module (bands.go).
+	bufs  map[int]*bytes.Buffer
+	bands *bands
 	// expanding holds the named types currently being expanded, to catch a
 	// type that contains itself without a struct to break the cycle.
 	expanding map[*types.Named]bool
@@ -28,6 +31,17 @@ type typeReg struct {
 type structInfo struct {
 	name   string   // value struct; the place struct is name + "_P"
 	fields []string // Rust field names, by index
+	band   int      // the crate it is emitted into
+}
+
+// path is how this struct is named from anywhere in the program.
+func (si *structInfo) path() string {
+	return crateName(si.band) + "::ty::" + si.name
+}
+
+// placePath names the addressable form of the same struct.
+func (si *structInfo) placePath() string {
+	return si.path() + "_P"
 }
 
 func newTypeReg() *typeReg {
@@ -38,7 +52,12 @@ func newTypeReg() *typeReg {
 	for _, name := range preludeNames {
 		ns[name] = true
 	}
-	return &typeReg{ns: ns, expanding: map[*types.Named]bool{}}
+	return &typeReg{
+		ns:        ns,
+		expanding: map[*types.Named]bool{},
+		bufs:      map[int]*bytes.Buffer{},
+		bands:     newBands(),
+	}
 }
 
 // preludeNames are the items `rustygo::prelude` brings into every generated
@@ -64,7 +83,7 @@ func (r *typeReg) rust(t types.Type, e *emitter, pos token.Pos) string {
 		}
 	case *types.Named:
 		if st, ok := t.Underlying().(*types.Struct); ok {
-			return "crate::ty::" + r.structInfo(st, t.Obj().Name(), e, pos).name
+			return r.structInfo(st, t.Obj().Name(), e, pos).path()
 		}
 		// A named type that is not a struct has no Rust type of its own, so
 		// one containing itself (`type T *T`, `type L []L`) would expand
@@ -78,7 +97,7 @@ func (r *typeReg) rust(t types.Type, e *emitter, pos token.Pos) string {
 		defer delete(r.expanding, t)
 		return r.rust(t.Underlying(), e, pos)
 	case *types.Struct:
-		return "crate::ty::" + r.structInfo(t, "", e, pos).name
+		return r.structInfo(t, "", e, pos).path()
 	case *types.Pointer:
 		return "Ptr<" + r.place(t.Elem(), e, pos) + ">"
 	case *types.Array:
@@ -112,7 +131,7 @@ func (r *typeReg) place(t types.Type, e *emitter, pos token.Pos) string {
 		if n, ok := types.Unalias(t).(*types.Named); ok {
 			hint = n.Obj().Name()
 		}
-		return "crate::ty::" + r.structInfo(u, hint, e, pos).name + "_P"
+		return r.structInfo(u, hint, e, pos).placePath()
 	case *types.Array:
 		return fmt.Sprintf("[%s; %d]", r.place(u.Elem(), e, pos), u.Len())
 	}
@@ -147,6 +166,16 @@ func (r *typeReg) field(t types.Type, i int, e *emitter, pos token.Pos) string {
 	return r.structInfo(st, "", e, pos).fields[i]
 }
 
+// at returns the buffer of type definitions for one band's crate.
+func (r *typeReg) at(band int) *bytes.Buffer {
+	if b, ok := r.bufs[band]; ok {
+		return b
+	}
+	b := &bytes.Buffer{}
+	r.bufs[band] = b
+	return b
+}
+
 func (r *typeReg) structInfo(st *types.Struct, hint string, e *emitter, pos token.Pos) *structInfo {
 	if si, ok := r.structs.At(st).(*structInfo); ok {
 		return si
@@ -155,7 +184,12 @@ func (r *typeReg) structInfo(st *types.Struct, hint string, e *emitter, pos toke
 	if hint != "" {
 		base = mangle(hint)
 	}
-	si := &structInfo{name: r.ns.claim(strings.TrimPrefix(base, "r#"))}
+	// The struct goes as deep as the deepest package its fields come from,
+	// so that everything it mentions is already compiled below it.
+	si := &structInfo{
+		name: r.ns.claim(strings.TrimPrefix(base, "r#")),
+		band: r.bands.typ(st),
+	}
 	// Register before emitting fields: a field may point back to this type.
 	r.structs.Set(st, si)
 	fieldNS := namespace{}
@@ -222,7 +256,7 @@ impl PartialEq for %s {
 `, si.name, eq.String())
 		}
 	}
-	fmt.Fprintf(&r.buf, `
+	fmt.Fprintf(r.at(si.band), `
 // Go: %s
 %s
 pub struct %s {

@@ -104,7 +104,10 @@ func (e *emitter) typeDesc(t types.Type, pos token.Pos) string {
 	}
 	key := types.TypeString(t, qualifiedPath)
 	name := e.types.ns.claim("TD_" + mangle(strings.NewReplacer("*", "ptr_", ".", "_", "/", "_").Replace(key)))
-	path := "crate::ty::" + name
+	// A descriptor sits with its type, so that the method wrappers and the
+	// element descriptors it points at are already compiled below it.
+	band := e.bands.typ(t)
+	path := crateName(band) + "::ty::" + name
 	e.descs.Set(t, path)
 
 	place := e.types.place(t, e, pos)
@@ -133,7 +136,7 @@ func (e *emitter) typeDesc(t types.Type, pos token.Pos) string {
 		fmt.Fprintf(&b, "    fields: &[%s],\n", e.fieldDescs(t, u, pos))
 	}
 	b.WriteString("    ..TypeDesc::DEFAULT\n};\n")
-	e.types.buf.WriteString(b.String())
+	e.types.at(band).WriteString(b.String())
 	return path
 }
 
@@ -226,13 +229,14 @@ func (e *emitter) mapOps(mt *types.Map, pos token.Pos) string {
 	if e.wrappers == nil {
 		e.wrappers = map[string]string{}
 	}
-	e.wrappers[key] = "crate::ty::" + name
+	band := e.bands.typ(mt)
+	e.wrappers[key] = crateName(band) + "::ty::" + name
 
 	kPlace, vPlace := e.types.place(mt.Key(), e, pos), e.types.place(mt.Elem(), e, pos)
 	kRust, vRust := e.types.rust(mt.Key(), e, pos), e.types.rust(mt.Elem(), e, pos)
 	mapType := fmt.Sprintf("GoMap<%s, %s>", kRust, vRust)
 	iterType := fmt.Sprintf("MapIter<%s, %s>", kRust, vRust)
-	fmt.Fprintf(&e.types.buf, `
+	fmt.Fprintf(e.types.at(band), `
 pub static %s: MapOps = MapOps {
     len: |d| d.cast::<Slot<%s>>().load().len(),
     iter: |d| Data::of(Ptr::<Slot<%s>>::alloc(d.cast::<Slot<%s>>().load().iter())),
@@ -276,7 +280,7 @@ pub static %s: MapOps = MapOps {
     },
 };
 `, name, mapType, iterType, mapType, iterType, kPlace, vPlace, mapType, kPlace, vPlace, mapType, mapType)
-	return "crate::ty::" + name
+	return crateName(band) + "::ty::" + name
 }
 
 // methodTable renders t's method set as (id, wrapper) pairs sorted by id.
@@ -329,7 +333,9 @@ func (e *emitter) methodWrapper(recvType types.Type, sel *types.Selection, pos t
 		m = e.module(nil)
 	}
 	name := m.ns.claim(mangle(goName(recvType) + "$" + sel.Obj().Name() + "$iface"))
-	path := "crate::" + m.name + "::" + name
+	// The wrapper sits with the type whose method it calls.
+	band := e.bands.typ(recvType)
+	path := crateName(band) + "::" + m.name + "::" + name
 	e.wrappers[key] = path
 
 	sig := sel.Obj().Type().(*types.Signature)
@@ -348,7 +354,7 @@ func (e *emitter) methodWrapper(recvType types.Type, sel *types.Selection, pos t
 	default:
 		ret = " -> " + e.types.rust(res, e, pos)
 	}
-	fmt.Fprintf(&m.buf, "\n// %s, called through an interface\npub fn %s(%s)%s {\n    %s(%s)\n}\n",
+	fmt.Fprintf(m.at(band), "\n// %s, called through an interface\npub fn %s(%s)%s {\n    %s(%s)\n}\n",
 		key, name, strings.Join(params, ", "), ret, e.fnPath(fn), strings.Join(args, ", "))
 	return path
 }

@@ -54,14 +54,17 @@ type Options struct {
 // variables anything outside initialization reads, so the second can skip
 // building the rest (deadinit.go).
 func Crate(res *load.Result, opt Options) error {
-	first, err := run(res, nil, nil)
+	first, err := run(res, nil, nil, nil)
 	if err != nil {
 		return err
 	}
+	// What calls what decides which crate each function is emitted into
+	// (bands.go), and only a whole pass knows.
+	first.bands.settle()
 	live := liveInitGlobals(first.inits, first.readGlobals)
 	// The first pass also collects the program's functions, which is what
 	// says who must link a shadow-stack frame for `recover` (recover.go).
-	e, err := run(res, live, framesForRecover(first.emitted))
+	e, err := run(res, live, framesForRecover(first.emitted), first.bands)
 	if err != nil {
 		return err
 	}
@@ -71,7 +74,7 @@ func Crate(res *load.Result, opt Options) error {
 // run emits the whole program into memory. liveGlobals, when set, lets
 // package initializers skip variables nothing else reads; needsFrame, when
 // set, names the functions that link a frame whatever their roots.
-func run(res *load.Result, liveGlobals map[*ssa.Global]bool, needsFrame map[*ssa.Function]bool) (*emitter, error) {
+func run(res *load.Result, liveGlobals map[*ssa.Global]bool, needsFrame map[*ssa.Function]bool, placed *bands) (*emitter, error) {
 	var mainPkg *ssa.Package
 	for _, p := range res.Pkgs {
 		if p != nil && p.Pkg.Name() == "main" {
@@ -94,6 +97,7 @@ func run(res *load.Result, liveGlobals map[*ssa.Global]bool, needsFrame map[*ssa
 		globals: map[*ssa.Global]string{},
 		envs:    map[*ssa.Function]*types.Struct{},
 		types:   newTypeReg(),
+		bands:   placed,
 
 		liveGlobals: liveGlobals,
 		needsFrame:  needsFrame,
@@ -101,6 +105,10 @@ func run(res *load.Result, liveGlobals map[*ssa.Global]bool, needsFrame map[*ssa
 		calledFrom:  map[*ssa.Function]*ssa.Function{},
 		sizes:       types.SizesFor("gc", build.Default.GOARCH),
 	}
+	if e.bands == nil {
+		e.bands = newBands()
+	}
+	e.types.bands = e.bands
 	e.initPath = e.fnPath(mainPkg.Func("init"))
 	mainFn := mainPkg.Func("main")
 	if mainFn == nil {
@@ -165,6 +173,7 @@ type emitter struct {
 	// sizes computes gc's layout, which rustygo shares (DESIGN §7).
 	sizes types.Sizes
 
+	bands     *bands
 	methodIDs map[string]uint32
 	descs     typeutil.Map // types.Type -> string, the descriptor's path
 	wrappers  map[string]string
@@ -183,7 +192,23 @@ type diag struct {
 type module struct {
 	name string
 	ns   namespace
-	buf  bytes.Buffer
+	// One buffer per band: a package's functions mostly land in one crate,
+	// but a generic instantiation goes as deep as its type arguments, which
+	// may be deeper than the package that declares it (bands.go).
+	bufs map[int]*bytes.Buffer
+}
+
+// at returns the buffer for this package's part of one band's crate.
+func (m *module) at(band int) *bytes.Buffer {
+	if m.bufs == nil {
+		m.bufs = map[int]*bytes.Buffer{}
+	}
+	if b, ok := m.bufs[band]; ok {
+		return b
+	}
+	b := &bytes.Buffer{}
+	m.bufs[band] = b
+	return b
 }
 
 func (e *emitter) module(pkg *ssa.Package) *module {
@@ -276,6 +301,7 @@ func (e *emitter) namedFunc(key string) *ssa.Function {
 
 func (e *emitter) fnPath(fn *ssa.Function) string {
 	if p, ok := e.fnPaths[fn]; ok {
+		e.bands.called(e.current, fn)
 		return p
 	}
 	pkg := fn.Pkg
@@ -287,8 +313,9 @@ func (e *emitter) fnPath(fn *ssa.Function) string {
 	if recv := fn.Signature.Recv(); recv != nil {
 		base = types.TypeString(recv.Type(), func(*types.Package) string { return "" }) + "$" + base
 	}
-	p := "crate::" + m.name + "::" + m.ns.claim(mangle(base))
+	p := crateName(e.bands.fn(fn)) + "::" + m.name + "::" + m.ns.claim(mangle(base))
 	e.fnPaths[fn] = p
+	e.bands.called(e.current, fn)
 	e.calledFrom[fn] = e.current
 	e.queue = append(e.queue, fn)
 	return p
@@ -323,6 +350,7 @@ func (e *emitter) shimPath(fn *ssa.Function) string {
 	}
 	target := e.fnPath(fn) // also queues fn for emission
 	m := e.module(fn.Pkg)
+	band := e.bands.fn(fn)
 	name := m.ns.claim(mangle(fn.Name() + "$funcval"))
 	sig := fn.Signature
 	params := []string{"_: Env"}
@@ -339,9 +367,9 @@ func (e *emitter) shimPath(fn *ssa.Function) string {
 	default:
 		ret = " -> " + e.types.rust(res, e, fn.Pos())
 	}
-	fmt.Fprintf(&m.buf, "\n// %s as a func value\npub fn %s(%s)%s {\n    %s(%s)\n}\n",
+	fmt.Fprintf(m.at(band), "\n// %s as a func value\npub fn %s(%s)%s {\n    %s(%s)\n}\n",
 		fn.String(), name, strings.Join(params, ", "), ret, target, strings.Join(args, ", "))
-	p := "crate::" + m.name + "::" + name
+	p := crateName(band) + "::" + m.name + "::" + name
 	e.shims[fn] = p
 	return p
 }
@@ -374,6 +402,10 @@ func (e *emitter) deferThunk(pos token.Pos, in *ssa.Function, argTypes []types.T
 	info := e.types.structInfo(st, in.Name()+"$deferred", e, pos)
 
 	m := e.module(in.Pkg)
+	band := e.bands.fn(in)
+	if info.band > band {
+		band = info.band
+	}
 	name := m.ns.claim(mangle(in.Name() + "$defer"))
 	var args []string
 	for i, f := range info.fields[:len(argTypes)] {
@@ -392,9 +424,9 @@ func (e *emitter) deferThunk(pos token.Pos, in *ssa.Function, argTypes []types.T
 		rest := append([]string{"__f.env()"}, args[1:]...)
 		call = fmt.Sprintf("let __f = %s; (__f.code())(%s)", fv, strings.Join(rest, ", "))
 	}
-	fmt.Fprintf(&m.buf, "\n// deferred call in %s\npub fn %s(__env: Env) {\n    let __e = __env.cast::<crate::ty::%s_P>();\n    %s;\n}\n",
-		in.String(), name, info.name, call)
-	return "crate::" + m.name + "::" + name, info
+	fmt.Fprintf(m.at(band), "\n// deferred call in %s\npub fn %s(__env: Env) {\n    let __e = __env.cast::<%s>();\n    %s;\n}\n",
+		in.String(), name, info.placePath(), call)
+	return crateName(band) + "::" + m.name + "::" + name, info
 }
 
 // globalPath returns the Rust path of the accessor for g, which yields a
@@ -405,7 +437,13 @@ func (e *emitter) globalPath(g *ssa.Global) string {
 	}
 	m := e.module(g.Pkg)
 	name := m.ns.claim(mangle(g.Name()))
-	p := "crate::" + m.name + "::" + name
+	band := e.bands.typ(g.Type())
+	if g.Pkg != nil {
+		if d := e.bands.pkg(g.Pkg.Pkg); d > band {
+			band = d
+		}
+	}
+	p := crateName(band) + "::" + m.name + "::" + name
 	e.globals[g] = p
 	place := e.types.place(g.Type().(*types.Pointer).Elem(), e, g.Pos())
 	// Globals live in thread-local statics: M0 is single-threaded, and a
@@ -413,8 +451,8 @@ func (e *emitter) globalPath(g *ssa.Global) string {
 	cell := "G_" + strings.TrimPrefix(name, "r#")
 	// The place itself lives forever, outside the heap; registering it makes
 	// its contents roots (DESIGN §3).
-	fmt.Fprintf(&m.buf, "\nthread_local! {\n    static %s: Ptr<%s> = {\n        let p: &'static %s = Box::leak(Box::new(<%s as Place>::new(GoValue::zero())));\n        rustygo::heap::register_global(p);\n        Ptr::to_global(p)\n    };\n}\n", cell, place, place, place)
-	fmt.Fprintf(&m.buf, "pub fn %s() -> Ptr<%s> {\n    %s.with(|g| *g)\n}\n", name, place, cell)
+	fmt.Fprintf(m.at(band), "\nthread_local! {\n    static %s: Ptr<%s> = {\n        let p: &'static %s = Box::leak(Box::new(<%s as Place>::new(GoValue::zero())));\n        rustygo::heap::register_global(p);\n        Ptr::to_global(p)\n    };\n}\n", cell, place, place, place)
+	fmt.Fprintf(m.at(band), "pub fn %s() -> Ptr<%s> {\n    %s.with(|g| *g)\n}\n", name, place, cell)
 	return p
 }
 
@@ -431,7 +469,104 @@ func (e *emitter) write(opt Options, initPath, mainPath string) error {
 	if opt.GcTorture {
 		features = `, features = ["gc-torture"]`
 	}
-	cargo := fmt.Sprintf(`# Generated by rustygo. Do not edit.
+	files := map[string][]byte{}
+
+	// Teach the runtime the ids of Error(), String() and RuntimeError(), so a
+	// recovered runtime error satisfies `error` and `runtime.Error` the way
+	// gc's does.
+	strSig := types.NewSignatureType(nil, nil, nil, types.NewTuple(), types.NewTuple(types.NewVar(token.NoPos, nil, "", types.Typ[types.String])), false)
+	errorID := e.methodID(types.NewFunc(token.NoPos, nil, "Error", strSig))
+	stringID := e.methodID(types.NewFunc(token.NoPos, nil, "String", strSig))
+	markSig := types.NewSignatureType(nil, nil, nil, types.NewTuple(), types.NewTuple(), false)
+	runtimeErrorID := e.methodID(types.NewFunc(token.NoPos, nil, "RuntimeError", markSig))
+
+	mods := append([]*module(nil), e.modList...)
+	sort.Slice(mods, func(i, j int) bool { return mods[i].name < mods[j].name })
+
+	// One crate per band, each depending on the ones below it (bands.go).
+	// Splitting is what lets `rustc` compile a program that reaches deep into
+	// the standard library at all, and what lets the lower crates be reused.
+	var members []string
+	for band := 0; band <= e.bands.deepest; band++ {
+		name := crateName(band)
+		dir := filepath.Join(opt.OutDir, name)
+		var lib bytes.Buffer
+		fmt.Fprintf(&lib, "// Generated by rustygo. Do not edit.\n#![allow(warnings, clippy::all)]\n\n// Items name the crate they live in, this one included.\nextern crate self as %s;\n", name)
+		wrote := false
+		if ty := e.types.bufs[band]; ty != nil && ty.Len() > 0 {
+			lib.WriteString("\npub mod ty;\n")
+			files[filepath.Join(dir, "src", "ty.rs")] = []byte(generatedHeader + ty.String())
+			wrote = true
+		}
+		for _, m := range mods {
+			body := m.bufs[band]
+			if body == nil || body.Len() == 0 {
+				continue
+			}
+			fmt.Fprintf(&lib, "pub mod %s;\n", m.name)
+			files[filepath.Join(dir, "src", strings.TrimPrefix(m.name, "r#")+".rs")] = []byte(generatedHeader + body.String())
+			wrote = true
+		}
+		if !wrote {
+			// A band with nothing in it: no crate, and nothing depends on it.
+			continue
+		}
+		members = append(members, name)
+		files[filepath.Join(dir, "src", "lib.rs")] = lib.Bytes()
+		files[filepath.Join(dir, "Cargo.toml")] = []byte(bandCargo(name, members[:len(members)-1], opt, features))
+	}
+
+	// The binary: the entry point, and nothing else.
+	var mainRS bytes.Buffer
+	fmt.Fprintf(&mainRS, "%s\nfn main() {\n    rustygo::panic::init_runtime_errors(%d, %d, %d);\n    rustygo::rt::run_main(%s, %s)\n}\n",
+		"// Generated by rustygo. Do not edit.\n#![allow(warnings, clippy::all)]\n",
+		errorID, stringID, runtimeErrorID, initPath, mainPath)
+	files[filepath.Join(src, "main.rs")] = mainRS.Bytes()
+	files[filepath.Join(opt.OutDir, "Cargo.toml")] = []byte(mainCargo(bin, members, opt, features))
+
+	for name, data := range files {
+		if err := os.MkdirAll(filepath.Dir(name), 0o755); err != nil {
+			return err
+		}
+		if err := os.WriteFile(name, data, 0o644); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+// generatedHeader starts every generated Rust file.
+const generatedHeader = "// Generated by rustygo. Do not edit.\nuse rustygo::prelude::*;\n"
+
+// bandCargo is the manifest of one band's crate: the runtime, and the bands
+// below it.
+func bandCargo(name string, below []string, opt Options, features string) string {
+	var b strings.Builder
+	fmt.Fprintf(&b, `# Generated by rustygo. Do not edit.
+[package]
+name = %q
+version = "0.0.0"
+edition = "2024"
+publish = false
+
+[lib]
+path = "src/lib.rs"
+
+[dependencies]
+rustygo = { path = %q%s }
+`, name, filepath.ToSlash(opt.RuntimePath), features)
+	for _, dep := range below {
+		fmt.Fprintf(&b, "%s = { path = %q }\n", dep, "../"+dep)
+	}
+	return b.String()
+}
+
+// mainCargo is the manifest of the program itself, which is also the
+// workspace every band crate belongs to: one target directory, one lock file,
+// and one `cargo build`.
+func mainCargo(bin string, members []string, opt Options, features string) string {
+	var b strings.Builder
+	fmt.Fprintf(&b, `# Generated by rustygo. Do not edit.
 [package]
 name = "rustygo-out"
 version = "0.0.0"
@@ -444,42 +579,17 @@ path = "src/main.rs"
 
 [dependencies]
 rustygo = { path = %q%s }
-
-[profile.release]
-debug = "line-tables-only"
-
-# Standalone: never part of an enclosing workspace.
-[workspace]
 `, bin, filepath.ToSlash(opt.RuntimePath), features)
-	files := map[string][]byte{
-		filepath.Join(opt.OutDir, "Cargo.toml"): []byte(cargo),
+	for _, dep := range members {
+		fmt.Fprintf(&b, "%s = { path = %q }\n", dep, "./"+dep)
 	}
-
-	var mainRS bytes.Buffer
-	mainRS.WriteString("// Generated by rustygo. Do not edit.\n#![allow(warnings, clippy::all)]\n\nmod ty;\n")
-	mods := append([]*module(nil), e.modList...)
-	sort.Slice(mods, func(i, j int) bool { return mods[i].name < mods[j].name })
-	for _, m := range mods {
-		fmt.Fprintf(&mainRS, "mod %s;\n", m.name)
-		body := "// Generated by rustygo. Do not edit.\nuse rustygo::prelude::*;\n" + m.buf.String()
-		files[filepath.Join(src, strings.TrimPrefix(m.name, "r#")+".rs")] = []byte(body)
-	}
-	// Teach the runtime the ids of Error(), String() and RuntimeError(), so a
-	// recovered runtime error satisfies `error` and `runtime.Error` the way
-	// gc's does.
-	strSig := types.NewSignatureType(nil, nil, nil, types.NewTuple(), types.NewTuple(types.NewVar(token.NoPos, nil, "", types.Typ[types.String])), false)
-	errorID := e.methodID(types.NewFunc(token.NoPos, nil, "Error", strSig))
-	stringID := e.methodID(types.NewFunc(token.NoPos, nil, "String", strSig))
-	markSig := types.NewSignatureType(nil, nil, nil, types.NewTuple(), types.NewTuple(), false)
-	runtimeErrorID := e.methodID(types.NewFunc(token.NoPos, nil, "RuntimeError", markSig))
-	fmt.Fprintf(&mainRS, "\nfn main() {\n    rustygo::panic::init_runtime_errors(%d, %d, %d);\n    rustygo::rt::run_main(%s, %s)\n}\n", errorID, stringID, runtimeErrorID, initPath, mainPath)
-	files[filepath.Join(src, "main.rs")] = mainRS.Bytes()
-	files[filepath.Join(src, "ty.rs")] = []byte("// Generated by rustygo. Do not edit.\nuse rustygo::prelude::*;\n" + e.types.buf.String())
-
-	for name, data := range files {
-		if err := os.WriteFile(name, data, 0o644); err != nil {
-			return err
+	b.WriteString("\n[profile.release]\ndebug = \"line-tables-only\"\n\n# Standalone: never part of an enclosing workspace.\n[workspace]\nmembers = [")
+	for i, m := range members {
+		if i > 0 {
+			b.WriteString(", ")
 		}
+		fmt.Fprintf(&b, "%q", m)
 	}
-	return nil
+	b.WriteString("]\n")
+	return b.String()
 }

@@ -134,6 +134,12 @@ var intrinsics = map[string]func(args []string) string{
 	"runtime.semawake": func(a []string) string {
 		return fmt.Sprintf("rustygo::sched::wake_one(%s as usize)", a[0])
 	},
+	"runtime.semaparkall": func(a []string) string {
+		return fmt.Sprintf("rustygo::sched::park_on(%s as usize)", a[0])
+	},
+	"runtime.semawakeall": func(a []string) string {
+		return fmt.Sprintf("rustygo::sched::wake_all(%s as usize)", a[0])
+	},
 
 	// The netpoller (src/netpoll.rs).
 	"runtime.pollOpen": func(a []string) string {
@@ -147,6 +153,9 @@ var intrinsics = map[string]func(args []string) string{
 	},
 	"runtime.pollWait": func(a []string) string {
 		return fmt.Sprintf("rustygo::netpoll::wait(%s as usize, %s as i32) as i64", a[0], a[1])
+	},
+	"runtime.pollSetDeadline": func(a []string) string {
+		return fmt.Sprintf("rustygo::netpoll::set_deadline(%s as usize, %s, %s as i32)", a[0], a[1], a[2])
 	},
 	"runtime.pollUnblock": func(a []string) string {
 		return fmt.Sprintf("rustygo::netpoll::unblock(%s as usize)", a[0])

@@ -13,6 +13,14 @@ go/packages ──► go/types ──► go/ssa ──► lowering passes ──
   `defer`, `panic`, closures, interfaces and generics resolved into instructions.
   TinyGo takes the same input, which is the strongest available evidence that it
   is enough.
+* **Constant tables become static data.** Go writes its big tables as array
+  literals — `unicode/norm` has one of 19,426 bytes — and go/ssa spells every
+  element out as an address and a store. Emitted literally, that package's
+  initializer is one Rust function of 72,613 lines, which `rustc` compiles in
+  31 GB. A run of constant stores into a fresh array is recognized and emitted
+  as a `static` instead (`internal/emit/tables.go`), which is what gc does
+  with the same input: 206 of them in an HTTP server, and a third less Rust
+  overall.
 * **Not the gc compiler's SSA.** By that point structured control flow is gone,
   and Rust has no `goto`. `go/ssa` keeps blocks and phis, and the emitter
   rebuilds them into labeled blocks and loops (`break 'b`, `continue 'l`),
@@ -20,7 +28,14 @@ go/packages ──► go/types ──► go/ssa ──► lowering passes ──
   a loop body) fall back to a loop around a `match` on the block index. M0
   measured why structuring is mandatory: LLVM compiles that fallback to an
   indirect jump per basic block, which cost 6× on a field-update loop.
-* **Unit of output:** one Rust module per Go package, one crate per build. Go
+* **Unit of output:** one Rust module per Go package, and **one crate per band**
+  — a band being how deep a package sits in the import graph, so that two
+  packages in the same band never import each other and a crate's
+  dependencies only ever point downwards (`internal/emit/bands.go`). Splitting
+  is not tidiness: a program reaching `net/http` emits hundreds of thousands
+  of lines of Rust, and `rustc` needs tens of gigabytes for one crate that
+  size. It is also what lets the lower crates, which are the standard
+  library, be compiled once and reused. Go
   import cycles are impossible, so module ordering is a topological sort. The
   exception is the standard library: from M3 on it is its own crate (or
   crates), built once per Go version and target and cached. Recompiling `fmt`
@@ -226,10 +241,24 @@ keeps a program whose only remaining goroutine is the timer loop from
 counting as busy. What a timer does when it fires is Go's own code: the time
 package hands the runtime a function and an argument, and firing calls it.
 
+Deadlines are real: a descriptor carries a moment for reads and one for
+writes, a wait that starts after one has passed fails at once, and the
+scheduler's next sleep is bounded by the earliest of them. `net/http` cannot
+work without this — it aborts a read already in progress by giving it a
+deadline in the past and waiting for the reader to come back.
+
+A descriptor is in the poller only while a goroutine waits on it. Errors and
+hangups are reported for a registered descriptor whatever its interest mask
+says, so one that nobody waits on is taken out entirely; leaving it in means a
+hung-up socket is reported for ever and the scheduler spins.
+
+`RUSTYGO_TRACE=sched` reports what the scheduler and the poller are doing —
+which descriptors were opened, who waited and what woke them, each deadline,
+and every time nothing was runnable. It is how a program that stops making
+progress is diagnosed at all, until goroutine stacks can be printed.
+
 Still to come in M2: the M:N scheduler over threads with work stealing and
-preemption, `runtime.Goexit`, `testing/synctest`, and read and write
-deadlines on a descriptor (`SetDeadline` is accepted and ignored, so a read
-that would have timed out waits instead).
+preemption, `runtime.Goexit`, and `testing/synctest`.
 * **Netpoller:** `epoll`/`kqueue`/IOCP (or Rust `std` blocking threads on
   constrained targets) driving the same parking primitives as channels.
 

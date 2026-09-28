@@ -1,5 +1,7 @@
 package emit
 
+import "fmt"
+
 // fallbacks redirect a function gc writes in assembly to the generic Go
 // version its own package already carries, keyed by "importpath.Name"
 // (DESIGN §8).
@@ -60,4 +62,11 @@ var unreachableAssembly = []string{
 	"hash/crc32.castagnoliSSE42",
 	"hash/crc32.castagnoliSSE42Triple",
 	"hash/crc32.ieeeCLMUL",
+}
+
+// crateName is what a band's crate is called. Every generated path names the
+// crate its item lives in, and `extern crate self as …` at the top of each
+// crate is what makes a crate's own name work inside it (bands.go).
+func crateName(band int) string {
+	return fmt.Sprintf("go_b%d", band)
 }

@@ -34,6 +34,9 @@ type fnEmitter struct {
 	// dead holds a package initializer's instructions that only build
 	// variables nothing reads (deadinit.go); they are not emitted.
 	dead map[ssa.Instruction]bool
+	// tables maps an allocation to the static holding its constant elements,
+	// and the stores that static replaces (tables.go).
+	tables map[*ssa.Alloc]string
 }
 
 func (e *emitter) function(fn *ssa.Function) {
@@ -48,6 +51,14 @@ func (e *emitter) function(fn *ssa.Function) {
 	if fn.Blocks == nil {
 		e.bodyless(fn, name, m)
 		return
+	}
+	// A body gc never runs, because it turns the function into machine
+	// instructions instead (overrides.go).
+	if fn.Pkg != nil {
+		if over, ok := overrides[fn.Pkg.Pkg.Path()+"."+fn.Name()]; ok {
+			e.overridden(fn, name, m, f, over)
+			return
+		}
 	}
 
 	params := make([]string, 0, len(fn.Params)+1)
@@ -68,6 +79,20 @@ func (e *emitter) function(fn *ssa.Function) {
 		e.inits = append(e.inits, fn)
 		if e.liveGlobals != nil {
 			f.dead = deadInit(fn, e.liveGlobals)
+		}
+	}
+	// A run of constant stores into a fresh array becomes one static, which
+	// is what keeps a table of twenty thousand entries from becoming twenty
+	// thousand lines of Rust (tables.go).
+	var fromTables map[ssa.Instruction]bool
+	f.tables, fromTables = f.findTables()
+	if len(fromTables) > 0 {
+		if f.dead == nil {
+			f.dead = fromTables
+		} else {
+			for instr := range fromTables {
+				f.dead[instr] = true
+			}
 		}
 	}
 	f.collectRoots()
@@ -130,7 +155,7 @@ func (e *emitter) function(fn *ssa.Function) {
 		f.out.WriteString("    })\n")
 	}
 	f.out.WriteString("}\n")
-	m.buf.WriteString(f.out.String())
+	m.at(e.bands.fn(fn)).WriteString(f.out.String())
 }
 
 // rootSet records v in its shadow-stack slot after v is assigned. Values in
@@ -214,7 +239,7 @@ func (f *fnEmitter) place(t types.Type, pos token.Pos) string {
 // envPlace is the Rust place type of this function's captured environment.
 func (f *fnEmitter) envPlace() string {
 	st := f.e.envStruct(f.fn)
-	return "crate::ty::" + f.e.types.structInfo(st, f.fn.Name()+"$env", f.e, f.fn.Pos()).name + "_P"
+	return f.e.types.structInfo(st, f.fn.Name()+"$env", f.e, f.fn.Pos()).placePath()
 }
 
 // pos falls back to the function's position when an instruction has none.
@@ -518,8 +543,8 @@ func (f *fnEmitter) callThunk(c *ssa.CallCommon, pos token.Pos, what string) (st
 	for i, s := range stored {
 		fields[i] = fmt.Sprintf("%s: %s", info.fields[i], s)
 	}
-	env := fmt.Sprintf("Env::of(Ptr::<crate::ty::%s_P>::alloc(crate::ty::%s { %s }))",
-		info.name, info.name, strings.Join(fields, ", "))
+	env := fmt.Sprintf("Env::of(Ptr::<%s>::alloc(%s { %s }))",
+		info.placePath(), info.path(), strings.Join(fields, ", "))
 	return thunk, env
 }
 
@@ -527,6 +552,9 @@ func (f *fnEmitter) callThunk(c *ssa.CallCommon, pos token.Pos, what string) (st
 func (f *fnEmitter) expr(v ssa.Value) string {
 	switch v := v.(type) {
 	case *ssa.Alloc:
+		if name, ok := f.tables[v]; ok {
+			return fmt.Sprintf("Ptr::<%s>::alloc(%s)", f.place(v.Type().(*types.Pointer).Elem(), v.Pos()), name)
+		}
 		return fmt.Sprintf("Ptr::<%s>::alloc(GoValue::zero())", f.place(v.Type().(*types.Pointer).Elem(), v.Pos()))
 	case *ssa.BinOp:
 		return f.binop(v)
@@ -631,8 +659,8 @@ func (f *fnEmitter) expr(v ssa.Value) string {
 		for i, b := range v.Bindings {
 			fields[i] = fmt.Sprintf("%s: %s", info.fields[i], f.val(b))
 		}
-		env := fmt.Sprintf("Ptr::<crate::ty::%s_P>::alloc(crate::ty::%s { %s })",
-			info.name, info.name, strings.Join(fields, ", "))
+		env := fmt.Sprintf("Ptr::<%s>::alloc(%s { %s })",
+			info.placePath(), info.path(), strings.Join(fields, ", "))
 		return fmt.Sprintf("Func::new(%s as %s, Env::of(%s))",
 			f.e.fnPath(fn), f.e.types.fnPtr(fn.Signature, f.e, v.Pos()), env)
 	case *ssa.SliceToArrayPointer:
@@ -1310,7 +1338,7 @@ func (e *emitter) bodyless(fn *ssa.Function, name string, m *module) {
 		e.errorf(fn.Pos(), "%s has no Go body (assembly or linkname) and no rustygo implementation%s", key, e.caller(fn))
 		return
 	}
-	fmt.Fprintf(&m.buf, "\n// Go: %s (no Go body; see go:linkname or intrinsics)\npub fn %s(%s)%s {\n    %s\n}\n",
+	fmt.Fprintf(m.at(e.bands.fn(fn)), "\n// Go: %s (no Go body; see go:linkname or intrinsics)\npub fn %s(%s)%s {\n    %s\n}\n",
 		fn, name, strings.Join(params, ", "), ret, body)
 }
 
@@ -1406,4 +1434,25 @@ func (f *fnEmitter) selectStmt(v *ssa.Select) string {
 	}
 	b.WriteString(")\n    }")
 	return b.String()
+}
+
+// overridden emits a function whose Go body must never run, with the Rust that
+// means what gc's instructions mean (overrides.go).
+func (e *emitter) overridden(fn *ssa.Function, name string, m *module, f *fnEmitter, body func([]string) string) {
+	params := make([]string, 0, len(fn.Params))
+	args := make([]string, 0, len(fn.Params))
+	for i, p := range fn.Params {
+		params = append(params, fmt.Sprintf("a%d: %s", i, f.typ(p.Type(), p.Pos())))
+		args = append(args, fmt.Sprintf("a%d", i))
+	}
+	ret := ""
+	switch res := fn.Signature.Results(); res.Len() {
+	case 0:
+	case 1:
+		ret = " -> " + f.typ(res.At(0).Type(), fn.Pos())
+	default:
+		ret = " -> " + f.typ(res, fn.Pos())
+	}
+	fmt.Fprintf(m.at(e.bands.fn(fn)), "\n// Go: %s (a body gc replaces with instructions)\npub fn %s(%s)%s {\n    %s\n}\n",
+		fn, name, strings.Join(params, ", "), ret, body(args))
 }

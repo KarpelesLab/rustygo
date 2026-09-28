@@ -327,11 +327,17 @@ fn schedule(how: Switch) {
                 Switch::Yield => return,
                 _ => {
                     // Nothing can run, but the program is not necessarily
-                    // stuck: a descriptor may move, or a deadline may pass.
-                    if wake_expired() {
+                    // stuck: a descriptor may move, or a deadline may pass —
+                    // either a goroutine's own, or one set on a socket.
+                    if wake_expired() || crate::netpoll::expire() {
                         continue;
                     }
-                    let deadline = next_deadline();
+                    let mut deadline = next_deadline();
+                    if let Some(poll_at) = crate::netpoll::next_deadline()
+                        && deadline.is_none_or(|d| poll_at < d)
+                    {
+                        deadline = Some(poll_at);
+                    }
                     let watching = crate::netpoll::watching();
                     if !watching && deadline.is_none() {
                         deadlock();
@@ -343,12 +349,19 @@ fn schedule(how: Switch) {
                             .div_ceil(1_000_000)
                             .min(i32::MAX as u64) as i32
                     });
+                    if crate::rt::trace_sched() {
+                        crate::rt::trace(&alloc::format!(
+                            "nothing runnable: watching={watching} timeout={timeout:?} goroutines={}",
+                            count()
+                        ));
+                    }
                     if watching {
                         crate::netpoll::poll(timeout.unwrap_or(-1));
                     } else if let Some(ms) = timeout {
                         crate::rt::nanosleep(ms as i64 * 1_000_000);
                     }
                     wake_expired();
+                    crate::netpoll::expire();
                 }
             },
         }

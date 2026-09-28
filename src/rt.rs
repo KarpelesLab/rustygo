@@ -11,6 +11,13 @@ pub fn fatal(msg: &[u8]) -> ! {
     let _ = err.write_all(b"fatal error: ");
     let _ = err.write_all(msg);
     let _ = err.write_all(b"\n");
+    // gc prints every goroutine's stack here. rustygo cannot yet render a Go
+    // stack, but the Rust one says which runtime path gave up, which is what
+    // a deadlock or a failed self-test needs to be diagnosed at all.
+    if std::env::var_os("RUSTYGO_TRACE").is_some_and(|v| v == "1") {
+        let trace = std::backtrace::Backtrace::force_capture();
+        let _ = err.write_all(alloc::format!("{trace}\n").as_bytes());
+    }
     std::process::exit(2)
 }
 
@@ -169,4 +176,25 @@ pub fn walltime() -> (i64, i32) {
 pub fn exit(code: i32) -> ! {
     crate::stack::leak_all();
     std::process::exit(code)
+}
+
+/// Whether the runtime should report what the scheduler and the poller are
+/// doing, for diagnosing a program that stops making progress.
+///
+/// `RUSTYGO_TRACE=sched` turns it on. It is read once: the check is on the
+/// path every park takes.
+#[cfg(feature = "std")]
+pub fn trace_sched() -> bool {
+    use std::sync::OnceLock;
+    static ON: OnceLock<bool> = OnceLock::new();
+    *ON.get_or_init(|| std::env::var_os("RUSTYGO_TRACE").is_some_and(|v| v == "sched"))
+}
+
+/// Writes one line of runtime trace to standard error.
+#[cfg(feature = "std")]
+pub fn trace(what: &str) {
+    let _ = std::io::Write::write_all(
+        &mut std::io::stderr().lock(),
+        alloc::format!("rustygo/sched: {what}\n").as_bytes(),
+    );
 }

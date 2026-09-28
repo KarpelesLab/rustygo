@@ -96,22 +96,71 @@ func sync_fatal(s string) { fatal(s) }
 
 // Condition variables: with one goroutine, a Wait has nobody to wake it.
 
+// sync.Cond's ticket list. The layout is sync's own, because the runtime is
+// handed a pointer to it; notifyListCheck is how sync asks whether the two
+// agree.
+//
+// A waiter takes a ticket, and waits until `notify` passes it. Waking is by
+// address, all at once, each waiter looking at its own ticket again — the
+// same shape as a channel's waiters, and for the same reason: waking one and
+// choosing wrongly loses a wakeup, while waking all cannot.
+type notifyList struct {
+	wait   uint32
+	notify uint32
+	lock   uintptr
+	head   unsafe.Pointer
+	tail   unsafe.Pointer
+}
+
+// notified reports whether ticket t has been called, counting the wraparound
+// the way gc's `less` does.
+func notified(t, notify uint32) bool {
+	return int32(t-notify) < 0
+}
+
 //go:linkname sync_runtime_notifyListAdd sync.runtime_notifyListAdd
-func sync_runtime_notifyListAdd(l unsafe.Pointer) uint32 { return 0 }
+func sync_runtime_notifyListAdd(l *notifyList) uint32 {
+	t := l.wait
+	l.wait++
+	return t
+}
 
 //go:linkname sync_runtime_notifyListWait sync.runtime_notifyListWait
-func sync_runtime_notifyListWait(l unsafe.Pointer, t uint32) {
-	fatal("all goroutines are asleep - deadlock!")
+func sync_runtime_notifyListWait(l *notifyList, t uint32) {
+	for !notified(t, l.notify) {
+		semaparkall(uintptr(unsafe.Pointer(l)))
+	}
 }
 
 //go:linkname sync_runtime_notifyListNotifyAll sync.runtime_notifyListNotifyAll
-func sync_runtime_notifyListNotifyAll(l unsafe.Pointer) {}
+func sync_runtime_notifyListNotifyAll(l *notifyList) {
+	if l.notify == l.wait {
+		return
+	}
+	l.notify = l.wait
+	semawakeall(uintptr(unsafe.Pointer(l)))
+}
 
 //go:linkname sync_runtime_notifyListNotifyOne sync.runtime_notifyListNotifyOne
-func sync_runtime_notifyListNotifyOne(l unsafe.Pointer) {}
+func sync_runtime_notifyListNotifyOne(l *notifyList) {
+	if l.notify == l.wait {
+		return
+	}
+	l.notify++
+	semawakeall(uintptr(unsafe.Pointer(l)))
+}
 
 //go:linkname sync_runtime_notifyListCheck sync.runtime_notifyListCheck
-func sync_runtime_notifyListCheck(size uintptr) {}
+func sync_runtime_notifyListCheck(size uintptr) {
+	if size != unsafe.Sizeof(notifyList{}) {
+		fatal("runtime: bad notifyList size")
+	}
+}
+
+// semaparkall parks on an address that semawakeall wakes, which is every
+// waiter at once rather than the longest-waiting one.
+func semaparkall(addr uintptr)
+func semawakeall(addr uintptr)
 
 // sync.Pool: one processor, never cleaned (a cleanup may always be skipped).
 
@@ -236,12 +285,16 @@ func poll_runtime_pollWait(ctx uintptr, mode int) int { return pollWait(ctx, mod
 //go:linkname poll_runtime_pollWaitCanceled internal/poll.runtime_pollWaitCanceled
 func poll_runtime_pollWaitCanceled(ctx uintptr, mode int) {}
 
-// Deadlines need timers, which arrive with the rest of M2. A deadline set
-// here is ignored, so a read or write that would have timed out blocks until
-// the descriptor moves instead.
+// A deadline is a moment on the monotonic clock after which reads or writes
+// on this descriptor fail instead of waiting. net/http cannot work without
+// them: it aborts a read that is already in progress by giving it a deadline
+// in the past and waiting for it to come back.
+func pollSetDeadline(ctx uintptr, at int64, mode int)
 
 //go:linkname poll_runtime_pollSetDeadline internal/poll.runtime_pollSetDeadline
-func poll_runtime_pollSetDeadline(ctx uintptr, d int64, mode int) {}
+func poll_runtime_pollSetDeadline(ctx uintptr, d int64, mode int) {
+	pollSetDeadline(ctx, d, mode)
+}
 
 //go:linkname poll_runtime_pollUnblock internal/poll.runtime_pollUnblock
 func poll_runtime_pollUnblock(ctx uintptr) { pollUnblock(ctx) }
