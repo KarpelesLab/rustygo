@@ -133,6 +133,12 @@ runtime's accessor API has to be sound for *any* code the emitter produces, so:
   allocation per object through the system allocator. Correct and boring, and
   measurably so: the table costs a per-object entry and a sort per
   collection ([§11](#11-performance-expectations)).
+* **What the collector reports.** `runtime.ReadMemStats` gives the numbers the
+  collector actually keeps — live objects and bytes, everything ever
+  allocated, and the collection count — and leaves the rest zero. There is no
+  separate heap, stack and span accounting to report: one heap, one
+  allocation per object, so the several ways gc splits that number all give
+  the same answer here.
 * **GC torture** (`RUSTYGO_GCTORTURE=1`, the runtime's `gc-torture` feature)
   collects at every allocation, and never reuses what it collects: freed
   objects are poisoned and quarantined, and every dereference checks the

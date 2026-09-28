@@ -620,6 +620,13 @@ func (f *fnEmitter) expr(v ssa.Value) string {
 		fn := v.Fn.(*ssa.Function)
 		st := f.e.envStruct(fn)
 		info := f.e.types.structInfo(st, fn.Name()+"$env", f.e, v.Pos())
+		if len(v.Bindings) == 0 {
+			// A function literal that captures nothing needs no environment,
+			// and allocating an empty one would be an allocation a Go
+			// programmer can measure: test/closure.go counts them.
+			return fmt.Sprintf("Func::new(%s as %s, Env::NONE)",
+				f.e.fnPath(fn), f.e.types.fnPtr(fn.Signature, f.e, v.Pos()))
+		}
 		fields := make([]string, len(v.Bindings))
 		for i, b := range v.Bindings {
 			fields[i] = fmt.Sprintf("%s: %s", info.fields[i], f.val(b))

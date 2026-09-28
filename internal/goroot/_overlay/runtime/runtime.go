@@ -112,7 +112,32 @@ type MemStats struct {
 	EnableGC, DebugGC                                                  bool
 }
 
-func ReadMemStats(m *MemStats) { *m = MemStats{} }
+// heapStats is what the collector tracks: live objects and bytes, every
+// object and byte ever allocated, and how many collections have run.
+func heapStats() (objects, bytes, totalObjects, totalBytes, collections uint64)
+
+// ReadMemStats fills in what rustygo's collector knows and leaves the rest
+// zero. There is no separate heap, stack and span accounting to report: one
+// heap, one allocation per object (DESIGN §3), so Sys is the live heap and
+// the several ways gc splits that number all give the same answer.
+// The fields are assigned one by one rather than through a struct literal,
+// which go/ssa builds in memory of its own: a program may call this between
+// two readings of Mallocs and expect the count not to have moved
+// (test/closure.go does), so reporting the numbers must not allocate.
+func ReadMemStats(m *MemStats) {
+	objects, bytes, totalObjects, totalBytes, collections := heapStats()
+	m.Alloc = bytes
+	m.TotalAlloc = totalBytes
+	m.Sys = bytes
+	m.Mallocs = totalObjects
+	m.Frees = totalObjects - objects
+	m.HeapAlloc = bytes
+	m.HeapSys = bytes
+	m.HeapInuse = bytes
+	m.HeapObjects = objects
+	m.NumGC = uint32(collections)
+	m.EnableGC = true
+}
 
 // Profiling is out of scope (roadmap non-goals); these keep programs that
 // touch it compiling, and report no samples.

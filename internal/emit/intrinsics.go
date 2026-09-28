@@ -9,6 +9,9 @@ import "fmt"
 var intrinsics = map[string]func(args []string) string{
 	// The collector.
 	"runtime.GC": func([]string) string { return "rustygo::heap::collect()" },
+	"runtime.heapStats": func([]string) string {
+		return "{ let s = rustygo::heap::stats(); (s.objects as u64, s.bytes as u64, s.total_objects, s.total_bytes, s.collections as u64) }"
+	},
 
 	// Process-level runtime services.
 	"runtime.fatal": func(a []string) string {

@@ -60,6 +60,10 @@ pub struct Heap {
     threshold: usize,
     globals: Vec<(usize, usize, TraceFn)>,
     collections: usize,
+    /// Every object and payload byte ever allocated, which Go reports as
+    /// TotalAlloc and Mallocs and never decreases.
+    total_objects: u64,
+    total_bytes: u64,
     /// GC torture only: collected objects, start to end. Their memory is
     /// poisoned and never reused, so any later use of one is a missing root
     /// and panics by name. A map, because under torture every allocation
@@ -80,6 +84,8 @@ rt_global! {
             threshold: MIN_THRESHOLD,
             globals: Vec::new(),
             collections: 0,
+            total_objects: 0,
+            total_bytes: 0,
             quarantine: BTreeMap::new(),
     });
 }
@@ -125,6 +131,8 @@ pub fn allocate<T: Trace>(value: T) -> NonNull<T> {
         });
         h.sorted = false;
         h.live_bytes += layout.size();
+        h.total_objects += 1;
+        h.total_bytes += layout.size() as u64;
     });
     ptr
 }
@@ -163,6 +171,8 @@ pub fn allocate_bytes(len: usize, fill: impl FnOnce(&mut [u8])) -> NonNull<u8> {
         });
         h.sorted = false;
         h.live_bytes += len;
+        h.total_objects += 1;
+        h.total_bytes += len as u64;
     });
     ptr
 }
@@ -197,6 +207,8 @@ pub fn allocate_array<P: crate::place::Place + Trace>(n: usize) -> NonNull<P> {
         });
         h.sorted = false;
         h.live_bytes += layout.size();
+        h.total_objects += 1;
+        h.total_bytes += layout.size() as u64;
     });
     ptr
 }
@@ -334,7 +346,7 @@ impl Heap {
     }
 }
 
-/// Heap statistics, for tests and `runtime.ReadMemStats` later.
+/// Heap statistics, as tests and `runtime.ReadMemStats` read them.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Stats {
     /// Objects currently allocated.
@@ -343,6 +355,10 @@ pub struct Stats {
     pub bytes: usize,
     /// Collections run so far.
     pub collections: usize,
+    /// Objects allocated since the program started, freed ones included.
+    pub total_objects: u64,
+    /// Payload bytes allocated since the program started.
+    pub total_bytes: u64,
 }
 
 /// Current heap statistics.
@@ -351,6 +367,8 @@ pub fn stats() -> Stats {
         objects: h.objs.len(),
         bytes: h.live_bytes,
         collections: h.collections,
+        total_objects: h.total_objects,
+        total_bytes: h.total_bytes,
     })
 }
 
