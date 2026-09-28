@@ -78,33 +78,27 @@ func time_runtimeIsBubbled() bool { return false } // no synctest bubbles
 // walltime is the wall clock: seconds and nanoseconds since the epoch.
 func walltime() (sec int64, nsec int32)
 
+// mapClone is maps.Clone: a map of the same dynamic type with the same
+// entries, which only the runtime can build because only it knows the type.
+func mapClone(m any) any
+
+//go:linkname maps_clone maps.clone
+func maps_clone(m any) any { return mapClone(m) }
+
 // nanosleep sleeps this thread, which with one goroutine is the whole
 // program. time.NewTimer and the rest of the timer machinery wait for M2.
 func nanosleep(ns int64)
 
-// yieldIfReady hands the processor to another goroutine if one is ready,
-// and reports whether it did.
-func yieldIfReady() bool
+// sleepUntil parks this goroutine until the monotonic clock reaches the given
+// moment, leaving the others running.
+func sleepUntil(deadline int64)
 
 //go:linkname time_Sleep time.Sleep
 func time_Sleep(ns int64) {
 	if ns <= 0 {
 		return
 	}
-	// The sleeping time belongs to whichever goroutine can use it. Only when
-	// none can is it worth sleeping the thread they share. Timers, which
-	// would park this goroutine and wake it on a deadline, come with the
-	// netpoller (roadmap M2/M3).
-	deadline := nanotime() + ns
-	for {
-		left := deadline - nanotime()
-		if left <= 0 {
-			return
-		}
-		if !yieldIfReady() {
-			nanosleep(left)
-		}
-	}
+	sleepUntil(nanotime() + ns)
 }
 
 // sigpipe is raised when a write to a closed pipe is ignored; with no signal

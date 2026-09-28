@@ -286,10 +286,14 @@ work fails too, decision gate 1 says stop.
   `xmm6`-`xmm15` callee-saved and keeps the stack's bounds in the thread
   information block, so it needs a switch of its own (M5). A Windows build
   compiles and says so rather than corrupting itself quietly.
+* Timers and the netpoller are in. A goroutine waiting on a socket parks on
+  the descriptor and the scheduler sleeps in `epoll_wait`; a goroutine may
+  also park until a moment on the clock, which is what `time.Sleep` and the
+  timer list use. `time.NewTimer`, `After` and `Ticker` work, fired by a
+  timer goroutine in the runtime overlay.
 * Not yet: the M:N scheduler over threads, work stealing, preemption,
-  `GOMAXPROCS` above 1, timers (`time.Sleep` blocks the thread instead of
-  parking the goroutine; `time.NewTimer` is missing), `runtime.Goexit`,
-  `testing/synctest`, and the netpoller.
+  `GOMAXPROCS` above 1, `runtime.Goexit`, `testing/synctest`, and read and
+  write deadlines on a descriptor (a deadline is accepted and ignored).
 
 ## M3 — Standard library bring-up
 
@@ -321,7 +325,13 @@ work fails too, decision gate 1 says stop.
     gc build.
 * Build caching. The compiled standard library becomes its own crate or crates,
   built once per Go version and target and then reused, so rebuilding a small
-  program does not recompile `fmt`.
+  program does not recompile `fmt`. **This is now a blocker, not an
+  optimization**: a program using `net` emits 133,000 lines of Rust across 57
+  packages and builds in half a minute, but one using `net/http` — which
+  reaches `crypto/tls` — emits 855,000 lines across 174 packages, and `rustc`
+  was killed after passing 4 GB compiling that single crate. Splitting the
+  standard library into crates is what makes it compilable at all, never mind
+  fast.
 
 **Exit criteria:**
 
@@ -335,6 +345,27 @@ work fails too, decision gate 1 says stop.
   variant's latency and RSS against gc are published.
 * Stdlib build time and a small program's incremental rebuild time are recorded
   (decision gate 3).
+
+**Status (2026-09-28): sockets work; `net/http` compiles but does not link.**
+
+* Go's own `net` package runs: a listener, an accepted connection, a dial,
+  and reads and writes over a socket, with the goroutines parked on the
+  descriptors by the netpoller (`testdata/programs/netdial`). Timers work
+  too, `time.After` and `Ticker` among them.
+* `net/http` gets through the compiler — every function it reaches has a
+  body — and then `rustc` is killed compiling the result: 855,000 lines of
+  Rust in one crate, past 4 GB of memory. Splitting the standard library into
+  its own crates, listed above as build caching, is what unblocks it.
+* The pieces `net` needed on the way: weak pointers (held strongly, so
+  nothing interned is ever collected), `unique` reimplemented over an
+  ordinary map because gc's reads its own type descriptors, the FIPS 140
+  indicator flags, `maps.Clone` through a per-map-type clone beside its
+  descriptor, and redirects from assembly to the Go bodies beside it
+  (`internal/emit/fallbacks.go`).
+* Two emitter gaps closed: `defer`/`go` on an interface method, and slice to
+  array-pointer conversion. A third was too strict rather than missing — a
+  type cycle that passes through a struct is fine, because a struct is
+  emitted by name.
 
 **Status (2026-09-22): `reflect`, the file layer and `fmt` are in.**
 

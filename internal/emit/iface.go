@@ -257,8 +257,25 @@ pub static %s: MapOps = MapOps {
             .get_ok(k.cast::<%s>().load());
         (Data::of(Ptr::<%s>::alloc(v)), ok)
     },
+    clone: |d| {
+        // maps.Clone: a map of the same type holding the same entries. The
+        // source is rooted while the copy is built, because every insertion
+        // may collect.
+        let src = d.cast::<Slot<%s>>().load();
+        let out = GoMap::make(src.len());
+        let __roots = rustygo::gc::Frame::<2>::new();
+        __roots.scope(|| {
+            __roots.set(0, &src);
+            __roots.set(1, &out);
+            let mut it = src.iter();
+            while let (true, k, v) = it.advance() {
+                out.set(k, v);
+            }
+        });
+        Data::of(Ptr::<Slot<%s>>::alloc(out))
+    },
 };
-`, name, mapType, iterType, mapType, iterType, kPlace, vPlace, mapType, kPlace, vPlace)
+`, name, mapType, iterType, mapType, iterType, kPlace, vPlace, mapType, kPlace, vPlace, mapType, mapType)
 	return "crate::ty::" + name
 }
 
@@ -401,7 +418,12 @@ func (e *emitter) ifaceMethods(it *types.Interface) (ids, names string) {
 // invoke renders a call through an interface: look the method up by id, then
 // call it with the data word.
 func (f *fnEmitter) invoke(c *ssa.CallCommon, args []string, pos token.Pos) string {
-	m := c.Method
+	return f.invokeOn(c.Method, f.val(c.Value), args, pos)
+}
+
+// invokeOn is an interface method call on a receiver the caller spells: the
+// call site's operand, or a receiver a deferred call stored away earlier.
+func (f *fnEmitter) invokeOn(m *types.Func, recv string, args []string, pos token.Pos) string {
 	id := f.e.methodID(m)
 	sig := m.Type().(*types.Signature)
 	params := []string{"Data"}
@@ -416,7 +438,6 @@ func (f *fnEmitter) invoke(c *ssa.CallCommon, args []string, pos token.Pos) stri
 	default:
 		ret = " -> " + f.typ(res, pos)
 	}
-	recv := f.val(c.Value)
 	call := append([]string{"__i.data()"}, args...)
 	return fmt.Sprintf("{ let __i = %s; (__i.method::<fn(%s)%s>(%d))(%s) }",
 		recv, strings.Join(params, ", "), ret, id, strings.Join(call, ", "))

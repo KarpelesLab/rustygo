@@ -16,7 +16,10 @@
 // constructing types are not here yet and say so when used.
 package reflect
 
-import "unsafe"
+import (
+	"math"
+	"unsafe"
+)
 
 // Kind is a type's kind, numbered as gc numbers it.
 type Kind uint
@@ -89,6 +92,7 @@ type Type interface {
 	AssignableTo(u Type) bool
 	NumMethod() int
 	Bits() int
+	ConvertibleTo(u Type) bool
 }
 
 // StructField describes one field of a struct type.
@@ -889,3 +893,139 @@ func mapLen(d, m unsafe.Pointer) int64
 func mapIter(d, m unsafe.Pointer) unsafe.Pointer
 func mapNext(d, it unsafe.Pointer) (bool, unsafe.Pointer, unsafe.Pointer)
 func mapIndex(d, m, k unsafe.Pointer) (unsafe.Pointer, bool)
+
+// TypeFor returns the Type that represents the type argument T.
+//
+// A concrete T has a descriptor of its own, which boxing a zero value of it
+// produces. An interface T has none: rustygo emits descriptors for the
+// concrete types a program instantiates, not for its interfaces (DESIGN §6).
+func TypeFor[T any]() Type {
+	var zero T
+	if t := TypeOf(any(zero)); t != nil {
+		return t
+	}
+	panic(unsupported("TypeFor of an interface type"))
+}
+
+// TypeAssert is x.(T), for a Value.
+func TypeAssert[T any](v Value) (T, bool) {
+	x, ok := v.Interface().(T)
+	return x, ok
+}
+
+// Indirect returns the value v points to. If v is a nil pointer, it returns
+// the zero Value. If v is not a pointer, it returns v.
+func Indirect(v Value) Value {
+	if v.Kind() != Pointer {
+		return v
+	}
+	return v.Elem()
+}
+
+// Copy copies the contents of src into dst until either dst has been filled
+// or src has been exhausted, and returns the number of elements copied.
+func Copy(dst, src Value) int {
+	dk, sk := dst.Kind(), src.Kind()
+	if dk != Slice && dk != Array {
+		panic("reflect.Copy: destination is " + dk.String())
+	}
+	if sk != Slice && sk != Array && !(sk == String && dst.Type().Elem().Kind() == Uint8) {
+		panic("reflect.Copy: source is " + sk.String())
+	}
+	if dk == Array && !dst.addr {
+		panic("reflect: reflect.Value.Copy using unaddressable value")
+	}
+	if sk == String {
+		b := []byte(src.String())
+		n := min(dst.Len(), len(b))
+		for i := range n {
+			dst.Index(i).SetUint(uint64(b[i]))
+		}
+		return n
+	}
+	if dst.Type().Elem() != src.Type().Elem() {
+		panic("reflect.Copy: element types differ")
+	}
+	n := min(dst.Len(), src.Len())
+	for i := range n {
+		dst.Index(i).Set(src.Index(i))
+	}
+	return n
+}
+
+// OverflowInt reports whether x cannot be represented by v's type.
+func (v Value) OverflowInt(x int64) bool {
+	switch v.Kind() {
+	case Int, Int8, Int16, Int32, Int64:
+		bits := descSize(v.d) * 8
+		trunc := (x << (64 - bits)) >> (64 - bits)
+		return x != trunc
+	}
+	panic("reflect: OverflowInt of " + v.Kind().String() + " value")
+}
+
+// OverflowUint reports whether x cannot be represented by v's type.
+func (v Value) OverflowUint(x uint64) bool {
+	switch v.Kind() {
+	case Uint, Uintptr, Uint8, Uint16, Uint32, Uint64:
+		bits := descSize(v.d) * 8
+		trunc := (x << (64 - bits)) >> (64 - bits)
+		return x != trunc
+	}
+	panic("reflect: OverflowUint of " + v.Kind().String() + " value")
+}
+
+// OverflowFloat reports whether x cannot be represented by v's type.
+func (v Value) OverflowFloat(x float64) bool {
+	switch v.Kind() {
+	case Float32:
+		if x < 0 {
+			x = -x
+		}
+		return math.MaxFloat32 < x && x <= math.MaxFloat64
+	case Float64:
+		return false
+	}
+	panic("reflect: OverflowFloat of " + v.Kind().String() + " value")
+}
+
+// The rest of reflect needs type information rustygo does not have yet, or a
+// call shim generated per signature, and says so rather than guessing:
+//
+//   - Append and MakeSlice must allocate a slice of a type chosen at run
+//     time, which needs the descriptor to carry how to make one;
+//   - Convert and ConvertibleTo need every conversion Go's rules allow,
+//     between types the program may never have converted itself;
+//   - MakeFunc needs a trampoline for a signature the program may not
+//     contain (DESIGN §6).
+
+// Append appends the values x to a slice s and returns the resulting slice.
+func Append(s Value, x ...Value) Value {
+	panic(unsupported("Append"))
+}
+
+// AppendSlice appends a slice t to a slice s and returns the resulting slice.
+func AppendSlice(s, t Value) Value {
+	panic(unsupported("AppendSlice"))
+}
+
+// Convert returns the value v converted to type t.
+func (v Value) Convert(t Type) Value {
+	panic(unsupported("Value.Convert"))
+}
+
+// CanConvert reports whether the value v can be converted to type t.
+func (v Value) CanConvert(t Type) bool {
+	return false
+}
+
+// ConvertibleTo reports whether a value of the type is convertible to type u.
+func (t rtype) ConvertibleTo(u Type) bool {
+	panic(unsupported("Type.ConvertibleTo"))
+}
+
+// MakeFunc returns a new function of the given Type that wraps the function
+// fn.
+func MakeFunc(typ Type, fn func(args []Value) (results []Value)) Value {
+	panic(unsupported("MakeFunc"))
+}

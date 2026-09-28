@@ -170,6 +170,17 @@ pub fn map_next(d: UPtr, cursor: UPtr) -> (bool, UPtr, UPtr) {
     (ok, UPtr::from_addr(k.addr()), UPtr::from_addr(v.addr()))
 }
 
+/// A map with the same entries, as `maps.Clone` wants it: the same dynamic
+/// type, so the result goes back into an interface with the same descriptor.
+pub fn map_clone(m: Iface) -> Iface {
+    if m.is_nil() {
+        return Iface::nil();
+    }
+    let d = desc(UPtr::from_addr(m.desc_addr()));
+    let ops = d.map_ops.expect("not a map type");
+    Iface::new(d, (ops.clone)(m.data()))
+}
+
 /// `m[k]`: `(value, ok)`.
 pub fn map_index(d: UPtr, m: UPtr, k: UPtr) -> (UPtr, bool) {
     let (v, ok) = (map_ops(d).index)(data(m), data(k));

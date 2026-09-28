@@ -256,6 +256,24 @@ func (e *emitter) err() error {
 }
 
 // fnPath returns the Rust path of fn, queueing it for emission on first use.
+// namedFunc finds a function by "importpath.Name" among the packages loaded,
+// which is how a fallback names the Go body it redirects to (fallbacks.go).
+func (e *emitter) namedFunc(key string) *ssa.Function {
+	// The last dot separates the name, because an import path may contain
+	// dots of its own.
+	dot := strings.LastIndex(key, ".")
+	if dot <= 0 {
+		return nil
+	}
+	path, name := key[:dot], key[dot+1:]
+	for _, p := range e.res.Prog.AllPackages() {
+		if p.Pkg.Path() == path {
+			return p.Func(name)
+		}
+	}
+	return nil
+}
+
 func (e *emitter) fnPath(fn *ssa.Function) string {
 	if p, ok := e.fnPaths[fn]; ok {
 		return p
@@ -338,6 +356,9 @@ type deferBody struct {
 	target   string
 	indirect bool
 	builtin  func(loaded []string) string
+	// invoke renders an interface method call, the receiver being the first
+	// value the thunk loads.
+	invoke func(loaded []string) string
 }
 
 func (e *emitter) deferThunk(pos token.Pos, in *ssa.Function, argTypes []types.Type, body deferBody) (string, *structInfo) {
@@ -363,6 +384,8 @@ func (e *emitter) deferThunk(pos token.Pos, in *ssa.Function, argTypes []types.T
 	switch {
 	case body.builtin != nil:
 		call = body.builtin(args)
+	case body.invoke != nil:
+		call = body.invoke(args)
 	case body.indirect:
 		// The func value is the first stored argument.
 		fv := args[0]

@@ -46,6 +46,8 @@ pub mod heap;
 pub mod iface;
 pub mod intrinsics;
 pub mod map;
+#[cfg(feature = "std")]
+pub mod netpoll;
 pub mod ops;
 pub mod panic;
 pub mod place;

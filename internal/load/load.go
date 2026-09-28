@@ -121,6 +121,11 @@ func collectLinknames(p *packages.Package, links map[string]string) {
 				body, declared := hasBody[fields[1]]
 				switch {
 				case !declared:
+				case local == target:
+					// A function linknamed to its own name is saying only
+					// that something else provides it — the same thing the
+					// one-argument form says. Recording it would map the
+					// name to itself and hide the push that fills it in.
 				case body:
 					links[target] = local // push
 				default:

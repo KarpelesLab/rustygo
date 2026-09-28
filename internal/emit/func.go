@@ -6,6 +6,7 @@ import (
 	"go/token"
 	"go/types"
 	"math"
+	"slices"
 	"strconv"
 	"strings"
 
@@ -475,16 +476,19 @@ func (f *fnEmitter) goStmt(g *ssa.Go) string {
 // callThunk renders a call whose arguments are evaluated now and whose body
 // runs later: the thunk to call, and the environment holding the arguments.
 func (f *fnEmitter) callThunk(c *ssa.CallCommon, pos token.Pos, what string) (string, string) {
-	if c.IsInvoke() {
-		f.errorf(pos, "%s interface method calls are not supported yet (roadmap M1)", what)
-		return "", ""
-	}
 	var argTypes []types.Type
 	var stored []string
 	indirect := false
 	target := ""
 	var builtinName *ssa.Builtin
-	if callee := c.StaticCallee(); callee != nil && c.Value == callee {
+	var method *types.Func
+	if c.IsInvoke() {
+		// The receiver is stored like any other argument, and the thunk does
+		// the dynamic dispatch when it runs.
+		method = c.Method
+		argTypes = append(argTypes, c.Value.Type())
+		stored = append(stored, f.val(c.Value))
+	} else if callee := c.StaticCallee(); callee != nil && c.Value == callee {
 		target = f.e.fnPath(callee)
 	} else if b, isBuiltin := c.Value.(*ssa.Builtin); isBuiltin {
 		builtinName = b
@@ -499,6 +503,11 @@ func (f *fnEmitter) callThunk(c *ssa.CallCommon, pos token.Pos, what string) (st
 		stored = append(stored, f.val(a))
 	}
 	body := deferBody{target: target, indirect: indirect}
+	if method != nil {
+		body.invoke = func(loaded []string) string {
+			return f.invokeOn(method, loaded[0], loaded[1:], pos)
+		}
+	}
 	if builtinName != nil {
 		body.builtin = func(loaded []string) string {
 			return f.builtin(builtinName, c, types.Typ[types.Invalid], pos, loaded)
@@ -620,7 +629,15 @@ func (f *fnEmitter) expr(v ssa.Value) string {
 		return fmt.Sprintf("Func::new(%s as %s, Env::of(%s))",
 			f.e.fnPath(fn), f.e.types.fnPtr(fn.Signature, f.e, v.Pos()), env)
 	case *ssa.SliceToArrayPointer:
-		f.errorf(v.Pos(), "slice-to-array-pointer conversion is not supported yet")
+		// `(*[N]T)(s)`, which is also how `[N]T(s)` is lowered. The elements
+		// of a slice are places laid out contiguously, so the array is the
+		// same memory read as a different type.
+		at, ok := v.Type().Underlying().(*types.Pointer).Elem().Underlying().(*types.Array)
+		if !ok {
+			f.errorf(v.Pos(), "slice conversion to %s is not supported", v.Type())
+			return ""
+		}
+		return fmt.Sprintf("(%s).to_array::<%d>()", f.val(v.X), at.Len())
 	case *ssa.MakeMap:
 		mt := v.Type().Underlying().(*types.Map)
 		size := "0i64"
@@ -1211,8 +1228,35 @@ func (e *emitter) bodyless(fn *ssa.Function, name string, m *module) {
 			}
 		}
 		body = fmt.Sprintf("%s(%s)", e.fnPath(impl), strings.Join(args, ", "))
+		// A result may be spelled differently too: the runtime's timer is
+		// time.Timer seen from the other side, and gc's linker cares as
+		// little about that as it does about the parameters.
+		if res, implRes := fn.Signature.Results(), impl.Signature.Results(); res.Len() == 1 && implRes.Len() == 1 {
+			got, want := implRes.At(0).Type(), res.At(0).Type()
+			switch {
+			case types.Identical(got, want):
+			case isPointer(got) && isUnsafePointer(want):
+				body = fmt.Sprintf("UPtr::from_ptr(%s)", body)
+			case isPointer(got) && isPointer(want):
+				elem := want.Underlying().(*types.Pointer).Elem()
+				body = fmt.Sprintf("unsafe { UPtr::from_ptr(%s).to_ptr::<%s>() }", body, f.place(elem, fn.Pos()))
+			case types.Identical(got.Underlying(), want.Underlying()):
+			default:
+				e.errorf(fn.Pos(), "%s: go:linkname to %s returning %s where it declares %s", key, impl, got, want)
+			}
+		}
 	} else if in, ok := intrinsics[key]; ok {
 		body = in(args)
+	} else if to, ok := fallbacks[key]; ok {
+		// The package's own portable version of what gc writes in assembly.
+		target := e.namedFunc(to)
+		if target == nil {
+			e.errorf(fn.Pos(), "%s: fallback %s is not in the program", key, to)
+			return
+		}
+		body = fmt.Sprintf("%s(%s)", e.fnPath(target), strings.Join(args, ", "))
+	} else if slices.Contains(unreachableAssembly, key) {
+		body = fmt.Sprintf("rustygo::rt::fatal(b%q)", key+": assembly for a processor feature rustygo does not report")
 	} else {
 		e.errorf(fn.Pos(), "%s has no Go body (assembly or linkname) and no rustygo implementation%s", key, e.caller(fn))
 		return

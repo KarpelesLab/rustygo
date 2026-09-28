@@ -114,6 +114,8 @@ pub struct MapOps {
     pub next: fn(Data) -> (bool, Data, Data),
     /// `m[k]`, with the key given boxed: `(value, ok)`.
     pub index: fn(Data, Data) -> (Data, bool),
+    /// A fresh map holding the same entries, boxed, for `maps.Clone`.
+    pub clone: fn(Data) -> Data,
 }
 
 impl TypeDesc {

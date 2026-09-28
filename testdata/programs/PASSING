@@ -49,3 +49,4 @@ runtimeerrors
 channels linux
 goroutines linux,darwin
 selects linux
+netdial linux

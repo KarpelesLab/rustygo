@@ -405,6 +405,20 @@ impl GoKey for crate::unsafe_ptr::UPtr {
     }
 }
 
+// A channel is comparable in Go: two are equal when one `make` produced both,
+// which is its address.
+#[cfg(feature = "std")]
+impl<T> GoKey for crate::chan::Chan<T> {
+    #[inline]
+    fn go_hash(&self) -> u64 {
+        mix(0, self.addr())
+    }
+    #[inline]
+    fn go_eq(&self, other: &Self) -> bool {
+        self == other
+    }
+}
+
 impl<P> GoKey for crate::place::Ptr<P> {
     #[inline]
     fn go_hash(&self) -> u64 {

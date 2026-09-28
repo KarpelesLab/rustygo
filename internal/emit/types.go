@@ -163,6 +163,16 @@ func (r *typeReg) structInfo(st *types.Struct, hint string, e *emitter, pos toke
 		si.fields = append(si.fields, fieldNS.claim(name))
 	}
 
+	// A struct breaks every type cycle that passes through it, because its
+	// Rust form is a name rather than an expansion: a field may refer back to
+	// this struct, or to a named type that refers to it, and the types below
+	// spell `Struct_P` instead of unfolding it again. So the guard against
+	// types that contain themselves (`type T *T`) starts afresh here, and
+	// only catches a cycle with no struct anywhere in it.
+	outer := r.expanding
+	r.expanding = map[*types.Named]bool{}
+	defer func() { r.expanding = outer }()
+
 	var def, place, zero, newP, load, store, trace, hash, eq bytes.Buffer
 	for i, f := range si.fields {
 		ft := st.Field(i).Type()

@@ -106,6 +106,31 @@ impl<P> Slice<P> {
         Ptr::to_place(unsafe { &*self.ptr.add(i) })
     }
 
+    /// `(*[N]T)(s)`: the slice's own array, seen as an array of `N`.
+    ///
+    /// The elements of a slice are places laid out contiguously, which is
+    /// exactly what the place form of `[N]T` is, so this is the same address
+    /// read as a different type — no copy, and writes through it are writes
+    /// to the slice, as Go says. A slice shorter than `N` cannot be converted
+    /// and panics with gc's message.
+    pub fn to_array<const N: usize>(self) -> Ptr<[P; N]> {
+        if self.len < N {
+            crate::panic::runtime_error_msg(alloc::format!(
+                "cannot convert slice with length {} to array or pointer to array with length {N}",
+                self.len
+            ));
+        }
+        if self.ptr.is_null() {
+            // Only reachable for `N == 0`: `(*[0]T)(nil)` is a legal
+            // conversion, and Go's result is nil.
+            return GoValue::zero();
+        }
+        heap::check_live(self.ptr as usize);
+        // SAFETY: the slice holds at least `N` places from `ptr`, and `[P; N]`
+        // is `N` places laid out contiguously.
+        Ptr::to_place(unsafe { &*(self.ptr as *const [P; N]) })
+    }
+
     /// `s[lo:hi]` and `s[lo:hi:max]`: a view of the same array. Missing `hi`
     /// means `len(s)`, missing `max` means `cap(s)`, and slicing may reach
     /// past the length up to the capacity.

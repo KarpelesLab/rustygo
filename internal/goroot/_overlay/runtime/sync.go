@@ -50,6 +50,29 @@ func internal_sync_runtime_SemacquireMutex(s *uint32, lifo bool, skipframes int)
 //go:linkname internal_sync_runtime_Semrelease internal/sync.runtime_Semrelease
 func internal_sync_runtime_Semrelease(s *uint32, handoff bool, skipframes int) { semrelease(s) }
 
+// sync/atomic pins a goroutine to its processor while it publishes a value.
+// With one processor there is nothing to pin it to and nothing that could
+// move it.
+
+//go:linkname atomic_runtime_procPin sync/atomic.runtime_procPin
+func atomic_runtime_procPin() int { return 0 }
+
+//go:linkname atomic_runtime_procUnpin sync/atomic.runtime_procUnpin
+func atomic_runtime_procUnpin() {}
+
+// A weak pointer is a strong one here. rustygo's collector has no way yet to
+// clear a reference when its object dies (that is the same machinery as
+// runtime.SetFinalizer, still to come), so a weak pointer keeps its object
+// alive instead of losing it. The cost is that what only a weak pointer
+// refers to is never collected — `unique.Make`'s interning table, which is
+// what net/netip uses, therefore never shrinks.
+
+//go:linkname weak_registerWeakPointer weak.runtime_registerWeakPointer
+func weak_registerWeakPointer(p unsafe.Pointer) unsafe.Pointer { return p }
+
+//go:linkname weak_makeStrongFromWeak weak.runtime_makeStrongFromWeak
+func weak_makeStrongFromWeak(p unsafe.Pointer) unsafe.Pointer { return p }
+
 //go:linkname internal_sync_runtime_canSpin internal/sync.runtime_canSpin
 func internal_sync_runtime_canSpin(i int) bool { return false }
 
@@ -170,8 +193,10 @@ func syscall_runtime_entersyscall() {}
 //go:linkname syscall_runtime_exitsyscall syscall.runtime_exitsyscall
 func syscall_runtime_exitsyscall() {}
 
-// internal/poll's semaphores and netpoller. Regular files never reach the
-// poller (they are opened unpollable), and sockets wait for M2.
+// internal/poll's semaphores and netpoller. A socket that would block parks
+// its goroutine on the descriptor, and the scheduler sleeps in epoll until
+// one moves (src/netpoll.rs). A regular file is opened unpollable and never
+// reaches here.
 
 //go:linkname poll_runtime_Semacquire internal/poll.runtime_Semacquire
 func poll_runtime_Semacquire(s *uint32) { semacquire(s) }
@@ -179,31 +204,47 @@ func poll_runtime_Semacquire(s *uint32) { semacquire(s) }
 //go:linkname poll_runtime_Semrelease internal/poll.runtime_Semrelease
 func poll_runtime_Semrelease(s *uint32) { semrelease(s) }
 
+// The poller is created when the first descriptor is registered, so there is
+// nothing to start here.
+
 //go:linkname poll_runtime_pollServerInit internal/poll.runtime_pollServerInit
 func poll_runtime_pollServerInit() {}
 
+// pollOpen and friends are the runtime's, in Rust.
+func pollOpen(fd uintptr) (uintptr, int)
+func pollClose(ctx uintptr)
+func pollReset(ctx uintptr, mode int) int
+func pollWait(ctx uintptr, mode int) int
+func pollUnblock(ctx uintptr)
+
 //go:linkname poll_runtime_pollOpen internal/poll.runtime_pollOpen
-func poll_runtime_pollOpen(fd uintptr) (uintptr, int) {
-	return 0, 1 // as gc reports "not supported"
-}
+func poll_runtime_pollOpen(fd uintptr) (uintptr, int) { return pollOpen(fd) }
 
 //go:linkname poll_runtime_pollClose internal/poll.runtime_pollClose
-func poll_runtime_pollClose(ctx uintptr) {}
+func poll_runtime_pollClose(ctx uintptr) { pollClose(ctx) }
 
 //go:linkname poll_runtime_pollReset internal/poll.runtime_pollReset
-func poll_runtime_pollReset(ctx uintptr, mode int) int { return 0 }
+func poll_runtime_pollReset(ctx uintptr, mode int) int { return pollReset(ctx, mode) }
 
 //go:linkname poll_runtime_pollWait internal/poll.runtime_pollWait
-func poll_runtime_pollWait(ctx uintptr, mode int) int { return 0 }
+func poll_runtime_pollWait(ctx uintptr, mode int) int { return pollWait(ctx, mode) }
+
+// A cancelled wait is one whose goroutine is going away regardless of what
+// the descriptor does; there is nothing to undo, because a wait registers
+// itself and clears itself.
 
 //go:linkname poll_runtime_pollWaitCanceled internal/poll.runtime_pollWaitCanceled
 func poll_runtime_pollWaitCanceled(ctx uintptr, mode int) {}
+
+// Deadlines need timers, which arrive with the rest of M2. A deadline set
+// here is ignored, so a read or write that would have timed out blocks until
+// the descriptor moves instead.
 
 //go:linkname poll_runtime_pollSetDeadline internal/poll.runtime_pollSetDeadline
 func poll_runtime_pollSetDeadline(ctx uintptr, d int64, mode int) {}
 
 //go:linkname poll_runtime_pollUnblock internal/poll.runtime_pollUnblock
-func poll_runtime_pollUnblock(ctx uintptr) {}
+func poll_runtime_pollUnblock(ctx uintptr) { pollUnblock(ctx) }
 
 //go:linkname poll_runtime_isPollServerDescriptor internal/poll.runtime_isPollServerDescriptor
 func poll_runtime_isPollServerDescriptor(fd uintptr) bool { return false }

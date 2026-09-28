@@ -15,6 +15,9 @@ var intrinsics = map[string]func(args []string) string{
 		return fmt.Sprintf("rustygo::rt::fatal(%s.bytes())", a[0])
 	},
 	"runtime.nanotime": func([]string) string { return "rustygo::rt::nanotime()" },
+	"runtime.cmpstring": func(a []string) string {
+		return fmt.Sprintf("rustygo::intrinsics::compare(%s.bytes(), %s.bytes())", a[0], a[1])
+	},
 	"runtime.writeErr": func(a []string) string {
 		return fmt.Sprintf("rustygo::rt::write_err(%s, %s as i64)", a[0], a[1])
 	},
@@ -97,6 +100,9 @@ var intrinsics = map[string]func(args []string) string{
 	"reflect.mapNext": func(a []string) string {
 		return fmt.Sprintf("rustygo::reflect::map_next(%s, %s)", a[0], a[1])
 	},
+	"runtime.mapClone": func(a []string) string {
+		return fmt.Sprintf("rustygo::reflect::map_clone(%s)", a[0])
+	},
 	"reflect.mapIndex": func(a []string) string {
 		return fmt.Sprintf("rustygo::reflect::map_index(%s, %s, %s)", a[0], a[1], a[2])
 	},
@@ -116,11 +122,31 @@ var intrinsics = map[string]func(args []string) string{
 	"runtime.Gosched":      func([]string) string { return "rustygo::sched::gosched()" },
 	"runtime.NumGoroutine": func([]string) string { return "rustygo::sched::count()" },
 	"runtime.yieldIfReady": func([]string) string { return "rustygo::sched::yield_now()" },
+	"runtime.sleepUntil": func(a []string) string {
+		return fmt.Sprintf("rustygo::sched::sleep_until(%s)", a[0])
+	},
 	"runtime.semapark": func(a []string) string {
 		return fmt.Sprintf("rustygo::sched::park_on(%s as usize)", a[0])
 	},
 	"runtime.semawake": func(a []string) string {
 		return fmt.Sprintf("rustygo::sched::wake_one(%s as usize)", a[0])
+	},
+
+	// The netpoller (src/netpoll.rs).
+	"runtime.pollOpen": func(a []string) string {
+		return fmt.Sprintf("{ let (c, e) = rustygo::netpoll::open(%s as i32); (c as u64, e as i64) }", a[0])
+	},
+	"runtime.pollClose": func(a []string) string {
+		return fmt.Sprintf("rustygo::netpoll::close(%s as usize)", a[0])
+	},
+	"runtime.pollReset": func(a []string) string {
+		return fmt.Sprintf("rustygo::netpoll::reset(%s as usize, %s as i32) as i64", a[0], a[1])
+	},
+	"runtime.pollWait": func(a []string) string {
+		return fmt.Sprintf("rustygo::netpoll::wait(%s as usize, %s as i32) as i64", a[0], a[1])
+	},
+	"runtime.pollUnblock": func(a []string) string {
+		return fmt.Sprintf("rustygo::netpoll::unblock(%s as usize)", a[0])
 	},
 
 	// The process itself: arguments, environment, and the fcntl gc puts in

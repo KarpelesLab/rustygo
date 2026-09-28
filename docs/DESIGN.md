@@ -202,10 +202,28 @@ queues of waiters need, but it cannot lose one. `select` polls its cases from
 a random start, so a ready case cannot be starved, and parks on every channel
 at once when none is ready.
 
+**The netpoller, and timers.** A goroutine that waits on a socket parks on
+the descriptor, and the scheduler, finding nothing to run, sleeps in
+`epoll_wait` until one moves (`src/netpoll.rs`). It answers the nine
+questions `internal/poll` asks the runtime, level-triggered with the interest
+mask following the waiters: a descriptor is asked about readability only
+while a goroutine is waiting to read it. gc polls edge-triggered with
+readiness latches, which costs fewer system calls and hangs the program if a
+latch is ever wrong.
+
+Deadlines are the same machinery as `time.Sleep`: a goroutine may park until
+a moment on the monotonic clock, and the earliest such moment is how long the
+scheduler's next wait may last. Timers are a list and a goroutine of their
+own in the runtime overlay — it sleeps until the earliest deadline, fires
+what is due, and parks on a semaphore when nothing is left, which is what
+keeps a program whose only remaining goroutine is the timer loop from
+counting as busy. What a timer does when it fires is Go's own code: the time
+package hands the runtime a function and an argument, and firing calls it.
+
 Still to come in M2: the M:N scheduler over threads with work stealing and
-preemption, timers (`time.Sleep` blocks the thread rather than parking the
-goroutine, and `time.NewTimer` is not there at all), `runtime.Goexit`, and
-`testing/synctest`.
+preemption, `runtime.Goexit`, `testing/synctest`, and read and write
+deadlines on a descriptor (`SetDeadline` is accepted and ignored, so a read
+that would have timed out waits instead).
 * **Netpoller:** `epoll`/`kqueue`/IOCP (or Rust `std` blocking threads on
   constrained targets) driving the same parking primitives as channels.
 
@@ -319,7 +337,11 @@ reinterpretation):
 * **Assembly without a `purego` path.** With a real `GOARCH`, packages such as
   `math` and `internal/bytealg` select files that declare bodyless functions,
   whose bodies live in `.s` files. Each one gets a Rust implementation or a
-  redirect to the package's generic Go fallback. The same inventory covers the
+  redirect to the package's generic Go fallback — `internal/emit/fallbacks.go`
+  maps `math/big.addVV` to the `addVV_g` sitting next to it, and `math.archLog`
+  to `math.log`. A function that exists only for a processor feature rustygo
+  never reports, such as `crc32`'s SSE 4.2 kernels, gets a body that says so
+  instead of a checksum that is wrong. The same inventory covers the
   stdlib's `go:linkname` references into `runtime`. That contract changes with
   every Go release, so rustygo pins one Go version at a time. The replacement
   packages are substituted through an overlay GOROOT, as TinyGo does.

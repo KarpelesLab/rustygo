@@ -252,67 +252,106 @@ enum Switch {
 }
 
 /// Picks the next goroutine and switches to it.
+///
+/// With nothing runnable, a goroutine that parked or exited is not
+/// necessarily stuck: the program may be waiting on a descriptor, so the
+/// thread sleeps in the netpoller until one moves. Only when there is nothing
+/// to wait for either is it Go's deadlock.
 fn schedule(how: Switch) {
-    // Everything the switch needs is worked out under the borrow, which is
-    // dropped before the stacks change.
-    let switching = with_sched(|sched| {
+    let me = with_sched(|sched| {
         let me = sched.current;
-        let next = match sched.run.pop_front() {
-            Some(next) => next,
-            None => {
-                return match how {
-                    // Nothing else to run, so carry on.
-                    Switch::Yield => None,
-                    Switch::Park => deadlock(sched),
-                    Switch::Exit(_) => {
-                        // The last goroutine finished, and it is not main:
-                        // main must be parked somewhere, waiting for it.
-                        deadlock(sched)
-                    }
-                };
-            }
-        };
         match how {
-            Switch::Yield => {
+            // A yielding goroutine stays Running until there is somewhere to
+            // yield to.
+            Switch::Yield => {}
+            Switch::Park => sched.g(me).state = State::Waiting,
+            Switch::Exit(_) => sched.g(me).state = State::Dead,
+        }
+        me
+    });
+    loop {
+        // Everything the switch needs is worked out under the borrow, which
+        // is dropped before the stacks change.
+        let picked = with_sched(|sched| {
+            let next = sched.run.pop_front()?;
+            if next == me {
+                // Readied while looking for something else to run, which the
+                // netpoller does to a goroutine waiting on a descriptor.
+                sched.g(me).state = State::Running;
+                return Some(None);
+            }
+            if let Switch::Yield = how {
                 sched.g(me).state = State::Runnable;
                 sched.run.push_back(me);
             }
-            Switch::Park => sched.g(me).state = State::Waiting,
-            Switch::Exit(_) => {}
+            // Free the stack of any goroutine that finished earlier: nothing
+            // has run on it since it switched away.
+            sched.reap.clear();
+            if let Switch::Exit(id) = how
+                && let Some(stack) = sched.gs[id].take().and_then(|g| g.stack)
+            {
+                sched.reap.push(stack);
+            }
+            sched.g(next).state = State::Running;
+            sched.current = next;
+            // Hand the thread's runtime state to the goroutine taking over,
+            // and take the parked one's back. `me` may be gone (it just
+            // exited), in which case its state goes nowhere.
+            let thread = take_thread_state();
+            if sched.gs[me].is_some() {
+                sched.g(me).saved = thread;
+            }
+            let incoming = core::mem::replace(&mut sched.g(next).saved, Saved::new());
+            put_thread_state(incoming);
+            let from: *mut Context = match sched.gs[me].as_mut() {
+                Some(g) => &mut g.ctx,
+                // A goroutine that has exited still needs somewhere to save
+                // the registers the switch writes before abandoning them.
+                None => &raw mut DISCARD,
+            };
+            let to: *const Context = &sched.g(next).ctx;
+            Some(Some((from, to)))
+        });
+        match picked {
+            Some(Some((from, to))) => {
+                // SAFETY: `to` was prepared by `spawn` over a stack that is
+                // alive (its goroutine has not exited), or saved by an
+                // earlier switch out of one.
+                unsafe { context::switch(from, to) };
+                return;
+            }
+            // Nothing to switch to, and nothing to wait for either.
+            Some(None) => return,
+            None => match how {
+                // Nothing else wants the processor, so carry on.
+                Switch::Yield => return,
+                _ => {
+                    // Nothing can run, but the program is not necessarily
+                    // stuck: a descriptor may move, or a deadline may pass.
+                    if wake_expired() {
+                        continue;
+                    }
+                    let deadline = next_deadline();
+                    let watching = crate::netpoll::watching();
+                    if !watching && deadline.is_none() {
+                        deadlock();
+                    }
+                    let timeout = deadline.map(|d| {
+                        // Rounded up, so the wait never ends early and spins.
+                        let left = d - crate::rt::nanotime();
+                        (left.max(0) as u64)
+                            .div_ceil(1_000_000)
+                            .min(i32::MAX as u64) as i32
+                    });
+                    if watching {
+                        crate::netpoll::poll(timeout.unwrap_or(-1));
+                    } else if let Some(ms) = timeout {
+                        crate::rt::nanosleep(ms as i64 * 1_000_000);
+                    }
+                    wake_expired();
+                }
+            },
         }
-        // Free the stack of any goroutine that finished earlier: nothing has
-        // run on it since it switched away.
-        sched.reap.clear();
-        if let Switch::Exit(id) = how
-            && let Some(stack) = sched.gs[id].take().and_then(|g| g.stack)
-        {
-            sched.reap.push(stack);
-        }
-        sched.g(next).state = State::Running;
-        sched.current = next;
-        // Hand the thread's runtime state to the goroutine taking over, and
-        // take the parked one's back. `me` may be gone (it just exited), in
-        // which case its state goes nowhere.
-        let thread = take_thread_state();
-        if sched.gs[me].is_some() {
-            sched.g(me).saved = thread;
-        }
-        let incoming = core::mem::replace(&mut sched.g(next).saved, Saved::new());
-        put_thread_state(incoming);
-        let from: *mut Context = match sched.gs[me].as_mut() {
-            Some(g) => &mut g.ctx,
-            // A goroutine that has exited still needs somewhere to save the
-            // registers the switch writes before it abandons them.
-            None => &raw mut DISCARD,
-        };
-        let to: *const Context = &sched.g(next).ctx;
-        Some((from, to))
-    });
-    if let Some((from, to)) = switching {
-        // SAFETY: `to` was prepared by `spawn` over a stack that is alive (it
-        // belongs to a goroutine that has not exited), or saved by an earlier
-        // switch out of one.
-        unsafe { context::switch(from, to) };
     }
 }
 
@@ -321,7 +360,7 @@ fn schedule(how: Switch) {
 static mut DISCARD: Context = Context::empty();
 
 /// Go's report when nothing can run: every goroutine is blocked forever.
-fn deadlock(_sched: &mut Sched) -> ! {
+fn deadlock() -> ! {
     crate::rt::fatal(b"all goroutines are asleep - deadlock!")
 }
 
@@ -369,6 +408,50 @@ pub(crate) fn trace_parked_roots(t: &mut crate::trace::Tracer<'_>) {
             }
         }
     });
+}
+
+// Goroutines parked until a moment on the monotonic clock: `time.Sleep`, and
+// the timer goroutine waiting for its next timer. The scheduler wakes them,
+// and their deadlines bound how long it may sleep.
+rt_global! {
+    static SLEEPERS: RefCell<Vec<(i64, Gid)>> = RefCell::new(Vec::new());
+}
+
+/// Parks the running goroutine until the monotonic clock reaches `deadline`.
+///
+/// Unlike sleeping the thread, this leaves the other goroutines running, and
+/// the scheduler still sleeps in the kernel rather than spinning: a deadline
+/// is how long its next wait may last.
+pub fn sleep_until(deadline: i64) {
+    if crate::rt::nanotime() >= deadline {
+        return;
+    }
+    let me = current();
+    SLEEPERS.with(|s| s.borrow_mut().push((deadline, me)));
+    park();
+    SLEEPERS.with(|s| s.borrow_mut().retain(|&(_, g)| g != me));
+}
+
+/// The earliest deadline anything is waiting for, if any.
+fn next_deadline() -> Option<i64> {
+    SLEEPERS.with(|s| s.borrow().iter().map(|&(d, _)| d).min())
+}
+
+/// Readies every goroutine whose deadline has passed, and says whether any
+/// had.
+fn wake_expired() -> bool {
+    let now = crate::rt::nanotime();
+    let due: Vec<Gid> = SLEEPERS.with(|s| {
+        s.borrow()
+            .iter()
+            .filter(|&&(d, _)| d <= now)
+            .map(|&(_, g)| g)
+            .collect()
+    });
+    for g in &due {
+        ready(*g);
+    }
+    !due.is_empty()
 }
 
 // Goroutines parked on an address: Go's semaphores, and the channel queues
