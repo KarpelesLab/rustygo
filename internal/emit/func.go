@@ -932,6 +932,38 @@ func (f *fnEmitter) nilComparison(v *ssa.BinOp) (string, bool) {
 	return "", false
 }
 
+// noteReflectMethod records that the program asks reflection for a method,
+// which is what makes the per-method tables worth generating (iface.go). A
+// program that never asks pays nothing for them.
+//
+// The test is the name, not the package: `reflect.Type` is an interface, and a
+// program may call `Method` through an interface of its own that reflect knows
+// nothing about (test/reflectmethod3.go does exactly that). Being wrong this
+// way round costs generated code and nothing else.
+func (f *fnEmitter) noteReflectMethod(obj types.Object) {
+	if obj == nil {
+		return
+	}
+	// Not `NumMethod`: the count is in every descriptor already, because a
+	// program can ask how many methods a type has without asking what they
+	// are, and `encoding/asn1` does — it is how it recognizes the empty
+	// interface. Only asking for a method needs the tables.
+	switch obj.Name() {
+	case "Method", "MethodByName":
+	default:
+		return
+	}
+	// Not reflect's own plumbing calling itself: `MethodByName` is written in
+	// terms of `Method`, and neither says anything about the program.
+	if f.fn.Pkg != nil && f.fn.Pkg.Pkg.Path() == "reflect" {
+		return
+	}
+	if f.e.res.Prog.ImportedPackage("reflect") == nil {
+		return
+	}
+	f.e.usesReflectMethods = true
+}
+
 // isNilConst reports the literal nil, whatever type it was given.
 func isNilConst(v ssa.Value) bool {
 	c, ok := v.(*ssa.Const)
@@ -979,12 +1011,14 @@ func (f *fnEmitter) call(v *ssa.Call) string {
 		args[i] = f.val(a)
 	}
 	if c.IsInvoke() {
+		f.noteReflectMethod(c.Method)
 		return f.invoke(c, args, v.Pos())
 	}
 	if b, ok := c.Value.(*ssa.Builtin); ok {
 		return f.builtin(b, c, v.Type(), v.Pos(), args)
 	}
 	if callee := c.StaticCallee(); callee != nil && c.Value == callee {
+		f.noteReflectMethod(callee.Object())
 		// A finalizer's call has to be written where the types are still
 		// known (finalizer.go).
 		if callee.Pkg != nil && callee.Pkg.Pkg.Path() == "runtime" && callee.Name() == "SetFinalizer" {
@@ -1171,6 +1205,8 @@ func (f *fnEmitter) val(val ssa.Value) string {
 		return f.e.globalPath(v) + "()"
 	case *ssa.Function:
 		// A plain function used as a value: its shim takes an environment.
+		// `var h = reflect.Type.Method` is one of these.
+		f.noteReflectMethod(v.Object())
 		return fmt.Sprintf("Func::new(%s as %s, Env::NONE)",
 			f.e.shimPath(v), f.e.types.fnPtr(v.Signature, f.e, v.Pos()))
 	case *ssa.FreeVar:

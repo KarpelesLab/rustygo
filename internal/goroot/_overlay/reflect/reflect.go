@@ -91,9 +91,28 @@ type Type interface {
 	Implements(u Type) bool
 	AssignableTo(u Type) bool
 	NumMethod() int
+	Method(i int) Method
+	MethodByName(name string) (Method, bool)
 	Bits() int
 	ConvertibleTo(u Type) bool
 }
+
+// Method is one method of a type or value.
+//
+// For a Type, Func is the method expression `T.M`, whose first argument is the
+// receiver. For a Value, Func is bound to that value and Name is all that is
+// filled in.
+type Method struct {
+	Name    string
+	PkgPath string
+	Type    Type
+	Func    Value
+	Index   int
+}
+
+// IsExported reports whether the method is exported. Reflection only ever
+// hands out exported ones.
+func (m Method) IsExported() bool { return m.PkgPath == "" }
 
 // StructField describes one field of a struct type.
 type StructField struct {
@@ -208,7 +227,37 @@ func (t rtype) Comparable() bool { return descComparable(t.d) }
 func (t rtype) Elem() Type       { return typeAt(descElem(t.d)) }
 func (t rtype) Key() Type        { return typeAt(descKey(t.d)) }
 func (t rtype) NumField() int    { return int(descNumField(t.d)) }
-func (t rtype) NumMethod() int   { panic(unsupported("Type.NumMethod")) }
+func (t rtype) NumMethod() int   { return int(descNumMethod(t.d)) }
+
+// Method returns the i'th exported method, in Go's order, which is by name.
+func (t rtype) Method(i int) Method {
+	if i < 0 || i >= t.NumMethod() {
+		panic("reflect: Method index out of range")
+	}
+	d := descMethodExprType(t.d, i)
+	// An interface type's method has a signature and no func value, exactly as
+	// gc's reflect reports it.
+	var fn Value
+	if p := descMethodExprFunc(t.d, i); p != nil {
+		fn = Value{d, p, false}
+	}
+	return Method{
+		Name:    descMethodName(t.d, i),
+		PkgPath: descMethodPkgPath(t.d, i),
+		Type:    typeAt(d),
+		Func:    fn,
+		Index:   i,
+	}
+}
+
+func (t rtype) MethodByName(name string) (Method, bool) {
+	for i := 0; i < t.NumMethod(); i++ {
+		if descMethodName(t.d, i) == name {
+			return t.Method(i), true
+		}
+	}
+	return Method{}, false
+}
 
 func (t rtype) Len() int {
 	if t.Kind() != Array {
@@ -504,6 +553,43 @@ func (v Value) Field(i int) Value {
 	return Value{descFieldType(v.d, i), unsafe.Add(v.p, uintptr(descFieldOffset(v.d, i))), v.addr}
 }
 
+// NumMethod returns the number of exported methods of v's type.
+func (v Value) NumMethod() int {
+	if v.d == nil {
+		panic("reflect: NumMethod of the zero Value")
+	}
+	return int(descNumMethod(v.d))
+}
+
+// Method returns the i'th exported method bound to v: a func value with no
+// receiver, which carries v with it.
+func (v Value) Method(i int) Value {
+	if v.d == nil {
+		panic("reflect: Method of the zero Value")
+	}
+	if i < 0 || i >= v.NumMethod() {
+		panic("reflect: Method index out of range")
+	}
+	p := descMethodValueFunc(v.d, i, v.p)
+	if p == nil {
+		panic("reflect: Method on an interface type's value")
+	}
+	return Value{descMethodValueType(v.d, i), p, false}
+}
+
+// MethodByName returns the named method bound to v, or the zero Value.
+func (v Value) MethodByName(name string) Value {
+	if v.d == nil {
+		panic("reflect: MethodByName of the zero Value")
+	}
+	for i := 0; i < v.NumMethod(); i++ {
+		if descMethodName(v.d, i) == name {
+			return v.Method(i)
+		}
+	}
+	return Value{}
+}
+
 func (v Value) NumField() int {
 	if v.Kind() != Struct {
 		panic("reflect: NumField of " + v.Kind().String() + " value")
@@ -746,11 +832,10 @@ func Swapper(slice any) func(i, j int) {
 	}
 }
 
-// Constructing types and values, and calling methods, are not here yet.
+// Constructing types and values, and calling a method through reflection
+// rather than through a func value, are not here yet.
 
 func (v Value) Call(in []Value) []Value      { panic(unsupported("Value.Call")) }
-func (v Value) Method(i int) Value           { panic(unsupported("Value.Method")) }
-func (v Value) NumMethod() int               { panic(unsupported("Value.NumMethod")) }
 func MakeSlice(typ Type, len, cap int) Value { panic(unsupported("MakeSlice")) }
 func New(typ Type) Value                     { panic(unsupported("New")) }
 func Zero(typ Type) Value                    { panic(unsupported("Zero")) }
@@ -889,6 +974,13 @@ func descFieldOffset(d unsafe.Pointer, i int) uint64
 func descFieldTag(d unsafe.Pointer, i int) string
 func descFieldEmbedded(d unsafe.Pointer, i int) bool
 func descBox(d, addr unsafe.Pointer) unsafe.Pointer
+func descNumMethod(d unsafe.Pointer) int64
+func descMethodName(d unsafe.Pointer, i int) string
+func descMethodPkgPath(d unsafe.Pointer, i int) string
+func descMethodExprType(d unsafe.Pointer, i int) unsafe.Pointer
+func descMethodExprFunc(d unsafe.Pointer, i int) unsafe.Pointer
+func descMethodValueType(d unsafe.Pointer, i int) unsafe.Pointer
+func descMethodValueFunc(d unsafe.Pointer, i int, recv unsafe.Pointer) unsafe.Pointer
 func mapLen(d, m unsafe.Pointer) int64
 func mapIter(d, m unsafe.Pointer) unsafe.Pointer
 func mapNext(d, it unsafe.Pointer) (bool, unsafe.Pointer, unsafe.Pointer)

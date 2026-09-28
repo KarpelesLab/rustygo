@@ -191,3 +191,84 @@ pub fn map_index(d: UPtr, m: UPtr, k: UPtr) -> (UPtr, bool) {
 fn data(p: UPtr) -> Data {
     Data::of::<u8>(unsafe { p.to_ptr() })
 }
+
+// Methods, as `reflect.Type.Method` and `reflect.Value.Method` hand them out.
+//
+// A method's two func values differ only in whether the receiver is a
+// parameter or an environment, and a `Func<F>` is a code address and an
+// environment whatever `F` is. So one box serves any method's type, and the
+// program reads it back as the signature the descriptor promised — the bargain
+// [`crate::iface::ErasedFn`] already makes for dispatch.
+
+/// How many exported methods a type has.
+pub fn num_method(d: UPtr) -> i64 {
+    desc(d).num_methods as i64
+}
+
+fn method(d: UPtr, i: i64) -> &'static crate::iface::MethodDesc {
+    let d = desc(d);
+    match d.reflect_methods.get(i as usize) {
+        Some(m) => m,
+        // The count comes from the descriptor and the table from the pass that
+        // saw the program ask for a method, so a program that reaches here
+        // with an index in range asked in a way that pass did not see.
+        None => crate::panic::runtime_error_msg(alloc::format!(
+            "reflect: method {i} of {} is not in the program's method tables",
+            d.name
+        )),
+    }
+}
+
+/// The method's name.
+pub fn method_name(d: UPtr, i: i64) -> GoStr {
+    GoStr::lit(method(d, i).name.as_bytes())
+}
+
+/// The method's package path, empty for an exported one.
+pub fn method_pkg_path(d: UPtr, i: i64) -> GoStr {
+    GoStr::lit(method(d, i).pkg_path.as_bytes())
+}
+
+/// The type of the method expression `T.M`.
+pub fn method_expr_type(d: UPtr, i: i64) -> UPtr {
+    UPtr::from_addr(method(d, i).expr_type as *const TypeDesc as usize as u64)
+}
+
+/// The method expression `T.M` as a boxed func value.
+pub fn method_expr_func(d: UPtr, i: i64) -> UPtr {
+    boxed_func(method(d, i).expr, crate::func::Env::NONE)
+}
+
+/// The type of a method value `x.M`.
+pub fn method_value_type(d: UPtr, i: i64) -> UPtr {
+    UPtr::from_addr(method(d, i).value_type as *const TypeDesc as usize as u64)
+}
+
+/// The method value `x.M` as a boxed func value, over the receiver at `recv`.
+pub fn method_value_func(d: UPtr, i: i64, recv: UPtr) -> UPtr {
+    // The receiver's box is the environment: the generated code for `value`
+    // reads the receiver straight out of it.
+    boxed_func(
+        method(d, i).value,
+        crate::func::Env::of(unsafe { recv.to_ptr::<crate::place::Slot<u8>>() }),
+    )
+}
+
+/// A func value with the code and environment given, boxed as an interface's
+/// data word.
+fn boxed_func(code: crate::iface::ErasedFn, env: crate::func::Env) -> UPtr {
+    if code.is_none() {
+        // An interface type's method: a signature and nothing to call.
+        return UPtr::from_addr(0);
+    }
+    // SAFETY (invariant): the emitter pairs each code address with the
+    // descriptor that names its signature, and a `Func` holding it is the same
+    // two words whichever signature that is.
+    let f = crate::func::Func::<fn(crate::func::Env)>::new(
+        unsafe { core::mem::transmute_copy(&code) },
+        env,
+    );
+    let boxed =
+        crate::place::Ptr::<crate::place::Slot<crate::func::Func<fn(crate::func::Env)>>>::alloc(f);
+    UPtr::from_addr(Data::of(boxed).addr())
+}

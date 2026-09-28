@@ -63,7 +63,8 @@ func newTypeReg() *typeReg {
 // preludeNames are the items `rustygo::prelude` brings into every generated
 // module. Keep in sync with src/prelude.rs.
 var preludeNames = []string{
-	"Chan", "Defers", "Env", "Func", "Data", "ErasedFn", "Iface", "MethodId", "TypeDesc",
+	"Chan", "Defers", "Env", "Func", "Data", "ErasedFn", "Iface", "MethodDesc", "MethodId",
+	"TypeDesc",
 	"GoKey", "GoMap", "MapIter", "Place", "Ptr", "Slot", "Slice", "GoStr",
 	"StrIter", "Trace", "Tracer", "GoValue", "GoInt",
 }

@@ -55,6 +55,27 @@ var intrinsics = map[string]func(args []string) string{
 	"reflect.descString": func(a []string) string {
 		return fmt.Sprintf("rustygo::reflect::type_string(%s)", a[0])
 	},
+	"reflect.descNumMethod": func(a []string) string {
+		return fmt.Sprintf("rustygo::reflect::num_method(%s)", a[0])
+	},
+	"reflect.descMethodName": func(a []string) string {
+		return fmt.Sprintf("rustygo::reflect::method_name(%s, %s)", a[0], a[1])
+	},
+	"reflect.descMethodPkgPath": func(a []string) string {
+		return fmt.Sprintf("rustygo::reflect::method_pkg_path(%s, %s)", a[0], a[1])
+	},
+	"reflect.descMethodExprType": func(a []string) string {
+		return fmt.Sprintf("rustygo::reflect::method_expr_type(%s, %s)", a[0], a[1])
+	},
+	"reflect.descMethodExprFunc": func(a []string) string {
+		return fmt.Sprintf("rustygo::reflect::method_expr_func(%s, %s)", a[0], a[1])
+	},
+	"reflect.descMethodValueType": func(a []string) string {
+		return fmt.Sprintf("rustygo::reflect::method_value_type(%s, %s)", a[0], a[1])
+	},
+	"reflect.descMethodValueFunc": func(a []string) string {
+		return fmt.Sprintf("rustygo::reflect::method_value_func(%s, %s, %s)", a[0], a[1], a[2])
+	},
 	"reflect.descPkgPath": func(a []string) string {
 		return fmt.Sprintf("rustygo::reflect::pkg_path(%s)", a[0])
 	},

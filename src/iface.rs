@@ -40,10 +40,20 @@ unsafe impl Sync for ErasedFn {}
 unsafe impl Send for ErasedFn {}
 
 impl ErasedFn {
+    /// No function at all, which is what an interface type's methods have:
+    /// reflection reports their signatures and no func value.
+    pub const NONE: ErasedFn = ErasedFn(core::ptr::null());
+
     /// Erases a method wrapper, which generated code spells
     /// `ErasedFn::new(wrapper as *const ())`.
     pub const fn new(code: *const ()) -> Self {
         ErasedFn(code)
+    }
+
+    /// Whether there is no function here.
+    #[inline]
+    pub fn is_none(self) -> bool {
+        self.0.is_null()
     }
 }
 
@@ -86,6 +96,41 @@ pub struct TypeDesc {
     /// A map's accessors: our maps are hash tables, not memory gc's layout
     /// rules describe, so reflection reaches them through these.
     pub map_ops: Option<&'static MapOps>,
+    /// How many exported methods the type has, which
+    /// `reflect.Type.NumMethod` reports. Always known, even when the table
+    /// below is not generated: a program can ask how many methods a type has
+    /// without asking what they are, and `encoding/asn1` does exactly that to
+    /// recognize the empty interface.
+    pub num_methods: usize,
+    /// The exported methods, in Go's order, for `reflect.Type.Method`. Empty
+    /// unless the program reaches that part of reflection: method *dispatch*
+    /// needs none of it, and generating it for every method of every type
+    /// would be so much code for nothing.
+    pub reflect_methods: &'static [MethodDesc],
+}
+
+/// One method, as reflection hands it out.
+///
+/// Reflection wants two func values for a method, and neither is the wrapper
+/// interface dispatch uses (that one takes the receiver boxed). `T.M` is a
+/// func whose first parameter is the receiver; `x.M` is a func without it,
+/// carrying the receiver with it. The emitter generates the pair, along with
+/// the descriptor of each one's type, so that `.Interface()` on either can be
+/// asserted back to the func type the program wrote.
+pub struct MethodDesc {
+    /// The method's name.
+    pub name: &'static str,
+    /// The defining package's path, empty for an exported method, as
+    /// `reflect.Method` reports it.
+    pub pkg_path: &'static str,
+    /// The type of the method expression `T.M`.
+    pub expr_type: &'static TypeDesc,
+    /// Its code: a func value's code, with no environment.
+    pub expr: ErasedFn,
+    /// The type of a method value `x.M`, which is the method's own signature.
+    pub value_type: &'static TypeDesc,
+    /// Its code, which takes the receiver's box as its environment.
+    pub value: ErasedFn,
 }
 
 /// One field of a struct type, as reflection sees it.
@@ -138,6 +183,8 @@ impl TypeDesc {
         len: 0,
         fields: &[],
         map_ops: None,
+        num_methods: 0,
+        reflect_methods: &[],
     };
 
     fn method(&self, id: MethodId) -> Option<ErasedFn> {
