@@ -1,6 +1,8 @@
 package emit
 
 import (
+	"go/token"
+
 	"golang.org/x/tools/go/ssa"
 )
 
@@ -88,11 +90,19 @@ func analyzeInit(fn *ssa.Function, liveGlobals map[*ssa.Global]bool) (dead map[s
 	var stores []ssa.Instruction
 	for _, b := range fn.Blocks {
 		for _, instr := range b.Instrs {
-			switch instr.(type) {
+			switch instr := instr.(type) {
 			case *ssa.Store, *ssa.MapUpdate:
 				stores = append(stores, instr)
 			case *ssa.Call:
 				mark(instr) // a call may have effects
+			case *ssa.UnOp:
+				// A receive takes a value out of the channel, which the next
+				// receive can tell; every other unary operator is pure.
+				if instr.Op == token.ARROW {
+					mark(instr)
+				}
+			case *ssa.Select:
+				mark(instr) // a select receives, sends, or blocks
 			case ssa.Value:
 				// Any other value is live only if something live uses it.
 			default:

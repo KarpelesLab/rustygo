@@ -105,7 +105,16 @@ impl<T> Chan<T> {
 impl<T: GoValue + Trace> Chan<T> {
     /// `make(chan T, cap)`. A safe point: it allocates.
     pub fn make(cap: i64) -> Self {
-        let cap = crate::ops::make_bounds(cap, cap, size_of::<T>()).0;
+        // A channel's own complaint, which is not a slice's: gc says
+        // "makechan: size out of range".
+        if cap < 0
+            || (cap as u64)
+                .checked_mul(size_of::<T>().max(1) as u64)
+                .is_none_or(|bytes| bytes > 1 << 48)
+        {
+            crate::panic::runtime_error(crate::panic::RuntimeError::MakeChan { size: cap });
+        }
+        let cap = cap as usize;
         let obj = heap::allocate(ChanObj {
             state: RefCell::new(State {
                 buf: VecDeque::new(),

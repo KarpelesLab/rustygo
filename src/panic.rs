@@ -349,6 +349,11 @@ pub enum RuntimeError {
         /// The requested capacity.
         cap: i64,
     },
+    /// `make(chan T, n)` with a negative or too-large buffer.
+    MakeChan {
+        /// The requested buffer size.
+        size: i64,
+    },
     /// `make` with a length outside `[0, cap]`.
     MakeLen {
         /// The requested length.
@@ -425,6 +430,7 @@ impl RuntimeError {
                 format!("slice bounds out of range [::{max}] with capacity {cap}")
             }
             RuntimeError::MakeCap { .. } => String::from("makeslice: cap out of range"),
+            RuntimeError::MakeChan { .. } => String::from("makechan: size out of range"),
             RuntimeError::MakeLen { .. } => String::from("makeslice: len out of range"),
             RuntimeError::SliceLow { low, .. } if low < 0 => {
                 format!("slice bounds out of range [{low}:]")

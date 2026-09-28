@@ -687,9 +687,13 @@ func (f *fnEmitter) binop(v *ssa.BinOp) string {
 	isInt := b != nil && b.Info()&types.IsInteger != 0
 	switch v.Op {
 	case token.EQL, token.NEQ:
-		// The only comparison Go allows on a slice is against nil.
+		// The only comparison Go allows on a slice is against nil, and the
+		// nil may be on either side: `nil == s` tests the slice, not the nil.
 		switch v.X.Type().Underlying().(type) {
 		case *types.Slice, *types.Map:
+			if isNilConst(v.X) {
+				return nilTest(y, v.Op)
+			}
 			return nilTest(x, v.Op)
 		}
 		switch v.Y.Type().Underlying().(type) {
@@ -846,6 +850,12 @@ func (f *fnEmitter) convert(v *ssa.Convert) string {
 	}
 	f.errorf(v.Pos(), "conversion from %s to %s is not supported yet", v.X.Type(), v.Type())
 	return ""
+}
+
+// isNilConst reports the literal nil, whatever type it was given.
+func isNilConst(v ssa.Value) bool {
+	c, ok := v.(*ssa.Const)
+	return ok && c.Value == nil
 }
 
 // nilTest compares a slice or map against nil, the only comparison Go
@@ -1030,7 +1040,9 @@ func (e *emitter) printArgOf(t types.Type, x string, pos token.Pos) string {
 		return fmt.Sprintf("rustygo::print::Arg::Iface { data: (%s).data().addr() }", x)
 	case *types.Slice:
 		return fmt.Sprintf("rustygo::print::Arg::Slice { len: (%s).len(), cap: (%s).cap(), addr: (%s).addr() }", x, x, x)
-	case *types.Map:
+	case *types.Map, *types.Chan:
+		// `println` shows a map or a channel as the address of its object,
+		// which is what gc prints.
 		return fmt.Sprintf("rustygo::print::Arg::Pointer((%s).addr())", x)
 	}
 	e.errorf(pos, "printing a %s is not supported yet", t)

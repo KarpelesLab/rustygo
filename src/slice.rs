@@ -116,7 +116,7 @@ impl<P> Slice<P> {
     pub fn to_array<const N: usize>(self) -> Ptr<[P; N]> {
         if self.len < N {
             crate::panic::runtime_error_msg(alloc::format!(
-                "cannot convert slice with length {} to array or pointer to array with length {N}",
+                "runtime error: cannot convert slice with length {} to array or pointer to array with length {N}",
                 self.len
             ));
         }
@@ -136,10 +136,15 @@ impl<P> Slice<P> {
     /// past the length up to the capacity.
     pub fn slice(self, lo: i64, hi: Option<i64>, max: Option<i64>) -> Slice<P> {
         let (lo, hi, max) = ops::slice3_bounds(lo, hi, max, self.len, self.cap);
+        // A slice with no capacity left keeps the base it came from, instead
+        // of a pointer one past the end of the array. gc does the same, and
+        // for the same reason: that address may belong to the next object,
+        // which the collector would then resolve it to and keep alive — or,
+        // for the last object in the heap, to nothing at all.
+        let delta = if max == lo { 0 } else { lo };
         Slice {
-            // SAFETY: `lo <= cap`, so this is inside the array or one past
-            // its end.
-            ptr: unsafe { self.ptr.add(lo) },
+            // SAFETY: `delta <= lo <= cap`, so this is inside the array.
+            ptr: unsafe { self.ptr.add(delta) },
             len: hi - lo,
             cap: max - lo,
         }

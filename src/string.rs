@@ -157,10 +157,13 @@ impl GoStr {
     /// bytes, as in Go.
     pub fn slice(self, lo: i64, hi: Option<i64>) -> GoStr {
         let (lo, hi) = ops::slice_bounds(lo, hi, self.len);
+        // An empty result keeps the base it came from rather than a pointer
+        // one past the end of the bytes, which may belong to whatever comes
+        // next in the heap. gc masks the offset the same way.
+        let delta = if hi == lo { 0 } else { lo };
         GoStr {
-            // SAFETY: `lo <= hi <= len`, so this stays inside the bytes (one
-            // past the end is allowed).
-            ptr: unsafe { self.ptr.add(lo) },
+            // SAFETY: `delta <= lo <= len`, so this stays inside the bytes.
+            ptr: unsafe { self.ptr.add(delta) },
             len: hi - lo,
         }
     }
