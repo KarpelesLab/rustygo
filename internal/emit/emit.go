@@ -504,6 +504,8 @@ func (e *emitter) write(opt Options, initPath, mainPath string) error {
 				continue
 			}
 			fmt.Fprintf(&lib, "pub mod %s;\n", m.name)
+			// `mod r#unsafe;` resolves to `unsafe.rs`: Rust drops the `r#`
+			// when it goes looking for the file.
 			files[filepath.Join(dir, "src", strings.TrimPrefix(m.name, "r#")+".rs")] = []byte(generatedHeader + body.String())
 			wrote = true
 		}

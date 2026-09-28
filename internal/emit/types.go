@@ -187,7 +187,7 @@ func (r *typeReg) structInfo(st *types.Struct, hint string, e *emitter, pos toke
 	// The struct goes as deep as the deepest package its fields come from,
 	// so that everything it mentions is already compiled below it.
 	si := &structInfo{
-		name: r.ns.claim(strings.TrimPrefix(base, "r#")),
+		name: r.ns.claim(plain(base)),
 		band: r.bands.typ(st),
 	}
 	// Register before emitting fields: a field may point back to this type.

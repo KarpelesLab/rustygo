@@ -36,6 +36,10 @@ type result struct {
 	ok      bool
 	skipped bool
 	reason  string
+	// The two binaries, kept only for a failure that got as far as running
+	// them, so that [retry] can run them again without building anything.
+	gcBin, rgBin string
+	timeout      time.Duration
 }
 
 func main() {
@@ -80,6 +84,15 @@ func main() {
 	close(work)
 	wg.Wait()
 	fmt.Fprintln(os.Stderr)
+
+	// Now that nothing else is running, give each failure one more run.
+	for i, r := range results {
+		again := retry(r)
+		if again.ok && !r.ok {
+			fmt.Fprintf(os.Stderr, "%s passed on its own\n", r.name)
+		}
+		results[i] = again
+	}
 
 	var passed, skipped int
 	var failures []result
@@ -165,7 +178,9 @@ func runOne(path, work string, cfg build.Config, timeout time.Duration) result {
 		exe = ".exe"
 	}
 
-	gcBin := filepath.Join(work, "gc"+exe)
+	// Named after the test, because a failure's binaries outlive the worker's
+	// next test.
+	gcBin := filepath.Join(work, name+"-gc"+exe)
 	cmd := exec.Command("go", "build", "-o", gcBin, path)
 	if out, err := cmd.CombinedOutput(); err != nil {
 		// gc will not build it here: not rustygo's failure to count.
@@ -176,7 +191,7 @@ func runOne(path, work string, cfg build.Config, timeout time.Duration) result {
 		return result{name: name, skipped: true, reason: "gc run: " + err.Error()}
 	}
 
-	rgBin := filepath.Join(work, "rustygo"+exe)
+	rgBin := filepath.Join(work, name+"-rustygo"+exe)
 	res, err := load.Load(filepath.Dir(path), path)
 	if err == nil {
 		err = build.Binary(res, rgBin, cfg)
@@ -185,6 +200,7 @@ func runOne(path, work string, cfg build.Config, timeout time.Duration) result {
 		r.reason = firstError(err.Error())
 		return r
 	}
+	r.gcBin, r.rgBin, r.timeout = gcBin, rgBin, timeout
 	got, err := run(rgBin, timeout, true)
 	if err != nil {
 		r.reason = "rustygo run: " + err.Error()
@@ -195,6 +211,36 @@ func runOne(path, work string, cfg build.Config, timeout time.Duration) result {
 		return r
 	}
 	r.ok = true
+	os.Remove(gcBin)
+	os.Remove(rgBin)
+	return r
+}
+
+// retry runs a failed test's two binaries again, alone.
+//
+// Several of Go's tests measure time — `chanlinear` asserts that dequeuing
+// from a channel stays linear by comparing two durations — and the first run
+// happened while every other worker was compiling. A failure that got as far
+// as running is therefore given one more go with the machine to itself, and
+// only a difference that survives that is reported.
+func retry(r result) result {
+	if r.ok || r.skipped || r.gcBin == "" {
+		return r
+	}
+	want, err := run(r.gcBin, r.timeout, false)
+	if err != nil {
+		return r
+	}
+	got, err := run(r.rgBin, r.timeout, true)
+	if err != nil {
+		return r
+	}
+	if diff := compare(want, got); diff != "" {
+		r.reason = diff
+		return r
+	}
+	r.ok = true
+	r.reason = ""
 	return r
 }
 

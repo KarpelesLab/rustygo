@@ -8,11 +8,15 @@ import (
 )
 
 // MaxTestMemory caps the address space of a rustygo-built binary run by the
-// test harnesses. Generated programs reserve little virtual memory, so the
-// cap only bites on a runaway allocation — a length read from freed memory,
-// say — which then fails inside the child instead of asking the host for
+// test harnesses, so that a runaway allocation — a length read from freed
+// memory, say — fails inside the child instead of asking the host for
 // hundreds of gigabytes.
-const MaxTestMemory = 8 << 30
+//
+// It has to be generous, because a goroutine reserves its whole stack up
+// front: 8 MiB of address space each, touched a page at a time, so a thousand
+// goroutines account for 8 GiB of the limit without using any of it. Go's own
+// `chanlinear` test starts a thousand and doubles from there.
+const MaxTestMemory = 64 << 30
 
 // TestCommand runs a rustygo-built binary under MaxTestMemory. The limit is
 // applied through the shell's `ulimit -v`, so the harness itself is not

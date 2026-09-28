@@ -50,6 +50,25 @@ func init() {
 	}
 }
 
+// plain turns a raw identifier into an ordinary one.
+//
+// A struct's name is also the stem of its place struct's, with `_P` on the
+// end, and `r#` cannot be carried along by that — nor can it simply be
+// dropped, which would leave the keyword itself. So the `_0` suffix `mangle`
+// uses for the keywords with no raw form is used here too: a Go type called
+// `box` becomes `box_0`. It cannot collide, because `mangle` produces `box_0`
+// from no Go name at all (a Go `box_0` mangles to `box_10`).
+//
+// Where a name is only ever prefixed (`G_box`) or is a module's, dropping the
+// `r#` is right instead: a prefixed name is no longer a keyword, and Rust
+// itself drops the `r#` when it looks for `mod r#unsafe`'s file.
+func plain(name string) string {
+	if s, ok := strings.CutPrefix(name, "r#"); ok {
+		return s + "_0"
+	}
+	return name
+}
+
 // namespace hands out unique identifiers within one Rust module.
 type namespace map[string]bool
 

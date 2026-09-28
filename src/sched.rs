@@ -19,7 +19,7 @@
 use crate::context::{self, Context};
 use crate::stack::Stack;
 use alloc::boxed::Box;
-use alloc::collections::VecDeque;
+use alloc::collections::{BTreeMap, VecDeque};
 use alloc::vec::Vec;
 use core::cell::RefCell;
 
@@ -467,11 +467,93 @@ fn wake_expired() -> bool {
     !due.is_empty()
 }
 
-// Goroutines parked on an address: Go's semaphores, and the channel queues
-// to come. A linear scan, because a program has few of these at a time and
-// the M:N scheduler will replace the table wholesale.
+// Goroutines parked on an address: Go's semaphores and the channel queues.
+//
+// By address, because that is how every wake names its waiters, and a program
+// can have a great many of them at once — Go's own `chanlinear` test puts
+// thousands of goroutines in a `select` on one channel, wakes each of them
+// through a channel of its own, and requires that the whole thing stay linear
+// in the number of wakes. Two things about one shared address therefore have
+// to be cheap: waking the goroutines at it, and *one* goroutine leaving it,
+// which is what a `select` does to every case it did not take.
 rt_global! {
-    static WAITERS: RefCell<Vec<(usize, Gid)>> = RefCell::new(Vec::new());
+    static WAITERS: RefCell<BTreeMap<usize, Queue>> = RefCell::new(BTreeMap::new());
+}
+
+/// The goroutines waiting at one address, oldest first.
+///
+/// Leaving has to be as cheap as arriving, and a goroutine leaves by name, so
+/// every registration is numbered and the numbers say where in the queue it
+/// sits. Nothing shifts: a departure empties its slot, and the empty slots at
+/// the front are dropped as they are reached.
+#[derive(Default)]
+struct Queue {
+    /// The number of `slots[0]`.
+    first: u64,
+    slots: VecDeque<Option<Gid>>,
+    /// Which number each goroutine here was given. A goroutine registers at
+    /// one address at most once.
+    at: BTreeMap<Gid, u64>,
+}
+
+impl Queue {
+    fn push(&mut self, g: Gid) {
+        if self.at.contains_key(&g) {
+            return;
+        }
+        self.at.insert(g, self.first + self.slots.len() as u64);
+        self.slots.push_back(Some(g));
+    }
+
+    /// Takes the goroutine that has waited longest.
+    fn pop(&mut self) -> Option<Gid> {
+        while let Some(slot) = self.slots.pop_front() {
+            self.first += 1;
+            if let Some(g) = slot {
+                self.at.remove(&g);
+                return Some(g);
+            }
+        }
+        None
+    }
+
+    /// Takes one named goroutine, wherever it is.
+    fn remove(&mut self, g: Gid) {
+        if let Some(seq) = self.at.remove(&g) {
+            self.slots[(seq - self.first) as usize] = None;
+            self.trim();
+        }
+    }
+
+    /// Drops the empty slots the front has collected.
+    fn trim(&mut self) {
+        while let Some(None) = self.slots.front() {
+            self.slots.pop_front();
+            self.first += 1;
+        }
+    }
+
+    fn is_empty(&self) -> bool {
+        self.at.is_empty()
+    }
+}
+
+/// Records that `g` is waiting at `addr`.
+fn enqueue(addr: usize, g: Gid) {
+    WAITERS.with(|w| w.borrow_mut().entry(addr).or_default().push(g));
+}
+
+/// Takes `g` off `addr`, if it is still there.
+fn dequeue(addr: usize, g: Gid) {
+    WAITERS.with(|w| {
+        let mut w = w.borrow_mut();
+        if let Some(q) = w.get_mut(&addr) {
+            q.remove(g);
+            if q.is_empty() {
+                w.remove(&addr);
+            }
+        }
+    });
 }
 
 /// Parks the running goroutine on `addr` until [`wake_one`] names it.
@@ -481,8 +563,12 @@ rt_global! {
 /// this safe without a lock.
 pub fn park_on(addr: usize) {
     let me = current();
-    WAITERS.with(|w| w.borrow_mut().push((addr, me)));
+    enqueue(addr, me);
     park();
+    // Woken by something other than a wake on this address — the netpoller
+    // readies a goroutine directly — would otherwise leave the registration
+    // behind.
+    dequeue(addr, me);
 }
 
 /// Readies every goroutine parked on `addr`.
@@ -495,14 +581,12 @@ pub fn wake_all(addr: usize) {
     let woken = WAITERS.with(|w| {
         let mut w = w.borrow_mut();
         let mut woken = Vec::new();
-        w.retain(|&(a, g)| {
-            if a == addr {
+        if let Some(q) = w.get_mut(&addr) {
+            while let Some(g) = q.pop() {
                 woken.push(g);
-                false
-            } else {
-                true
             }
-        });
+            w.remove(&addr);
+        }
         woken
     });
     for g in woken {
@@ -514,9 +598,12 @@ pub fn wake_all(addr: usize) {
 pub fn wake_one(addr: usize) {
     let waiter = WAITERS.with(|w| {
         let mut w = w.borrow_mut();
-        w.iter()
-            .position(|&(a, _)| a == addr)
-            .map(|i| w.remove(i).1)
+        let q = w.get_mut(&addr)?;
+        let g = q.pop();
+        if q.is_empty() {
+            w.remove(&addr);
+        }
+        g
     });
     if let Some(g) = waiter {
         ready(g);
@@ -532,19 +619,17 @@ pub fn count() -> i64 {
 /// off all of them. An empty list parks for ever, which is `select {}`.
 pub fn park_on_any(addrs: &[usize]) {
     let me = current();
-    WAITERS.with(|w| {
-        let mut w = w.borrow_mut();
-        if addrs.is_empty() {
-            w.push((0, me));
-        }
-        for &a in addrs {
-            w.push((a, me));
-        }
-    });
+    // `select {}` waits at an address nothing ever wakes.
+    let addrs = if addrs.is_empty() { &[0][..] } else { addrs };
+    for &a in addrs {
+        enqueue(a, me);
+    }
     park();
     // Woken through one address; the registrations on the others would
     // otherwise wake this goroutine again long after it stopped waiting.
-    WAITERS.with(|w| w.borrow_mut().retain(|&(_, g)| g != me));
+    for &a in addrs {
+        dequeue(a, me);
+    }
 }
 
 // Which ready case a `select` takes. Go picks uniformly at random, so that a
