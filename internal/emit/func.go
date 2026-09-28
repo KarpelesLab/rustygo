@@ -466,12 +466,22 @@ func (f *fnEmitter) recoverPath(ind string) {
 // slot: it holds the environments of the deferred calls.
 var deferSlot = new(ssa.Parameter)
 
-// hasDefers reports whether fn defers anything.
+// hasDefers reports whether fn needs a defer list.
+//
+// Usually because it defers. It may also be because it hands its list to a
+// range-over-func body, which defers on its behalf: go/ssa marks that with a
+// call to `ssa:deferstack()`, and keeps the call only where a body really
+// needs it.
 func hasDefers(fn *ssa.Function) bool {
 	for _, b := range fn.Blocks {
 		for _, instr := range b.Instrs {
-			if _, ok := instr.(*ssa.Defer); ok {
+			switch instr := instr.(type) {
+			case *ssa.Defer:
 				return true
+			case *ssa.Call:
+				if b, ok := instr.Common().Value.(*ssa.Builtin); ok && b.Name() == "ssa:deferstack" {
+					return true
+				}
 			}
 		}
 	}
@@ -483,6 +493,11 @@ func (f *fnEmitter) deferStmt(d *ssa.Defer) string {
 	thunk, env := f.callThunk(&d.Call, d.Pos(), "deferred")
 	if thunk == "" {
 		return ""
+	}
+	// A `defer` in a range-over-func body names the list it belongs to, which
+	// is the enclosing function's and not this closure's.
+	if d.DeferStack != nil {
+		return fmt.Sprintf("rustygo::defers::push_to(%s, %s, %s);", f.val(d.DeferStack), thunk, env)
 	}
 	return fmt.Sprintf("__defers.push(%s, %s);", thunk, env)
 }
@@ -987,6 +1002,16 @@ func (f *fnEmitter) call(v *ssa.Call) string {
 
 func (f *fnEmitter) builtin(b *ssa.Builtin, c *ssa.CallCommon, resultType types.Type, pos token.Pos, args []string) string {
 	switch b.Name() {
+	case "ssa:deferstack":
+		// go/ssa's own intrinsic, not Go's: the enclosing function's defer
+		// list, for a `defer` in a range-over-func body to push onto
+		// (deferStmt). It survives only when a body closure needs it, so a
+		// function that has one also has defers.
+		if !f.hasDefers {
+			f.errorf(pos, "ssa:deferstack in a function with no defers")
+			return ""
+		}
+		return "__defers.handle()"
 	case "print", "println":
 		parts := make([]string, len(c.Args))
 		for i, a := range c.Args {
@@ -1181,6 +1206,14 @@ func (f *fnEmitter) constant(c *ssa.Const) string {
 		return strconv.FormatBool(constant.BoolVal(c.Value))
 	case b.Info()&types.IsString != 0:
 		return "GoStr::lit(" + byteString(constant.StringVal(c.Value)) + ")"
+	case b.Kind() == types.UnsafePointer:
+		// `unsafe.Pointer(^uintptr(0))` is a constant, and one no object is
+		// at: an address is all it is (test/unsafebuiltins.go).
+		u, ok := constant.Uint64Val(constant.ToInt(c.Value))
+		if !ok {
+			f.errorf(c.Pos(), "constant %s does not fit in %s", c.Value, c.Type())
+		}
+		return fmt.Sprintf("UPtr::from_addr(%d)", u)
 	case b.Info()&types.IsUnsigned != 0:
 		// A constant of unsigned type may still be held as a float value
 		// (`const x uint = 10` can arrive as 10.0), so normalize first.

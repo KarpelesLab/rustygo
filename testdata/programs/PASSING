@@ -53,3 +53,4 @@ netdial linux
 nethttp linux
 finalizers linux
 keywords
+rangefunc

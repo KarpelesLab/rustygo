@@ -84,11 +84,22 @@ impl<P> Slice<P> {
         if len < 0 {
             crate::panic::runtime_error(crate::panic::RuntimeError::UnsafeSliceLen);
         }
-        if ptr.addr() == 0 && len > 0 {
+        let addr = ptr.addr() as usize;
+        if addr == 0 && len > 0 {
             crate::panic::runtime_error(crate::panic::RuntimeError::UnsafeSliceNil);
         }
+        // The elements have to fit between the pointer and the end of the
+        // address space, which is what gc checks and what
+        // test/unsafebuiltins.go asks about: a slice of two bytes at the very
+        // last address is out of range, one of a single byte is not.
+        if core::mem::size_of::<P>()
+            .checked_mul(len as usize)
+            .is_none_or(|bytes| bytes > 0usize.wrapping_sub(addr))
+        {
+            crate::panic::runtime_error(crate::panic::RuntimeError::UnsafeSliceLen);
+        }
         // SAFETY: the caller's contract.
-        unsafe { Slice::from_parts(ptr.addr() as usize as *mut P, len as usize, len as usize) }
+        unsafe { Slice::from_parts(addr as *mut P, len as usize, len as usize) }
     }
 
     /// `unsafe.SliceData(s)`: the address of the first element, or nil.
@@ -111,8 +122,17 @@ impl GoStr {
         if len < 0 {
             crate::panic::runtime_error(crate::panic::RuntimeError::UnsafeStringLen);
         }
+        let addr = ptr.addr() as usize;
+        if len as usize > 0usize.wrapping_sub(addr) {
+            // The same rule as a slice's, and gc reads it the same way round:
+            // nil is reported as nil, and anything else as a length.
+            if addr == 0 {
+                crate::panic::runtime_error(crate::panic::RuntimeError::UnsafeStringNil);
+            }
+            crate::panic::runtime_error(crate::panic::RuntimeError::UnsafeStringLen);
+        }
         // SAFETY: the caller's contract; a `Slot<u8>` is a byte.
-        unsafe { GoStr::from_parts(ptr.addr() as usize as *const u8, len as usize) }
+        unsafe { GoStr::from_parts(addr as *const u8, len as usize) }
     }
 
     /// `unsafe.StringData(s)`: the address of the bytes.

@@ -1,6 +1,9 @@
 package main
 
-import "unsafe"
+import (
+	"math"
+	"unsafe"
+)
 
 type Header struct {
 	A int32
@@ -42,4 +45,39 @@ func main() {
 	var nilp unsafe.Pointer
 	println(p1 == p2, nilp == nil, p1 != nilp)
 	println(uintptr(p1) != 0)
+
+	// What unsafe.Slice and unsafe.String refuse. The last address is a
+	// constant of type unsafe.Pointer, and one byte there is in range while
+	// two are not: the elements have to fit before the address space ends.
+	last := (*byte)(unsafe.Pointer(^uintptr(0)))
+	_ = unsafe.Slice(last, 1)
+	_ = unsafe.String(last, 1)
+	var neg = -1
+	var huge uint64 = math.MaxUint64
+	refuses("negative length", func() { _ = unsafe.Slice(new(byte), neg) })
+	refuses("length overflows int", func() { _ = unsafe.Slice(new(byte), huge) })
+	refuses("elements overflow the space", func() { _ = unsafe.Slice(new(uint64), maxUintptr/8) })
+	refuses("slice past the last address", func() { _ = unsafe.Slice(last, 2) })
+	refuses("nil with a length", func() { _ = unsafe.Slice((*int)(nil), 1) })
+	println(unsafe.Slice((*int)(nil), 0) == nil)
+	refuses("string negative length", func() { _ = unsafe.String(new(byte), neg) })
+	refuses("string past the last address", func() { _ = unsafe.String(last, 2) })
+	refuses("string nil with a length", func() { _ = unsafe.String(nil, 1) })
+	println(unsafe.String(nil, 0) == "")
+}
+
+const maxUintptr = 1 << (8 * unsafe.Sizeof(uintptr(0)))
+
+// refuses runs f and prints what it panicked with.
+func refuses(what string, f func()) {
+	defer func() {
+		r := recover()
+		err, ok := r.(error)
+		if !ok {
+			println(what, "did not panic with an error")
+			return
+		}
+		println(what+":", err.Error())
+	}()
+	f()
 }

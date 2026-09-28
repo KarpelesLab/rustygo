@@ -21,6 +21,19 @@ use core::cell::RefCell;
 /// One deferred call: the thunk, and the environment holding the arguments.
 type Deferred = (fn(Env), Env);
 
+/// `defer f(args)` onto the list a [`Defers::handle`] names, which is how a
+/// range-over-func body defers on its enclosing function's behalf.
+///
+/// Safe in the way [`crate::func::Env::cast`] is: generated code only ever
+/// passes a handle `handle` made, and only while the frame holding that list
+/// is still running its own iterator.
+pub fn push_to(stack: crate::unsafe_ptr::UPtr, f: fn(Env), env: Env) {
+    // SAFETY (invariant): as above.
+    if let Some(defers) = unsafe { (stack.addr() as *const Defers).as_ref() } {
+        defers.push(f, env);
+    }
+}
+
 /// The deferred calls of one function, innermost last.
 #[derive(Default)]
 pub struct Defers {
@@ -41,6 +54,18 @@ impl Defers {
         Defers {
             list: RefCell::new(Vec::new()),
         }
+    }
+
+    /// The handle `ssa:deferstack()` hands to a range-over-func body.
+    ///
+    /// A `defer` inside such a body belongs to the function containing the
+    /// `range`, not to the body: the body is a closure go/ssa passes to the
+    /// iterator, and Go says the deferred call runs when the enclosing
+    /// function returns. go/ssa passes the enclosing list into the closure as
+    /// a captured value, typed as an opaque pointer, and this is that value.
+    #[inline]
+    pub fn handle(&self) -> crate::unsafe_ptr::UPtr {
+        crate::unsafe_ptr::UPtr::from_addr(self as *const Defers as u64)
     }
 
     /// `defer f(args)`: the arguments are already in `env`.

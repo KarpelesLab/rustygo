@@ -365,8 +365,11 @@ pub enum RuntimeError {
     UnsafeSliceLen,
     /// `unsafe.Slice(nil, n)` with `n > 0`.
     UnsafeSliceNil,
-    /// `unsafe.String` with a negative length.
+    /// `unsafe.String` with a negative length, or one the bytes would not
+    /// fit in the address space.
     UnsafeStringLen,
+    /// `unsafe.String(nil, n)` with `n > 0`.
+    UnsafeStringNil,
     /// A map key whose dynamic type is not hashable.
     UnhashableKey {
         /// The dynamic type's name.
@@ -443,6 +446,9 @@ impl RuntimeError {
                 String::from("unsafe.Slice: ptr is nil and len is not zero")
             }
             RuntimeError::UnsafeStringLen => String::from("unsafe.String: len out of range"),
+            RuntimeError::UnsafeStringNil => {
+                String::from("unsafe.String: ptr is nil and len is not zero")
+            }
             RuntimeError::NilMapWrite
             | RuntimeError::UnhashableKey { .. }
             | RuntimeError::UncomparableType { .. } => unreachable!("handled above"),
