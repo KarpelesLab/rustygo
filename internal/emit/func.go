@@ -682,18 +682,21 @@ func (f *fnEmitter) index(i ssa.Value, n int64) string {
 }
 
 func (f *fnEmitter) binop(v *ssa.BinOp) string {
+	// A comparison against the literal nil is decided before either operand
+	// is rendered, because an untyped nil has no value to render: go/ssa
+	// leaves the type off where a switch's tag and its case are both nil.
+	if v.Op == token.EQL || v.Op == token.NEQ {
+		if s, ok := f.nilComparison(v); ok {
+			return s
+		}
+	}
 	x, y := f.val(v.X), f.val(v.Y)
 	b := basicInfo(v.X.Type())
 	isInt := b != nil && b.Info()&types.IsInteger != 0
 	switch v.Op {
 	case token.EQL, token.NEQ:
-		// The only comparison Go allows on a slice is against nil, and the
-		// nil may be on either side: `nil == s` tests the slice, not the nil.
 		switch v.X.Type().Underlying().(type) {
 		case *types.Slice, *types.Map:
-			if isNilConst(v.X) {
-				return nilTest(y, v.Op)
-			}
 			return nilTest(x, v.Op)
 		}
 		switch v.Y.Type().Underlying().(type) {
@@ -850,6 +853,33 @@ func (f *fnEmitter) convert(v *ssa.Convert) string {
 	}
 	f.errorf(v.Pos(), "conversion from %s to %s is not supported yet", v.X.Type(), v.Type())
 	return ""
+}
+
+// nilComparison renders `x == nil` and `x != nil`, on whichever side the nil
+// is written, and says whether it applied.
+//
+// Nothing else can be compared against nil, so the other operand's kind
+// decides: a nil test on a slice, map, pointer, func, channel or interface.
+// Two nils are a constant, which is what a `switch` whose tag and case are
+// both nil comes out as.
+func (f *fnEmitter) nilComparison(v *ssa.BinOp) (string, bool) {
+	xNil, yNil := isNilConst(v.X), isNilConst(v.Y)
+	if xNil && yNil {
+		return map[bool]string{true: "true", false: "false"}[v.Op == token.EQL], true
+	}
+	if !xNil && !yNil {
+		return "", false
+	}
+	other := v.X
+	if xNil {
+		other = v.Y
+	}
+	switch other.Type().Underlying().(type) {
+	case *types.Slice, *types.Map, *types.Signature, *types.Chan,
+		*types.Pointer, *types.Interface:
+		return nilTest(f.val(other), v.Op), true
+	}
+	return "", false
 }
 
 // isNilConst reports the literal nil, whatever type it was given.

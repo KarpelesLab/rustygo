@@ -56,6 +56,12 @@ func (r *typeReg) rust(t types.Type, e *emitter, pos token.Pos) string {
 		if s, ok := basicTypes[t.Kind()]; ok {
 			return s
 		}
+		// An untyped constant can reach the emitter with its type still
+		// untyped — a shift count written as `1 << x` is an untyped int, and
+		// go/types leaves it that way. Its default type is what gc gives it.
+		if t.Info()&types.IsUntyped != 0 && t.Kind() != types.UntypedNil {
+			return r.rust(types.Default(t), e, pos)
+		}
 	case *types.Named:
 		if st, ok := t.Underlying().(*types.Struct); ok {
 			return "crate::ty::" + r.structInfo(st, t.Obj().Name(), e, pos).name

@@ -214,6 +214,12 @@ impl<P> Ptr<P> {
         self
     }
 
+    /// `p == nil`.
+    #[inline]
+    pub fn is_nil(self) -> bool {
+        self.addr() == 0
+    }
+
     /// The address, as `println` shows it. Zero for nil.
     #[inline]
     pub fn addr(self) -> u64 {

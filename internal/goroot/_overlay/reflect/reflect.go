@@ -1029,3 +1029,23 @@ func (t rtype) ConvertibleTo(u Type) bool {
 func MakeFunc(typ Type, fn func(args []Value) (results []Value)) Value {
 	panic(unsupported("MakeFunc"))
 }
+
+// StringHeader is the runtime representation of a string.
+//
+// Deprecated: Use unsafe.String or unsafe.StringData instead.
+//
+// rustygo's strings have gc's layout (DESIGN §7), so reading one through this
+// sees what gc would: the bytes' address, then the length.
+type StringHeader struct {
+	Data uintptr
+	Len  int
+}
+
+// SliceHeader is the runtime representation of a slice.
+//
+// Deprecated: Use unsafe.Slice or unsafe.SliceData instead.
+type SliceHeader struct {
+	Data uintptr
+	Len  int
+	Cap  int
+}

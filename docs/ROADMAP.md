@@ -354,8 +354,11 @@ work fails too, decision gate 1 says stop.
   too, `time.After` and `Ticker` among them.
 * `net/http` gets through the compiler — every function it reaches has a
   body — and then `rustc` is killed compiling the result: 855,000 lines of
-  Rust in one crate, past 4 GB of memory. Splitting the standard library into
-  its own crates, listed above as build caching, is what unblocks it.
+  Rust in one crate. Twice, in fact: once at `opt-level=3`, and again at
+  `opt-level=1` with 256 codegen units, which ran 45 minutes and passed
+  6.5 GB before the kernel took it. Splitting the standard library into its
+  own crates, listed above as build caching, is what unblocks it, and
+  lowering the optimization level is not a way around it.
 * The pieces `net` needed on the way: weak pointers (held strongly, so
   nothing interned is ever collected), `unique` reimplemented over an
   ordinary map because gc's reads its own type descriptors, the FIPS 140
