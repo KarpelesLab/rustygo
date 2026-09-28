@@ -169,7 +169,8 @@ work fails too, decision gate 1 says stop.
   emitter choke point, so a write barrier can be added in M6 without
   redesigning codegen.
 * Finalizers and weak references (`runtime.SetFinalizer`, `weak`). `unique`
-  depends on them, and `net/netip` depends on `unique`.
+  depends on them, and `net/netip` depends on `unique`. (Finalizers landed;
+  `weak` and `runtime.AddCleanup` have not.)
 * `Gc<T>`, `Ptr<T>` with interior pointers, `Slice<T>`, `GoStr`, `GoMap`,
   arrays, closures with traced environments.
 * Interfaces: `TypeDesc`, vtables, type assertions and type switches.
@@ -216,8 +217,21 @@ work fails too, decision gate 1 says stop.
 * The exit program is there: `testdata/programs/interp`, a small expression
   language with a parser, an interface hierarchy, maps of variadic closures,
   and evaluation errors handled through `recover`.
-* Not yet: `runtime.SetFinalizer` and weak references; Go's `test/` directory
-  as a tracked pass rate; the standard-library plumbing.
+* **Finalizers are in** (`runtime.SetFinalizer`, `testdata/programs/finalizers`).
+  The runtime holds the table and the collector decides when one is due, but
+  it cannot make the call — `SetFinalizer` takes two `any`s, and by the time
+  the runtime has them the types are gone. So the emitter writes the call at
+  the call site, where it can still see that the object is a `*T` and the
+  finalizer a `func(*T)`, and hands the runtime three words it need not
+  understand: the object's address, an environment holding the func value, and
+  a generated function that puts them together. The collector's extra phase
+  follows gc's, including the part that is easy to get wrong: an object with a
+  finalizer has its *contents* scanned as a root while the object itself is
+  left unmarked, which is what keeps everything the finalizer will see alive
+  and what orders two finalizers when one object points at the other.
+  `runtime.AddCleanup` and weak references are still to come.
+* Not yet: weak references; Go's `test/` directory as a tracked pass rate;
+  the standard-library plumbing.
 * Standard-library plumbing: **done for the packages that do not need
   reflection or files.** `strings`, `strconv`, `sort`, `errors`, `unicode`,
   `math/bits` and `unicode/utf8` compile from the real GOROOT, unmodified,

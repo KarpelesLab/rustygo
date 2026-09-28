@@ -89,10 +89,17 @@ func (f *Func) Entry() uintptr                    { return 0 }
 func (f *Func) FileLine(pc uintptr) (string, int) { return "", 0 }
 func Stack(buf []byte, all bool) int              { return 0 }
 
-// Finalizers and cleanups are an M1 item still to come; until then they are
-// accepted and never run, which Go allows (a finalizer need not run).
+// SetFinalizer is written at the call site, where the emitter can still see
+// that `obj` is a *T and `finalizer` a func(*T) — by the time the runtime has
+// two `any`s, it cannot make the call (internal/emit/finalizer.go). This body
+// is what remains for a call the emitter cannot read that way: it accepts the
+// finalizer and never runs it, which Go allows, since a finalizer is only ever
+// promised to run at most once.
 
 func SetFinalizer(obj any, finalizer any) {}
+
+// Cleanups are still to come. Like a finalizer that never runs, a cleanup
+// that never runs is allowed; the object simply stays alive.
 
 type Cleanup struct{}
 

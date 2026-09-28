@@ -40,6 +40,8 @@ pub mod chan;
 pub mod complex;
 pub mod context;
 pub mod defers;
+#[cfg(feature = "std")]
+pub mod finalizer;
 pub mod func;
 pub mod gc;
 pub mod heap;

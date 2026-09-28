@@ -271,6 +271,8 @@ pub fn collect() {
         crate::panic::trace_panics(&mut tracer);
         #[cfg(feature = "std")]
         crate::sched::trace_parked_roots(&mut tracer);
+        #[cfg(feature = "std")]
+        crate::finalizer::trace_roots(&mut tracer);
         let globals = tracer.heap.globals.clone();
         for (addr, size, trace) in globals {
             // SAFETY: a registered global lives for the rest of the program,
@@ -278,6 +280,10 @@ pub fn collect() {
             unsafe { trace(addr as *const u8, size, &mut tracer) };
         }
         tracer.drain();
+        // Objects with finalizers that nothing reaches come back for one more
+        // collection, with their finalizers queued (src/finalizer.rs).
+        #[cfg(feature = "std")]
+        crate::finalizer::resurrect(&mut tracer);
 
         let mut live = 0;
         let quarantine = &mut h.quarantine;
@@ -310,6 +316,10 @@ pub fn collect() {
         h.live_bytes = live;
         h.threshold = (live * 2).max(MIN_THRESHOLD);
     });
+    // Outside the heap's borrow: this starts a goroutine, and the finalizers
+    // it runs allocate.
+    #[cfg(feature = "std")]
+    crate::finalizer::kick();
 }
 
 /// The byte collected objects are filled with under GC torture.
@@ -391,6 +401,48 @@ impl<'h> Tracer<'h> {
             self.heap.objs[i].mark = true;
             self.work.push(i);
         }
+    }
+
+    /// Traces what the object beginning at `addr` points at, without marking
+    /// the object itself. For finalizers, which need the scheduler and so
+    /// exist only in a `std` build.
+    ///
+    /// gc does this for every object with a finalizer, and for two reasons.
+    /// The finalizer is handed the object, so everything the object reaches
+    /// has to survive with it; but marking the object would mean it was
+    /// reachable, and it would never be finalized at all. It is also what
+    /// orders two finalizers when one object points at the other: the
+    /// pointed-at one stays marked until the pointer's own finalizer has run
+    /// and freed it.
+    #[cfg(feature = "std")]
+    pub(crate) fn scan_contents(&mut self, addr: usize) {
+        let Some(i) = self.heap.find(addr) else {
+            return;
+        };
+        let o = &self.heap.objs[i];
+        if o.start != addr {
+            return;
+        }
+        let (start, size, trace) = (o.start, o.size, o.trace);
+        // SAFETY: the object is live (it is in the table), and its trace
+        // function was derived from the type it was allocated with.
+        unsafe { trace(start as *const u8, size, self) };
+    }
+
+    /// Whether an object begins at `addr` and the mark phase did not reach
+    /// it, which is what makes its finalizer ready to run.
+    ///
+    /// False for an address that begins no object, so a finalizer set on
+    /// something that is not a heap object's first byte never runs. gc panics
+    /// for that instead, but it can tell the difference at the moment of the
+    /// call and this cannot: the object table is only in order during a
+    /// collection.
+    #[cfg(feature = "std")]
+    pub(crate) fn unmarked_object(&self, addr: usize) -> bool {
+        self.heap
+            .find(addr)
+            .map(|i| &self.heap.objs[i])
+            .is_some_and(|o| o.start == addr && !o.mark)
     }
 
     /// Traces everything reachable from what has been marked.

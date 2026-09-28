@@ -970,6 +970,13 @@ func (f *fnEmitter) call(v *ssa.Call) string {
 		return f.builtin(b, c, v.Type(), v.Pos(), args)
 	}
 	if callee := c.StaticCallee(); callee != nil && c.Value == callee {
+		// A finalizer's call has to be written where the types are still
+		// known (finalizer.go).
+		if callee.Pkg != nil && callee.Pkg.Pkg.Path() == "runtime" && callee.Name() == "SetFinalizer" {
+			if body, ok := f.setFinalizer(c, v.Pos()); ok {
+				return body
+			}
+		}
 		return fmt.Sprintf("%s(%s)", f.e.fnPath(callee), strings.Join(args, ", "))
 	}
 	// A call through a func value: code and environment come from the value.
