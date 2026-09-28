@@ -346,17 +346,30 @@ work fails too, decision gate 1 says stop.
 * Stdlib build time and a small program's incremental rebuild time are recorded
   (decision gate 3).
 
-**Status (2026-09-28): sockets work; `net/http` compiles but does not link.**
+**Status (2026-09-29): `net/http` works, client and server, in one process.**
 
 * Go's own `net` package runs: a listener, an accepted connection, a dial,
   and reads and writes over a socket, with the goroutines parked on the
   descriptors by the netpoller (`testdata/programs/netdial`). Timers work
   too, `time.After` and `Ticker` among them.
-* **`net/http` builds and serves a request.** It compiles in two and a half
-  minutes across 26 crates, a listener accepts, the request is parsed, and the
-  handler runs and writes its response. What does not yet finish is the
-  delivery of that response to the client: the connection is still waiting
-  when the program is killed. That is the next thread to pull.
+* **`net/http` serves and fetches** (`testdata/programs/nethttp`). A server
+  on a loopback socket and a client in the same process, four requests
+  between them: a GET, a second GET over the same kept-alive connection, a
+  POST with a body the handler reads back, and a 404 from `ServeMux`. Status,
+  protocol, headers, and bodies all match gc's, and it compiles in two and a
+  half minutes across 26 crates.
+* What stood in the way was a livelock, not a missing piece. A parked
+  goroutine waits at an address and a channel used one address for both
+  directions, so a receiver's wake reached the other receivers: the
+  transport's read and write loops, each a `select` waiting to receive, woke
+  each other for ever without either making progress. Senders and receivers
+  now wait at separate addresses — one past the object for the receivers — so
+  a wake only ever reaches the other side. Two goroutines blocked receiving
+  on one channel used to spin at full CPU for the same reason.
+* That is the first of the service tests above, in its rustygo×rustygo plain
+  HTTP and keep-alive form. The gc pairings, HTTPS, HTTP/2, streamed and large
+  bodies, timeouts and cancellation, and shutdown on `SIGTERM` are still to
+  come, and each needs a harness rather than a differential program.
 * Getting there took the crate split (above), constant tables as static data,
   read and write deadlines in the netpoller, and `sync.Cond`, which was a
   stub that reported deadlock — `net/http` aborts a read in progress by

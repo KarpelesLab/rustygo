@@ -84,11 +84,31 @@ impl<T> Chan<T> {
         self.obj.is_none()
     }
 
-    /// The address `println` shows, which the collector resolves and blocked
-    /// goroutines park on.
+    /// The address `println` shows, which the collector resolves.
     #[inline]
     pub fn addr(self) -> u64 {
         self.obj.map_or(0, |p| p.as_ptr() as usize as u64)
+    }
+
+    /// Where senders wait, which receivers wake.
+    ///
+    /// The two directions have separate addresses so that a receiver only
+    /// ever wakes senders. Waking every waiter would make two `select`s that
+    /// are both receiving wake each other for ever without either making
+    /// progress.
+    #[inline]
+    pub fn send_key(self) -> usize {
+        self.addr() as usize
+    }
+
+    /// Where receivers wait, which senders and `close` wake.
+    ///
+    /// One past the object, which no other key can be: every other address a
+    /// goroutine parks on is an object's or a variable's own, and those are
+    /// aligned to at least four bytes.
+    #[inline]
+    pub fn recv_key(self) -> usize {
+        self.addr() as usize + 1
     }
 
     fn state(self) -> &'static RefCell<State<T>> {
@@ -154,7 +174,6 @@ impl<T: GoValue + Trace> Chan<T> {
             // unless another goroutine can still run.
             block_forever();
         }
-        let addr = self.addr() as usize;
         loop {
             {
                 let mut s = self.state().borrow_mut();
@@ -167,7 +186,7 @@ impl<T: GoValue + Trace> Chan<T> {
                 if s.cap > 0 && s.buf.len() < s.cap {
                     s.buf.push_back(v);
                     drop(s);
-                    sched::wake_all(addr);
+                    sched::wake_all(self.recv_key());
                     return;
                 }
                 if s.cap == 0 && s.receivers > 0 && s.buf.is_empty() {
@@ -175,7 +194,7 @@ impl<T: GoValue + Trace> Chan<T> {
                     // receiver, then wait until it has been taken.
                     s.buf.push_back(v);
                     drop(s);
-                    sched::wake_all(addr);
+                    sched::wake_all(self.recv_key());
                     loop {
                         let s = self.state().borrow();
                         if s.buf.is_empty() {
@@ -188,14 +207,15 @@ impl<T: GoValue + Trace> Chan<T> {
                                 "send on closed channel",
                             ));
                         }
-                        sched::park_on(addr);
+                        sched::park_on(self.send_key());
                     }
                 }
             }
-            // Nothing to do but wait; waking the others first lets a
-            // receiver see that a sender is here.
-            sched::wake_all(addr);
-            sched::park_on(addr);
+            // Nothing to do but wait. Waking the receivers first is what
+            // lets one of them see that a sender is here and hand-shake with
+            // it, for a channel with no buffer.
+            sched::wake_all(self.recv_key());
+            sched::park_on(self.send_key());
         }
     }
 
@@ -205,13 +225,12 @@ impl<T: GoValue + Trace> Chan<T> {
         if self.is_nil() {
             block_forever();
         }
-        let addr = self.addr() as usize;
         loop {
             {
                 let mut s = self.state().borrow_mut();
                 if let Some(v) = s.buf.pop_front() {
                     drop(s);
-                    sched::wake_all(addr);
+                    sched::wake_all(self.send_key());
                     return (v, true);
                 }
                 if s.closed {
@@ -221,8 +240,8 @@ impl<T: GoValue + Trace> Chan<T> {
             }
             // Telling the senders there is a receiver is what lets a
             // synchronous send go ahead.
-            sched::wake_all(addr);
-            sched::park_on(addr);
+            sched::wake_all(self.send_key());
+            sched::park_on(self.recv_key());
             self.state().borrow_mut().receivers -= 1;
         }
     }
@@ -230,6 +249,30 @@ impl<T: GoValue + Trace> Chan<T> {
     /// `<-ch`, where the program does not ask whether the channel is closed.
     pub fn recv_value(self) -> T {
         self.recv().0
+    }
+
+    /// Counts the running goroutine as waiting to receive, and tells the
+    /// senders so.
+    ///
+    /// A plain receive does this as it parks. A `select` has to do it too, or
+    /// a synchronous send can never see it: the send waits for a receiver to
+    /// hand its value to, and two `select`s on the same unbuffered channel
+    /// would each wait for the other for ever.
+    pub fn enter_recv(self) {
+        if self.is_nil() {
+            return;
+        }
+        self.state().borrow_mut().receivers += 1;
+        sched::wake_all(self.send_key());
+    }
+
+    /// Stops counting the running goroutine as waiting to receive.
+    pub fn leave_recv(self) {
+        if self.is_nil() {
+            return;
+        }
+        let mut s = self.state().borrow_mut();
+        s.receivers = s.receivers.saturating_sub(1);
     }
 
     /// Whether a receive would proceed without blocking, for `select`.
@@ -257,7 +300,6 @@ impl<T: GoValue + Trace> Chan<T> {
         if self.is_nil() {
             crate::panic::runtime_error_msg(alloc::string::String::from("close of nil channel"));
         }
-        let addr = self.addr() as usize;
         {
             let mut s = self.state().borrow_mut();
             if s.closed {
@@ -268,7 +310,8 @@ impl<T: GoValue + Trace> Chan<T> {
             }
             s.closed = true;
         }
-        sched::wake_all(addr);
+        sched::wake_all(self.send_key());
+        sched::wake_all(self.recv_key());
     }
 }
 

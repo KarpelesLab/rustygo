@@ -316,22 +316,6 @@ pub fn wait(ctx: usize, mode: i32) -> i32 {
         if desc.closing {
             return Err(ERR_CLOSING);
         }
-        if crate::rt::trace_sched() {
-            crate::rt::trace(&alloc::format!(
-                "  ctx={ctx} read_at-now={}ms write_at-now={}ms expired={}",
-                if desc.read_at == 0 {
-                    0
-                } else {
-                    (desc.read_at - now) / 1_000_000
-                },
-                if desc.write_at == 0 {
-                    0
-                } else {
-                    (desc.write_at - now) / 1_000_000
-                },
-                desc.expired(mode, now)
-            ));
-        }
         if desc.expired(mode, now) {
             return Err(ERR_TIMEOUT);
         }

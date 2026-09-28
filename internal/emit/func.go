@@ -1417,11 +1417,34 @@ func (f *fnEmitter) selectStmt(v *ssa.Select) string {
 		}
 		b.WriteString("                    _ => {}\n                }\n            }\n")
 		if v.Blocking {
+			// A receive case counts as a receiver while this goroutine waits,
+			// so that a synchronous send on the other side can see it — two
+			// selects on one unbuffered channel would otherwise each wait for
+			// the other.
+			for i, st := range v.States {
+				if st.Dir == types.RecvOnly {
+					fmt.Fprintf(&b, "            (__sel_c%d).enter_recv();\n", i)
+				}
+			}
+			// Each case waits where the other side of *that* direction
+			// wakes: a receive case among the receivers, a send case among
+			// the senders. Waiting on one address for both would mean a
+			// receiver's wake reached other receivers, and two selects both
+			// receiving would wake each other for ever.
 			b.WriteString("            rustygo::sched::park_on_any(&[")
-			for i := range v.States {
-				fmt.Fprintf(&b, "(__sel_c%d).addr() as usize, ", i)
+			for i, st := range v.States {
+				key := "recv_key"
+				if st.Dir == types.SendOnly {
+					key = "send_key"
+				}
+				fmt.Fprintf(&b, "(__sel_c%d).%s(), ", i, key)
 			}
 			b.WriteString("]);\n")
+			for i, st := range v.States {
+				if st.Dir == types.RecvOnly {
+					fmt.Fprintf(&b, "            (__sel_c%d).leave_recv();\n", i)
+				}
+			}
 		} else {
 			// No case was ready and there is a default: its index is -1.
 			b.WriteString("            break 'sel;\n")

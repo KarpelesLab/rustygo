@@ -50,3 +50,4 @@ channels linux
 goroutines linux,darwin
 selects linux
 netdial linux
+nethttp linux

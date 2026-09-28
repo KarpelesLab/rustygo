@@ -178,5 +178,8 @@ jobs:
       - name: go vet
         run: go vet ./...
 
+      # A program reaching net/http takes minutes of rustc on its own, which
+      # is more than `go test`'s ten-minute default allows for the whole
+      # differential suite.
       - name: go test (includes gc vs rustygo on testdata/programs)
-        run: go test ./...
+        run: go test -timeout 40m ./...
