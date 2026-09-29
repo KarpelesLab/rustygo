@@ -1085,6 +1085,16 @@ func (f *fnEmitter) builtin(b *ssa.Builtin, c *ssa.CallCommon, resultType types.
 			}
 		}
 	// Package unsafe's builtins.
+	case "Sizeof", "Alignof":
+		// go/types folds these to constants wherever the operand's type is
+		// written down. Inside a generic function it cannot, because the type
+		// is a parameter, and the instantiated body still asks — `slices`
+		// measures its element type that way.
+		n := f.e.sizeof(c.Args[0].Type())
+		if b.Name() == "Alignof" {
+			n = f.e.alignof(c.Args[0].Type())
+		}
+		return fmt.Sprintf("%d%s", n, basicTypes[types.Uintptr])
 	case "Add":
 		return fmt.Sprintf("(%s).offset(%s as i64)", args[0], args[1])
 	case "Slice":
@@ -1114,10 +1124,21 @@ func (f *fnEmitter) builtin(b *ssa.Builtin, c *ssa.CallCommon, resultType types.
 		}
 		return fmt.Sprintf("(%s).copy_from(%s)", args[0], args[1])
 	case "min", "max":
-		if bi := basicInfo(resultType); bi != nil && bi.Info()&(types.IsInteger|types.IsString) != 0 {
+		bi := basicInfo(resultType)
+		if bi != nil && bi.Info()&(types.IsInteger|types.IsString) != 0 {
 			expr := args[0]
 			for _, a := range args[1:] {
 				expr = fmt.Sprintf("core::cmp::%s(%s, %s)", b.Name(), expr, a)
+			}
+			return expr
+		}
+		if bi != nil && bi.Info()&types.IsFloat != 0 {
+			// Not Rust's `f64::min`: Go's answer for a NaN operand is NaN, and
+			// between the two zeros it is the signed one (src/ops.rs).
+			fn := fmt.Sprintf("rustygo::ops::%s_%s", b.Name(), basicTypes[bi.Kind()])
+			expr := args[0]
+			for _, a := range args[1:] {
+				expr = fmt.Sprintf("%s(%s, %s)", fn, expr, a)
 			}
 			return expr
 		}
@@ -1200,7 +1221,10 @@ func (f *fnEmitter) val(val ssa.Value) string {
 		}
 	case *ssa.Global:
 		if !isPackageInit(f.fn) {
-			f.e.readGlobals[v] = true
+			// The variable this one shares storage with, if it does: a read of
+			// `math/bits.divideError` is a read of the runtime's, and that is
+			// the one whose initializer has to run.
+			f.e.readGlobals[f.e.globalTarget(v)] = true
 		}
 		return f.e.globalPath(v) + "()"
 	case *ssa.Function:

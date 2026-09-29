@@ -238,6 +238,45 @@ func (e *emitter) module(pkg *ssa.Package) *module {
 	return m
 }
 
+// globalTarget is the variable g's storage really is: itself, or the one it
+// shares through a `go:linkname`. Whoever reads g reads that one, which is what
+// decides whether the package initializer has to build it (deadinit.go).
+func (e *emitter) globalTarget(g *ssa.Global) *ssa.Global {
+	if t := e.linkVar(g); t != nil {
+		return e.globalTarget(t)
+	}
+	return g
+}
+
+// linkVar follows a `go:linkname` from a variable with no value of its own to
+// the variable whose storage it shares, or returns nil.
+func (e *emitter) linkVar(g *ssa.Global) *ssa.Global {
+	if g.Pkg == nil {
+		return nil
+	}
+	seen := map[string]bool{}
+	key := g.Pkg.Pkg.Path() + "." + g.Name()
+	for !seen[key] {
+		seen[key] = true
+		target, ok := e.res.LinknameVars[key]
+		if !ok {
+			return nil
+		}
+		dot := strings.LastIndex(target, ".")
+		if dot < 0 {
+			return nil
+		}
+		pkgPath, name := target[:dot], target[dot+1:]
+		if pkg := e.res.Prog.ImportedPackage(pkgPath); pkg != nil {
+			if v, ok := pkg.Members[name].(*ssa.Global); ok && v != g {
+				return v
+			}
+		}
+		key = target
+	}
+	return nil
+}
+
 // errorf records an unsupported construct at pos.
 func (e *emitter) errorf(pos token.Pos, format string, args ...any) {
 	e.errs = append(e.errs, diag{pos, fmt.Sprintf(format, args...)})
@@ -441,6 +480,14 @@ func (e *emitter) deferThunk(pos token.Pos, in *ssa.Function, argTypes []types.T
 // `Ptr` to its storage, emitting the global on first use.
 func (e *emitter) globalPath(g *ssa.Global) string {
 	if p, ok := e.globals[g]; ok {
+		return p
+	}
+	// A variable declared without a value and linknamed to another *is* that
+	// other one: `math/bits` declares the division error it panics with and
+	// names the runtime's, and the two have to be one variable.
+	if target := e.linkVar(g); target != nil {
+		p := e.globalPath(target)
+		e.globals[g] = p
 		return p
 	}
 	m := e.module(g.Pkg)

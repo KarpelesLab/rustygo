@@ -380,3 +380,40 @@ mod tests {
         );
     }
 }
+
+/// Go's `min` and `max` for floating point, which are not Rust's.
+///
+/// Go's rules: a NaN operand makes the result NaN, and between the two zeros
+/// `min` gives -0 and `max` gives +0. Rust's `f64::min` ignores a NaN and does
+/// not distinguish the zeros, so neither would do.
+macro_rules! float_min_max {
+    ($min:ident, $max:ident, $t:ty) => {
+        /// Go's `min` for this float type.
+        #[inline]
+        pub fn $min(a: $t, b: $t) -> $t {
+            if a.is_nan() || b.is_nan() {
+                return <$t>::NAN;
+            }
+            if a == b {
+                // Both are zeros, one of them possibly negative.
+                return if a.is_sign_negative() { a } else { b };
+            }
+            if a < b { a } else { b }
+        }
+
+        /// Go's `max` for this float type.
+        #[inline]
+        pub fn $max(a: $t, b: $t) -> $t {
+            if a.is_nan() || b.is_nan() {
+                return <$t>::NAN;
+            }
+            if a == b {
+                return if a.is_sign_negative() { b } else { a };
+            }
+            if a > b { a } else { b }
+        }
+    };
+}
+
+float_min_max!(min_f32, max_f32, f32);
+float_min_max!(min_f64, max_f64, f64);

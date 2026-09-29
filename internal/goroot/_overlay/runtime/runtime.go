@@ -37,6 +37,21 @@ type Error interface {
 	RuntimeError()
 }
 
+// errorString is a run-time error that is only a message, which is what the
+// arithmetic ones are.
+type errorString string
+
+func (e errorString) Error() string { return "runtime error: " + string(e) }
+func (e errorString) RuntimeError() {}
+
+// The errors the compiler's own arithmetic raises. `math/bits` reaches these
+// two by name, through a `go:linkname` on a variable, and panics with them
+// from its own division routines.
+
+var divideError error = errorString("integer divide by zero")
+
+var overflowError error = errorString("integer overflow")
+
 // GC runs a garbage collection.
 func GC()
 

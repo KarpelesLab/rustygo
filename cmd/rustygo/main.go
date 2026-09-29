@@ -2,7 +2,7 @@
 //
 //	rustygo build [-o dir] <packages>   compile to a native binary (via rustc)
 //	rustygo emit  [-o dir] <packages>   write the generated Rust crate
-//	rustygo test  <packages>            go test semantics, run through rustc
+//	rustygo test  <package> [flags]      build a package's tests and run them
 //	rustygo ssa   <packages>            dump the go/ssa form the emitter consumes
 //	rustygo version
 package main
@@ -32,7 +32,7 @@ func usage() {
 commands:
 	build    compile packages to a native binary
 	emit     write the generated Rust crate
-	test     run package tests through rustygo
+	test     build a package's own tests and run them
 	ssa      dump the SSA form of packages
 	version  print the rustygo version
 `)

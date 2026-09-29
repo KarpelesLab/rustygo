@@ -12,6 +12,7 @@ import (
 	"errors"
 	"fmt"
 	"go/ast"
+	"go/token"
 	"go/types"
 	"os"
 	"strings"
@@ -37,6 +38,10 @@ type Result struct {
 	// "importpath.Name", to the function that implements it, found through
 	// `//go:linkname` directives on either side (see collectLinknames).
 	Linknames map[string]string
+	// LinknameVars is the same for a *variable* declared without a value,
+	// which shares the storage of the one it names: `math/bits` reaches the
+	// runtime's division error that way.
+	LinknameVars map[string]string
 }
 
 // Load type-checks the packages matching patterns (relative to dir, or the
@@ -97,16 +102,17 @@ func load(dir string, tests bool, patterns ...string) (*Result, error) {
 
 	std := map[*types.Package]bool{}
 	links := map[string]string{}
+	vars := map[string]string{}
 	packages.Visit(pkgs, nil, func(p *packages.Package) {
 		if isStd(p) {
 			std[p.Types] = true
 		}
-		collectLinknames(p, links)
+		collectLinknames(p, links, vars)
 	})
 
 	prog, ssaPkgs := ssautil.AllPackages(pkgs, ssa.InstantiateGenerics)
 	prog.Build()
-	return &Result{Prog: prog, Pkgs: ssaPkgs, Std: std, Linknames: links}, nil
+	return &Result{Prog: prog, Pkgs: ssaPkgs, Std: std, Linknames: links, LinknameVars: vars}, nil
 }
 
 // collectLinknames records p's `//go:linkname local target` directives.
@@ -118,12 +124,32 @@ func load(dir string, tests bool, patterns ...string) (*Result, error) {
 // (`//go:linkname sync_runtime_Semacquire sync.runtime_Semacquire` in
 // runtime). Either way the entry maps the bodyless function to its
 // implementation.
-func collectLinknames(p *packages.Package, links map[string]string) {
+func collectLinknames(p *packages.Package, links, vars map[string]string) {
 	hasBody := map[string]bool{}
+	// A variable is the same story with a value in place of a body: the side
+	// without one uses the other's storage.
+	isVar := map[string]bool{}
 	for _, f := range p.Syntax {
 		for _, d := range f.Decls {
-			if fd, ok := d.(*ast.FuncDecl); ok && fd.Recv == nil {
-				hasBody[fd.Name.Name] = fd.Body != nil
+			switch d := d.(type) {
+			case *ast.FuncDecl:
+				if d.Recv == nil {
+					hasBody[d.Name.Name] = d.Body != nil
+				}
+			case *ast.GenDecl:
+				if d.Tok != token.VAR {
+					continue
+				}
+				for _, spec := range d.Specs {
+					vs, ok := spec.(*ast.ValueSpec)
+					if !ok {
+						continue
+					}
+					for _, name := range vs.Names {
+						isVar[name.Name] = true
+						hasBody[name.Name] = len(vs.Values) > 0
+					}
+				}
 			}
 		}
 	}
@@ -136,6 +162,14 @@ func collectLinknames(p *packages.Package, links map[string]string) {
 				}
 				local, target := p.PkgPath+"."+fields[1], fields[2]
 				body, declared := hasBody[fields[1]]
+				if isVar[fields[1]] {
+					if declared && !body {
+						vars[local] = target // this side has no storage
+					} else if declared {
+						vars[target] = local // this side is the storage
+					}
+					continue
+				}
 				switch {
 				case !declared:
 				case local == target:

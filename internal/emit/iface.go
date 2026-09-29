@@ -350,7 +350,8 @@ pub static %s: MapOps = MapOps {
     clone: |d| {
         // maps.Clone: a map of the same type holding the same entries. The
         // source is rooted while the copy is built, because every insertion
-        // may collect.
+        // may collect — and so is the copy, including across the allocation
+        // that boxes it, which nothing else refers to it through yet.
         let src = d.cast::<Slot<%s>>().load();
         let out = GoMap::make(src.len());
         let __roots = rustygo::gc::Frame::<2>::new();
@@ -361,8 +362,8 @@ pub static %s: MapOps = MapOps {
             while let (true, k, v) = it.advance() {
                 out.set(k, v);
             }
-        });
-        Data::of(Ptr::<Slot<%s>>::alloc(out))
+            Data::of(Ptr::<Slot<%s>>::alloc(out))
+        })
     },
     make: || {
         // Two allocations: the map, and the box holding it. The second can

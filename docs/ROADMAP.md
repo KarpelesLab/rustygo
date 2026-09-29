@@ -447,9 +447,19 @@ work fails too, decision gate 1 says stop.
   compiler cannot promise that. The wait does not block the thread every
   goroutine shares, since one of those goroutines is usually the one feeding the
   child's standard input.
-* Not yet: `Value.Call`/`New`/`Zero`/`MakeSlice`/`MakeFunc`, `reflect.PointerTo`,
-  `Type.Implements`, `encoding/json`, `rustygo test`, `runtime.Caller` and the
-  rest of the service tests.
+* **`rustygo test`, and the standard library measured by its own tests**
+  (docs/STDTEST.md). `go list -test` writes the main package that registers
+  every `TestXxx` and calls `testing.Main`, so a test binary is an ordinary
+  program: `rustygo test errors` builds that main and runs it. Getting
+  `testing` to compile and run took the runtime hooks `runtime/pprof`,
+  `runtime/trace` and `os/signal` pull whether or not a program profiles,
+  traces or waits for a signal; `runtime.Goexit`, which is what `t.FailNow` is
+  written on; a `runtime.Callers` that reports a frame with no name, because
+  `testing` panics if it reports none at all; and the reflection
+  `encoding/json` and `testing`'s fuzzing ask for.
+* Not yet: `Value.Call`/`New`/`MakeSlice`/`MakeFunc`, `reflect.PointerTo`,
+  `encoding/json`, `runtime.Caller` in Go terms, and the rest of the service
+  tests.
 
 ## M4 — Interop, both directions
 

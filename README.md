@@ -16,7 +16,8 @@ cgo needed to get there.
 > gc's — 55 differential programs check that on every commit, every one of them
 > also under GC torture, which collects at every allocation. Go's own `test/`
 > directory is at [123 of 141](docs/GOTEST.md), and every failure is listed
-> there with the reason.
+> there with the reason. Standard-library packages are measured by the tests Go
+> ships for them, which is [docs/STDTEST.md](docs/STDTEST.md).
 >
 > Working: the language, near enough — slices with aliasing, `append` and the
 > string/`[]byte`/`[]rune` conversions, maps, closures and func values,
@@ -164,9 +165,18 @@ by the emitter, not by a derive macro, so no proc-macro crate is needed.
 ```sh
 go run ./cmd/rustygo build -o hello ./testdata/programs/hello   # needs cargo
 go run ./cmd/rustygo emit -o out ./testdata/programs/hello      # inspect the Rust
+go run ./cmd/rustygo test errors -test.v                        # a package's own tests, through rustygo
 go run ./cmd/rustygo ssa ./testdata/programs/hello              # the SSA it came from
 go test -timeout 40m ./...                                      # includes the gc-vs-rustygo harness, which takes minutes
 cargo test                                                      # runtime unit tests
+```
+
+Two harnesses measure rustygo against Go rather than against itself, and both
+write what they found:
+
+```sh
+go run ./internal/cmd/gotest  -o docs/GOTEST.md    # Go's test/ directory, gc vs rustygo
+go run ./internal/cmd/stdtest -o docs/STDTEST.md   # the standard library's own tests
 ```
 
 Rust MSRV is 1.89 (edition 2024). The compiler targets the Go release pinned in

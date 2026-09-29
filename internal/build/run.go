@@ -18,15 +18,18 @@ import (
 // `chanlinear` test starts a thousand and doubles from there.
 const MaxTestMemory = 64 << 30
 
-// TestCommand runs a rustygo-built binary under MaxTestMemory. The limit is
-// applied through the shell's `ulimit -v`, so the harness itself is not
-// constrained. It is best-effort: macOS does not enforce an address-space
-// limit and refuses to set one, and Windows has no such shell, so there the
-// binary runs unconstrained rather than not at all.
-func TestCommand(ctx context.Context, bin string) *exec.Cmd {
+// TestCommand runs a rustygo-built binary under MaxTestMemory, with `args`
+// passed to the binary itself. The limit is applied through the shell's
+// `ulimit -v`, so the harness itself is not constrained. It is best-effort:
+// macOS does not enforce an address-space limit and refuses to set one, and
+// Windows has no such shell, so there the binary runs unconstrained rather
+// than not at all.
+func TestCommand(ctx context.Context, bin string, args ...string) *exec.Cmd {
 	if runtime.GOOS == "windows" {
-		return exec.CommandContext(ctx, bin)
+		return exec.CommandContext(ctx, bin, args...)
 	}
-	script := fmt.Sprintf(`ulimit -v %d 2>/dev/null; exec "$0"`, MaxTestMemory/1024)
-	return exec.CommandContext(ctx, "/bin/sh", "-c", script, bin)
+	// `"$0" "$@"` is what passes the arguments on: the binary is the shell's
+	// $0 and everything after it is $@.
+	script := fmt.Sprintf(`ulimit -v %d 2>/dev/null; exec "$0" "$@"`, MaxTestMemory/1024)
+	return exec.CommandContext(ctx, "/bin/sh", append([]string{"-c", script, bin}, args...)...)
 }
