@@ -94,6 +94,9 @@ var intrinsics = map[string]func(args []string) string{
 	"reflect.descEqual": func(a []string) string {
 		return fmt.Sprintf("rustygo::reflect::equal(%s, %s, %s)", a[0], a[1], a[2])
 	},
+	"reflect.descCall": func(a []string) string {
+		return fmt.Sprintf("rustygo::reflect::call(%s, %s, %s)", a[0], a[1], a[2])
+	},
 	"reflect.descImplements": func(a []string) string {
 		return fmt.Sprintf("rustygo::reflect::implements(%s, %s)", a[0], a[1])
 	},

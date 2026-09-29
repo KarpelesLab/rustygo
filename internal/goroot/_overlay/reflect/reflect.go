@@ -1014,7 +1014,43 @@ func Swapper(slice any) func(i, j int) {
 // Constructing types and values, and calling a method through reflection
 // rather than through a func value, are not here yet.
 
-func (v Value) Call(in []Value) []Value      { panic(unsupported("Value.Call")) }
+// Call calls the function v with the arguments in, and returns its results.
+//
+// The emitter generates the call itself, one closure per func type, because
+// only it knows the signature (DESIGN §6). Arguments must have exactly the
+// parameters' types: gc's reflect also accepts an assignable one and boxes it,
+// which would mean building an interface value from here.
+func (v Value) Call(in []Value) []Value {
+	if v.Kind() != Func {
+		panic("reflect: Call of " + v.Kind().String() + " Value")
+	}
+	if v.IsNil() {
+		panic("reflect: Call of nil func")
+	}
+	t := v.Type()
+	if t.IsVariadic() {
+		panic(unsupported("Value.Call on a variadic function"))
+	}
+	if len(in) != t.NumIn() {
+		panic("reflect: Call with the wrong number of input parameters")
+	}
+	args := make([]unsafe.Pointer, len(in))
+	for i, a := range in {
+		if !a.IsValid() {
+			panic("reflect: Call using the zero Value as an argument")
+		}
+		if a.Type() != t.In(i) {
+			panic("reflect: Call using " + a.Type().String() + " as type " + t.In(i).String())
+		}
+		args[i] = a.p
+	}
+	results := descCall(v.d, v.p, args)
+	out := make([]Value, len(results))
+	for i := range results {
+		out[i] = Value{descOut(v.d, i), results[i], false}
+	}
+	return out
+}
 func (v Value) Grow(n int)                   { panic(unsupported("Value.Grow")) }
 func MakeSlice(typ Type, len, cap int) Value { panic(unsupported("MakeSlice")) }
 
@@ -1184,6 +1220,7 @@ func descFieldOffset(d unsafe.Pointer, i int) uint64
 func descFieldTag(d unsafe.Pointer, i int) string
 func descFieldEmbedded(d unsafe.Pointer, i int) bool
 func descBox(d, addr unsafe.Pointer) unsafe.Pointer
+func descCall(d, f unsafe.Pointer, args []unsafe.Pointer) []unsafe.Pointer
 func descImplements(d, iface unsafe.Pointer) bool
 func descZero(d unsafe.Pointer) unsafe.Pointer
 func descNumIn(d unsafe.Pointer) int64

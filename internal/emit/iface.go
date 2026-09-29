@@ -195,12 +195,15 @@ func (e *emitter) typeDesc(t types.Type, pos token.Pos) string {
 	case *types.Struct:
 		fmt.Fprintf(&b, "    fields: &[%s],\n", e.fieldDescs(t, u, pos))
 	case *types.Signature:
-		// What reflection asks a func type: its parameters and its results.
-		// `Value.Call` will want them too.
+		// What reflection asks a func type: its parameters, its results, and
+		// how to call it.
 		fmt.Fprintf(&b, "    params: &[%s],\n    results: &[%s],\n",
 			e.descList(u.Params(), pos), e.descList(u.Results(), pos))
 		if u.Variadic() {
 			b.WriteString("    variadic: true,\n")
+		}
+		if shim := e.callShim(u, pos); shim != "" {
+			fmt.Fprintf(&b, "    call: Some(%s),\n", shim)
 		}
 	}
 	if ifaceMethods != "" {
@@ -570,6 +573,53 @@ func (f *fnEmitter) invokeOn(m *types.Func, recv string, args []string, pos toke
 // Only exported methods, which is all `reflect.Type.Method` reports for a
 // non-interface type, and only when the program reaches this part of
 // reflection: it is a lot of code to generate for a program that never asks.
+
+// callShim renders the closure `reflect.Value.Call` calls a func value of this
+// type through, or "" when the program never asks.
+//
+// The arguments arrive boxed and the results go back boxed, which is how a
+// `reflect.Value` holds a value either way. The boxes for the results are
+// allocated *before* the call and rooted across each other, so that neither the
+// call's own allocations nor the next box's can collect one already made; the
+// results are stored into them afterwards, with nothing allocating in between.
+func (e *emitter) callShim(sig *types.Signature, pos token.Pos) string {
+	if !e.needsReflectCall || sig.Variadic() {
+		// A variadic call would have to gather its extra arguments into a
+		// slice of a type the program may never have mentioned.
+		return ""
+	}
+	res := sig.Results()
+	slots := res.Len()
+	if slots == 0 {
+		slots = 1 // Frame::<0> would be a frame with nothing in it.
+	}
+	var b strings.Builder
+	fmt.Fprintf(&b, "|__f, __args, __out| {\n        let __roots = rustygo::gc::Frame::<%d>::new();\n        __roots.scope(|| {\n", slots)
+	for i := 0; i < res.Len(); i++ {
+		fmt.Fprintf(&b, "            let __b%d = Ptr::<%s>::alloc(GoValue::zero());\n            __roots.set(%d, &__b%d);\n",
+			i, e.types.place(res.At(i).Type(), e, pos), i, i)
+	}
+	fmt.Fprintf(&b, "            let __fv = __f.cast::<Slot<Func<%s>>>().load();\n", e.types.fnPtr(sig, e, pos))
+	args := []string{"__fv.env()"}
+	for i := 0; i < sig.Params().Len(); i++ {
+		args = append(args, fmt.Sprintf("__args[%d].cast::<%s>().load()",
+			i, e.types.place(sig.Params().At(i).Type(), e, pos)))
+	}
+	call := fmt.Sprintf("(__fv.code())(%s)", strings.Join(args, ", "))
+	switch res.Len() {
+	case 0:
+		fmt.Fprintf(&b, "            %s;\n", call)
+	case 1:
+		fmt.Fprintf(&b, "            let __r = %s;\n            __b0.store(__r);\n            __out[0] = Data::of(__b0);\n", call)
+	default:
+		fmt.Fprintf(&b, "            let __r = %s;\n", call)
+		for i := 0; i < res.Len(); i++ {
+			fmt.Fprintf(&b, "            __b%d.store(__r.%d);\n            __out[%d] = Data::of(__b%d);\n", i, i, i, i)
+		}
+	}
+	b.WriteString("        })\n    }")
+	return b.String()
+}
 
 // ifaceMethodIDs renders an interface type's own method ids, sorted, which is
 // what says whether another type implements it.

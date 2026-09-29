@@ -54,7 +54,7 @@ type Options struct {
 // variables anything outside initialization reads, so the second can skip
 // building the rest (deadinit.go).
 func Crate(res *load.Result, opt Options) error {
-	first, err := run(res, nil, nil, nil, false)
+	first, err := run(res, nil, nil, nil, false, false)
 	if err != nil {
 		return err
 	}
@@ -64,7 +64,8 @@ func Crate(res *load.Result, opt Options) error {
 	live := liveInitGlobals(first.inits, first.readGlobals)
 	// The first pass also collects the program's functions, which is what
 	// says who must link a shadow-stack frame for `recover` (recover.go).
-	e, err := run(res, live, framesForRecover(first.emitted), first.bands, first.usesReflectMethods)
+	e, err := run(res, live, framesForRecover(first.emitted), first.bands,
+		first.usesReflectMethods, first.usesReflectCall)
 	if err != nil {
 		return err
 	}
@@ -74,7 +75,7 @@ func Crate(res *load.Result, opt Options) error {
 // run emits the whole program into memory. liveGlobals, when set, lets
 // package initializers skip variables nothing else reads; needsFrame, when
 // set, names the functions that link a frame whatever their roots.
-func run(res *load.Result, liveGlobals map[*ssa.Global]bool, needsFrame map[*ssa.Function]bool, placed *bands, reflectMethods bool) (*emitter, error) {
+func run(res *load.Result, liveGlobals map[*ssa.Global]bool, needsFrame map[*ssa.Function]bool, placed *bands, reflectMethods, reflectCall bool) (*emitter, error) {
 	var mainPkg *ssa.Package
 	for _, p := range res.Pkgs {
 		if p != nil && p.Pkg.Name() == "main" {
@@ -102,6 +103,7 @@ func run(res *load.Result, liveGlobals map[*ssa.Global]bool, needsFrame map[*ssa
 		liveGlobals:         liveGlobals,
 		needsFrame:          needsFrame,
 		needsReflectMethods: reflectMethods,
+		needsReflectCall:    reflectCall,
 		readGlobals:         map[*ssa.Global]bool{},
 		calledFrom:          map[*ssa.Function]*ssa.Function{},
 		sizes:               types.SizesFor("gc", build.Default.GOARCH),
@@ -185,9 +187,12 @@ type emitter struct {
 	reflectFuncs        map[string][2]string
 	needsReflectMethods bool
 	usesReflectMethods  bool
-	queue               []*ssa.Function
-	types               *typeReg
-	errs                []diag
+	// The same for `reflect.Value.Call`, which needs a closure per func type.
+	needsReflectCall bool
+	usesReflectCall  bool
+	queue            []*ssa.Function
+	types            *typeReg
+	errs             []diag
 }
 
 // diag is one unsupported construct.

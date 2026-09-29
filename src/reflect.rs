@@ -236,6 +236,45 @@ pub fn equal(d: UPtr, a: UPtr, b: UPtr) -> bool {
     }
 }
 
+/// `reflect.Value.Call`: calls the func value at `f`, whose type is `d`, with
+/// the boxed arguments in `args`, and returns its boxed results.
+///
+/// The arguments and results are addresses of heap boxes, which is how a
+/// `reflect.Value` holds a value either way. The result slice is allocated
+/// before the call, so that the call's own allocations cannot collect it.
+pub fn call(
+    d: UPtr,
+    f: UPtr,
+    args: crate::slice::Slice<crate::place::Slot<UPtr>>,
+) -> crate::slice::Slice<crate::place::Slot<UPtr>> {
+    let t = desc(d);
+    let Some(shim) = t.call else {
+        crate::panic::runtime_error_msg(alloc::format!(
+            "reflect: Call of {} is not in the program's call tables",
+            t.name
+        ))
+    };
+    let mut boxed = alloc::vec::Vec::with_capacity(args.len() as usize);
+    for i in 0..args.len() {
+        boxed.push(data(args.at(i).load()));
+    }
+    let n = t.results.len();
+    let out = crate::slice::Slice::<crate::place::Slot<UPtr>>::make(n as i64, n as i64);
+    let mut results = alloc::vec::Vec::new();
+    results.resize(n, Data::NONE);
+    let frame = crate::gc::Frame::<1>::new();
+    frame.scope(|| {
+        frame.set(0, &out);
+        shim(data(f), &boxed, &mut results);
+        // Nothing allocates between here and the stores, so the boxes the
+        // shim made are still the ones it rooted.
+        for (i, r) in results.iter().enumerate() {
+            out.at(i as i64).store(UPtr::from_addr(r.addr()));
+        }
+    });
+    out
+}
+
 /// Whether the type `d` has every method of the interface type `iface`.
 pub fn implements(d: UPtr, iface: UPtr) -> bool {
     desc(d).implements(desc(iface))

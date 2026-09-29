@@ -58,3 +58,4 @@ reflectmethods linux
 deferpanic linux
 exec linux
 reflectmore linux
+reflectcall linux

@@ -944,6 +944,12 @@ func (f *fnEmitter) noteReflectMethod(obj types.Object) {
 	if obj == nil {
 		return
 	}
+	// `Value.Call` is a method of a struct, so a call to it is a static call
+	// and the package is worth insisting on: "Call" is a common enough name.
+	if obj.Name() == "Call" && obj.Pkg() != nil && obj.Pkg().Path() == "reflect" {
+		f.e.usesReflectCall = true
+		return
+	}
 	// Not `NumMethod`: the count is in every descriptor already, because a
 	// program can ask how many methods a type has without asking what they
 	// are, and `encoding/asn1` does — it is how it recognizes the empty

@@ -111,6 +111,9 @@ pub struct TypeDesc {
     pub results: &'static [&'static TypeDesc],
     /// Whether a func type's last parameter is variadic.
     pub variadic: bool,
+    /// Calls a func value of this type: `reflect.Value.Call`. Generated only
+    /// for a program that asks, since it is a function per func type.
+    pub call: Option<CallFn>,
     /// How many exported methods the type has, which
     /// `reflect.Type.NumMethod` reports. Always known, even when the table
     /// below is not generated: a program can ask how many methods a type has
@@ -123,6 +126,11 @@ pub struct TypeDesc {
     /// would be so much code for nothing.
     pub reflect_methods: &'static [MethodDesc],
 }
+
+/// How `reflect.Value.Call` reaches a func value of a given type: the boxed
+/// func, its boxed arguments, and the boxed results to fill in, which the
+/// caller has sized to the number the signature has.
+pub type CallFn = fn(Data, &[Data], &mut [Data]);
 
 /// One method, as reflection hands it out.
 ///
@@ -209,6 +217,7 @@ impl TypeDesc {
         params: &[],
         results: &[],
         variadic: false,
+        call: None,
         num_methods: 0,
         reflect_methods: &[],
     };
