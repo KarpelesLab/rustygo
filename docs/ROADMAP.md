@@ -211,7 +211,7 @@ work fails too, decision gate 1 says stop.
   `defer recover()` recovering in one order and doing nothing in the other
   ([DESIGN §5](DESIGN.md#5-control-flow-defer-panic-recover)). A program with
   no `recover` pays nothing for it.
-* 44 differential programs match gc, every one of them also under GC torture
+* 55 differential programs match gc, every one of them also under GC torture
   (a collection at every allocation), which is what checks that the emitted
   roots are complete.
 * The exit program is there: `testdata/programs/interp`, a small expression
@@ -230,8 +230,17 @@ work fails too, decision gate 1 says stop.
   left unmarked, which is what keeps everything the finalizer will see alive
   and what orders two finalizers when one object points at the other.
   `runtime.AddCleanup` and weak references are still to come.
-* Not yet: weak references; Go's `test/` directory as a tracked pass rate;
-  the standard-library plumbing.
+* **A frame that was returning normally when its own deferred call panicked**
+  is a panicking frame from that moment, and one of its remaining deferred
+  calls may recover — after which it returns normally after all
+  (`testdata/programs/deferpanic`). A deferred call panicking while the frame
+  is already panicking replaces that panic rather than queueing behind it,
+  which is the answer Go gives too.
+* **A `defer` inside a range-over-func body** belongs to the function
+  containing the `range`, not to the closure go/ssa turns the body into. go/ssa
+  says so with an intrinsic of its own, `ssa:deferstack()`
+  (`testdata/programs/rangefunc`).
+* Not yet: weak references; `runtime.AddCleanup`.
 * Standard-library plumbing: **done for the packages that do not need
   reflection or files.** `strings`, `strconv`, `sort`, `errors`, `unicode`,
   `math/bits` and `unicode/utf8` compile from the real GOROOT, unmodified,
@@ -417,15 +426,30 @@ work fails too, decision gate 1 says stop.
   `fmt.Println`, `os.Stdout`/`Stderr`, `os.Args`, `os.Getenv`, `os.Exit` with
   its exit hooks, and `time.Now`/`Sleep` all work
   (`testdata/programs/stdlib2`).
-* Go's own `test/` directory is at **74 of 141 (52%)**, up from 41 before
-  this work; the remaining failures are mostly channels and goroutines (M2),
-  plus the parts of `reflect` listed below.
+* Go's own `test/` directory is at **123 of 141 (87%)**, up from 41 before this
+  work (docs/GOTEST.md lists every failure and why).
 * Decision gate 2 (`reflect` impractical) is answered: not impractical. A
   descriptor per concrete type, with the map operations generated beside it,
   carries `fmt` without a single change to the standard library's source.
-* Not yet: `Value.Call`/`New`/`Zero`/`MakeSlice`, `Type.Method`/`Implements`,
-  `encoding/json`, the netpoller and `net/http`, `rustygo test` and the
-  service tests.
+* **A type's methods, through reflection** (`testdata/programs/reflectmethods`).
+  `Type.Method(i).Func` is the method expression `T.M`, whose first argument is
+  the receiver; `Value.Method(i)` is the method value `x.M`, which carries the
+  receiver with it. Neither is the wrapper interface dispatch uses, so each
+  method gets a pair of func values of its own and a descriptor for each one's
+  type — which is what lets a program assert either back to the func type it
+  wrote. None of it is generated unless the program asks for a method, because
+  it would otherwise be two more functions and two more descriptors for every
+  method of every type that reaches an interface.
+* **Starting a process** (`testdata/programs/exec`). `os/exec` runs a child,
+  collects it, pipes both ways, and passes it an environment. The clone gc
+  writes in assembly is an ordinary fork here, because the vfork gc asks for
+  requires that the child touch nothing the parent will look at again and this
+  compiler cannot promise that. The wait does not block the thread every
+  goroutine shares, since one of those goroutines is usually the one feeding the
+  child's standard input.
+* Not yet: `Value.Call`/`New`/`Zero`/`MakeSlice`/`MakeFunc`, `reflect.PointerTo`,
+  `Type.Implements`, `encoding/json`, `rustygo test`, `runtime.Caller` and the
+  rest of the service tests.
 
 ## M4 — Interop, both directions
 

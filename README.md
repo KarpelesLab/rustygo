@@ -10,16 +10,28 @@ a Rust runtime, and end up with Go and Rust code in *one* binary that share
 real types — no FFI between them, no `unsafe` in anything you write, and no
 cgo needed to get there.
 
-> **Status: M0 done, M1 in progress.** Single-goroutine Go programs using
-> integers, floats, strings, structs, arrays, pointers, methods, generics and
-> multiple packages compile to Rust and run, under a precise mark-sweep
-> collector. Their output, panics and exit codes are identical to gc's, and the
-> differential harness checks that on every commit — including under GC
-> torture, which collects at every allocation. Slices work, with aliasing,
-> three-index slicing, `append`, `copy` and the string/`[]byte`/`[]rune`
-> conversions, as do closures, func values, `defer`, interfaces with dynamic
-> dispatch and type switches, `panic`/`recover` and maps. Not yet: goroutines
-> and the standard library. The plan is
+> **Status: M0 and M1 are done; M2 (goroutines) and M3 (the standard library)
+> are in progress.** Go programs compile to Rust and run under a precise
+> mark-sweep collector, and their output, panics and exit codes are identical to
+> gc's — 55 differential programs check that on every commit, every one of them
+> also under GC torture, which collects at every allocation. Go's own `test/`
+> directory is at [123 of 141](docs/GOTEST.md), and every failure is listed
+> there with the reason.
+>
+> Working: the language, near enough — slices with aliasing, `append` and the
+> string/`[]byte`/`[]rune` conversions, maps, closures and func values,
+> interfaces with dynamic dispatch and type switches, generics, `defer`,
+> `panic`/`recover` down to the cases Go's own tests call "here be dragons",
+> and `runtime.SetFinalizer`. Goroutines are real stacks with a context switch
+> written for the purpose, with channels, `select`, `sync`, timers and a
+> netpoller under them. The standard library is the Go distribution's own
+> source, compiled: `fmt`, `strings`, `sort`, `os`, `reflect`, `time`, `net`,
+> `os/exec`, and `net/http` as a server *and* a client in one process.
+>
+> Not yet: threads — the scheduler runs every goroutine on one of them — and a
+> file and socket layer for anything but Linux, so macOS and Windows compile the
+> language but not the packages that reach the kernel. Nor `encoding/json`,
+> HTTPS end to end, or `rustygo test`. The plan is
 > [docs/DESIGN.md](docs/DESIGN.md) for the architecture,
 > [docs/RATIONALE.md](docs/RATIONALE.md) for why this shape and not another,
 > and [docs/ROADMAP.md](docs/ROADMAP.md) for the milestones.
@@ -153,7 +165,7 @@ by the emitter, not by a derive macro, so no proc-macro crate is needed.
 go run ./cmd/rustygo build -o hello ./testdata/programs/hello   # needs cargo
 go run ./cmd/rustygo emit -o out ./testdata/programs/hello      # inspect the Rust
 go run ./cmd/rustygo ssa ./testdata/programs/hello              # the SSA it came from
-go test ./...                                                   # includes the gc-vs-rustygo harness
+go test -timeout 40m ./...                                      # includes the gc-vs-rustygo harness, which takes minutes
 cargo test                                                      # runtime unit tests
 ```
 
