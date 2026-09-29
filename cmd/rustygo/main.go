@@ -13,10 +13,13 @@ import (
 	"fmt"
 	"maps"
 	"os"
+	"os/exec"
 	"path"
+	"path/filepath"
 	"runtime"
 	"runtime/debug"
 	"slices"
+	"strings"
 
 	"github.com/KarpelesLab/rustygo/internal/build"
 	"github.com/KarpelesLab/rustygo/internal/load"
@@ -48,7 +51,7 @@ func main() {
 	case "emit":
 		err = runEmit(args)
 	case "test":
-		err = errors.New("test: not implemented yet (roadmap M3)")
+		err = runTest(args)
 	case "ssa":
 		err = runSSA(args)
 	case "version":
@@ -94,6 +97,71 @@ func runBuild(args []string) error {
 		}
 	}
 	return build.Binary(res, *out, build.ConfigFromEnv())
+}
+
+// runTest builds and runs one package's tests.
+//
+// `go list -test` writes the test's main package — the one that registers each
+// `TestXxx` and calls `testing.Main` — so a test binary is an ordinary program
+// here, built exactly as `rustygo build` builds any other. Flags after the
+// package pattern go to the binary, so `rustygo test strings -test.v` says what
+// `go test -v` would.
+func runTest(args []string) error {
+	fs := flag.NewFlagSet("test", flag.ExitOnError)
+	out := fs.String("o", "", "write the test binary here and do not run it")
+	fs.Parse(args)
+	rest := fs.Args()
+	pattern := "."
+	if len(rest) > 0 && !strings.HasPrefix(rest[0], "-") {
+		pattern, rest = rest[0], rest[1:]
+	}
+	res, err := load.LoadTests("", pattern)
+	if err != nil {
+		return err
+	}
+	if !hasTestMain(res) {
+		return fmt.Errorf("%s has no test files", pattern)
+	}
+	bin := *out
+	if bin == "" {
+		dir, err := os.MkdirTemp("", "rustygo-test-")
+		if err != nil {
+			return err
+		}
+		defer os.RemoveAll(dir)
+		bin = filepath.Join(dir, "test")
+		if runtime.GOOS == "windows" {
+			bin += ".exe"
+		}
+	}
+	if err := build.Binary(res, bin, build.ConfigFromEnv()); err != nil {
+		return err
+	}
+	if *out != "" {
+		return nil
+	}
+	cmd := exec.Command(bin, rest...)
+	cmd.Stdout, cmd.Stderr, cmd.Stdin = os.Stdout, os.Stderr, os.Stdin
+	if err := cmd.Run(); err != nil {
+		var exit *exec.ExitError
+		if errors.As(err, &exit) {
+			// The test binary's own verdict, reported as ours.
+			os.Exit(exit.ExitCode())
+		}
+		return err
+	}
+	return nil
+}
+
+// hasTestMain reports whether the load produced a test binary's main package,
+// which it does not when the package has no test files at all.
+func hasTestMain(res *load.Result) bool {
+	for _, p := range res.Pkgs {
+		if p != nil && p.Pkg.Name() == "main" && p.Func("main") != nil {
+			return true
+		}
+	}
+	return false
 }
 
 func runSSA(args []string) error {

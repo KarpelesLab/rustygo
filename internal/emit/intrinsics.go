@@ -76,6 +76,39 @@ var intrinsics = map[string]func(args []string) string{
 	"reflect.descMethodValueFunc": func(a []string) string {
 		return fmt.Sprintf("rustygo::reflect::method_value_func(%s, %s, %s)", a[0], a[1], a[2])
 	},
+	"reflect.descNumIn": func(a []string) string {
+		return fmt.Sprintf("rustygo::reflect::num_in(%s)", a[0])
+	},
+	"reflect.descIn": func(a []string) string {
+		return fmt.Sprintf("rustygo::reflect::type_in(%s, %s)", a[0], a[1])
+	},
+	"reflect.descNumOut": func(a []string) string {
+		return fmt.Sprintf("rustygo::reflect::num_out(%s)", a[0])
+	},
+	"reflect.descOut": func(a []string) string {
+		return fmt.Sprintf("rustygo::reflect::type_out(%s, %s)", a[0], a[1])
+	},
+	"reflect.descVariadic": func(a []string) string {
+		return fmt.Sprintf("rustygo::reflect::is_variadic(%s)", a[0])
+	},
+	"reflect.descEqual": func(a []string) string {
+		return fmt.Sprintf("rustygo::reflect::equal(%s, %s, %s)", a[0], a[1], a[2])
+	},
+	"reflect.descImplements": func(a []string) string {
+		return fmt.Sprintf("rustygo::reflect::implements(%s, %s)", a[0], a[1])
+	},
+	"reflect.descZero": func(a []string) string {
+		return fmt.Sprintf("rustygo::reflect::zero_value(%s)", a[0])
+	},
+	"reflect.mapMake": func(a []string) string {
+		return fmt.Sprintf("rustygo::reflect::map_make(%s)", a[0])
+	},
+	"reflect.mapSet": func(a []string) string {
+		return fmt.Sprintf("rustygo::reflect::map_set(%s, %s, %s, %s)", a[0], a[1], a[2], a[3])
+	},
+	"reflect.mapDelete": func(a []string) string {
+		return fmt.Sprintf("rustygo::reflect::map_delete(%s, %s, %s)", a[0], a[1], a[2])
+	},
 	"reflect.descPkgPath": func(a []string) string {
 		return fmt.Sprintf("rustygo::reflect::pkg_path(%s)", a[0])
 	},
@@ -144,6 +177,7 @@ var intrinsics = map[string]func(args []string) string{
 
 	// Goroutines: the scheduler (src/sched.rs).
 	"runtime.Gosched":      func([]string) string { return "rustygo::sched::gosched()" },
+	"runtime.goexit":       func([]string) string { return "rustygo::sched::goexit()" },
 	"runtime.NumGoroutine": func([]string) string { return "rustygo::sched::count()" },
 	"runtime.yieldIfReady": func([]string) string { return "rustygo::sched::yield_now()" },
 	"runtime.sleepUntil": func(a []string) string {
@@ -213,6 +247,19 @@ var intrinsics = map[string]func(args []string) string{
 		return fmt.Sprintf("{ let (r1, r2, _) = rustygo::syscall::syscall6(%s, %s, %s, %s, 0, 0, 0); (r1, r2) }",
 			a[0], a[1], a[2], a[3])
 	},
+
+	// A func value's code address, which gc's compiler knows and rustygo does
+	// not: nothing is at address zero, and the profiler that asks is not
+	// sampling anything anyway.
+	"internal/abi.FuncPCABIInternal": func([]string) string { return "0u64" },
+	"internal/abi.FuncPCABI0":        func([]string) string { return "0u64" },
+
+	// internal/cpu reads the processor's feature bits in assembly. Reporting
+	// none is the honest answer and the safe one: every package that asks takes
+	// its portable path.
+	"internal/cpu.cpuid":           func([]string) string { return "(0u32, 0u32, 0u32, 0u32)" },
+	"internal/cpu.xgetbv":          func([]string) string { return "(0u32, 0u32)" },
+	"internal/cpu.getGOAMD64level": func([]string) string { return "1i32" },
 
 	// internal/bytealg: gc's assembly, done with Rust's slice routines.
 	"internal/bytealg.IndexByteString": func(a []string) string {

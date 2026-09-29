@@ -176,7 +176,9 @@ unsafe extern "C" fn run_goroutine(arg: *mut u8) -> ! {
         // Go's does: there is no other goroutine to report it to.
         std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| f(env)))
     });
-    if let Err(payload) = result {
+    if let Err(payload) = result
+        && !is_goexit(&*payload)
+    {
         crate::rt::report_unrecovered(payload);
     }
     exit()
@@ -193,6 +195,38 @@ fn exit() -> ! {
     // runs next.
     schedule(Switch::Exit(me));
     unreachable!("a dead goroutine was resumed")
+}
+
+/// What `runtime.Goexit` unwinds with.
+///
+/// Not a Go panic: `recover` must not see it, and nothing can stop it. The
+/// deferred calls of every frame on the way out still run, which is the whole
+/// of what Goexit promises, and the goroutine's entry frame treats it as an
+/// ordinary end rather than a panic nobody caught.
+pub struct Goexit;
+
+/// `runtime.Goexit`: ends the running goroutine after its deferred calls.
+///
+/// The main goroutine is a special case Go spells out: the program carries on
+/// with the other goroutines, and crashes once none of them can run.
+pub fn goexit() -> ! {
+    // `resume_unwind` rather than `panic!`: it does not go through Rust's
+    // panic hook, which would print a line about a payload it cannot name.
+    // Go's own panics take the same route (`panic::go_panic`).
+    std::panic::resume_unwind(alloc::boxed::Box::new(Goexit))
+}
+
+/// Whether a caught payload is a [`Goexit`].
+pub fn is_goexit(p: &(dyn core::any::Any + Send)) -> bool {
+    p.is::<Goexit>()
+}
+
+/// Parks the goroutine for ever, which is what the main goroutine does after
+/// `runtime.Goexit`: it is over, but the program is not.
+pub fn park_forever() -> ! {
+    loop {
+        park_on(0);
+    }
 }
 
 /// `runtime.Gosched`: gives up the processor, staying runnable.

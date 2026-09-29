@@ -95,6 +95,14 @@ type Type interface {
 	MethodByName(name string) (Method, bool)
 	Bits() int
 	ConvertibleTo(u Type) bool
+	NumIn() int
+	In(i int) Type
+	NumOut() int
+	Out(i int) Type
+	IsVariadic() bool
+	OverflowInt(x int64) bool
+	OverflowUint(x uint64) bool
+	OverflowFloat(x float64) bool
 }
 
 // Method is one method of a type or value.
@@ -250,6 +258,70 @@ func (t rtype) Method(i int) Method {
 	}
 }
 
+// What a func type is made of.
+
+func (t rtype) NumIn() int {
+	t.mustBe(Func, "NumIn")
+	return int(descNumIn(t.d))
+}
+
+func (t rtype) In(i int) Type {
+	t.mustBe(Func, "In")
+	return typeAt(descIn(t.d, i))
+}
+
+func (t rtype) NumOut() int {
+	t.mustBe(Func, "NumOut")
+	return int(descNumOut(t.d))
+}
+
+func (t rtype) Out(i int) Type {
+	t.mustBe(Func, "Out")
+	return typeAt(descOut(t.d, i))
+}
+
+func (t rtype) IsVariadic() bool {
+	t.mustBe(Func, "IsVariadic")
+	return descVariadic(t.d)
+}
+
+func (t rtype) mustBe(k Kind, method string) {
+	if t.Kind() != k {
+		panic("reflect: Type." + method + " of " + t.Kind().String() + " type")
+	}
+}
+
+// Whether a value would be truncated by this type, which is its width alone.
+
+func (t rtype) OverflowInt(x int64) bool {
+	bits := uint(t.Bits())
+	trunc := (x << (64 - bits)) >> (64 - bits)
+	return x != trunc
+}
+
+func (t rtype) OverflowUint(x uint64) bool {
+	bits := uint(t.Bits())
+	trunc := (x << (64 - bits)) >> (64 - bits)
+	return x != trunc
+}
+
+func (t rtype) OverflowFloat(x float64) bool {
+	if t.Kind() == Float32 {
+		return overflowFloat32(x)
+	}
+	if t.Kind() != Float64 {
+		panic("reflect: OverflowFloat of " + t.Kind().String() + " type")
+	}
+	return false
+}
+
+func overflowFloat32(x float64) bool {
+	if x < 0 {
+		x = -x
+	}
+	return 3.4028234663852886e+38 < x
+}
+
 func (t rtype) MethodByName(name string) (Method, bool) {
 	for i := 0; i < t.NumMethod(); i++ {
 		if descMethodName(t.d, i) == name {
@@ -301,17 +373,32 @@ func (t rtype) FieldByName(name string) (StructField, bool) {
 }
 
 // Implements and AssignableTo cover what errors.As asks: whether a type has
-// an interface's methods, and whether two types are the same.
+// an interface's methods, and whether a value of one type can be assigned to a
+// variable of another.
 func (t rtype) Implements(u Type) bool {
 	if u == nil || u.Kind() != Interface {
 		panic("reflect: non-interface type passed to Type.Implements")
 	}
-	panic(unsupported("Type.Implements"))
+	ru, ok := u.(rtype)
+	if !ok {
+		return false
+	}
+	return descImplements(t.d, ru.d)
 }
 
+// AssignableTo is the same type, or a type assignable to an interface it
+// implements. Go's rule is wider — a named type is assignable to its unnamed
+// underlying type, and a bidirectional channel to a directed one — and the
+// descriptors do not say enough to see those.
 func (t rtype) AssignableTo(u Type) bool {
 	o, ok := u.(rtype)
-	return ok && t.d == o.d
+	if !ok {
+		return false
+	}
+	if t.d == o.d {
+		return true
+	}
+	return u.Kind() == Interface && descImplements(t.d, o.d)
 }
 
 // Value is a Go value, as reflection sees it: its type, the address of the
@@ -787,6 +874,98 @@ func (v Value) SetString(x string) {
 	*(*string)(v.p) = x
 }
 
+// Equal reports whether v and u are equal, which for two values of one
+// comparable type is what `==` would say.
+func (v Value) Equal(u Value) bool {
+	if !v.IsValid() || !u.IsValid() {
+		return v.IsValid() == u.IsValid()
+	}
+	if v.Kind() == Interface {
+		return *(*any)(v.p) == *(*any)(u.p)
+	}
+	if v.d != u.d {
+		return false
+	}
+	if !v.Comparable() {
+		panic("reflect.Value.Equal: values of type " + v.Type().String() + " are not comparable")
+	}
+	return descEqual(v.d, v.p, u.p)
+}
+
+// Comparable reports whether Equal may be called on v.
+func (v Value) Comparable() bool {
+	if !v.IsValid() {
+		return true
+	}
+	if v.Kind() == Interface {
+		return true
+	}
+	return v.Type().Comparable()
+}
+
+// SetZero sets v to the zero value of its type, which for every Go type is
+// all-zero bytes.
+func (v Value) SetZero() {
+	v.mustBeAssignable("SetZero")
+	n := int(descSize(v.d))
+	b := unsafe.Slice((*byte)(v.p), n)
+	for i := range b {
+		b[i] = 0
+	}
+}
+
+// SetLen sets a slice's length, which must not exceed its capacity.
+func (v Value) SetLen(n int) {
+	v.mustBeAssignable("SetLen")
+	v.mustBe(Slice, "SetLen")
+	h := (*sliceHeader)(v.p)
+	if n < 0 || n > h.cap {
+		panic("reflect: SetLen out of range")
+	}
+	h.len = n
+}
+
+// SetCap sets a slice's capacity, which must be between its length and its
+// current capacity.
+func (v Value) SetCap(n int) {
+	v.mustBeAssignable("SetCap")
+	v.mustBe(Slice, "SetCap")
+	h := (*sliceHeader)(v.p)
+	if n < h.len || n > h.cap {
+		panic("reflect: SetCap out of range")
+	}
+	h.cap = n
+}
+
+// SetBytes sets v, which must be a []byte, to x.
+func (v Value) SetBytes(x []byte) {
+	v.mustBeAssignable("SetBytes")
+	v.mustBe(Slice, "SetBytes")
+	if descKind(descElem(v.d)) != uint8(Uint8) {
+		panic("reflect.Value.SetBytes of " + v.Type().String())
+	}
+	*(*[]byte)(v.p) = x
+}
+
+// SetMapIndex sets m[key] = elem, or deletes m[key] if elem is the zero Value.
+func (v Value) SetMapIndex(key, elem Value) {
+	v.mustBe(Map, "SetMapIndex")
+	if v.IsNil() {
+		panic("reflect: SetMapIndex on a nil map")
+	}
+	if key.d != descKey(v.d) {
+		panic("reflect: SetMapIndex with a key of type " + key.Type().String())
+	}
+	if !elem.IsValid() {
+		mapDelete(v.d, v.p, key.p)
+		return
+	}
+	if elem.d != descElem(v.d) {
+		panic("reflect: SetMapIndex with a value of type " + elem.Type().String())
+	}
+	mapSet(v.d, v.p, key.p, elem.p)
+}
+
 func (v Value) mustBeAssignable(method string) {
 	if !v.IsValid() {
 		panic("reflect: " + method + " on the zero Value")
@@ -836,9 +1015,40 @@ func Swapper(slice any) func(i, j int) {
 // rather than through a func value, are not here yet.
 
 func (v Value) Call(in []Value) []Value      { panic(unsupported("Value.Call")) }
+func (v Value) Grow(n int)                   { panic(unsupported("Value.Grow")) }
 func MakeSlice(typ Type, len, cap int) Value { panic(unsupported("MakeSlice")) }
-func New(typ Type) Value                     { panic(unsupported("New")) }
-func Zero(typ Type) Value                    { panic(unsupported("Zero")) }
+
+// PointerTo would need a type descriptor rustygo's emitter did not write, the
+// program never having mentioned the type (DESIGN §6).
+func PointerTo(t Type) Type { panic(unsupported("PointerTo")) }
+
+// MakeMap makes an empty map of a type the program does mention, so the map's
+// own accessors are there to make it with.
+func MakeMap(t Type) Value {
+	rt, ok := t.(rtype)
+	if !ok || t.Kind() != Map {
+		panic("reflect.MakeMap of non-map type")
+	}
+	m := mapMake(rt.d)
+	// The Value refers to a box holding the map, which is the map's own
+	// storage as far as anything here is concerned.
+	return Value{rt.d, m, true}
+}
+
+// New would hand back a `*T`, and the descriptor for that pointer type is one
+// the program never mentioned, so the emitter never wrote it (DESIGN §6).
+func New(typ Type) Value { panic(unsupported("New")) }
+
+// Zero returns the zero value of a type: all-zero bytes, in an object of the
+// right size that knows how to trace itself. The result is not addressable,
+// as gc's is not.
+func Zero(typ Type) Value {
+	rt, ok := typ.(rtype)
+	if !ok {
+		panic("reflect.Zero of a nil Type")
+	}
+	return Value{rt.d, descZero(rt.d), false}
+}
 
 // DeepEqual compares two values the way gc's does, for the kinds this
 // package can read.
@@ -974,6 +1184,17 @@ func descFieldOffset(d unsafe.Pointer, i int) uint64
 func descFieldTag(d unsafe.Pointer, i int) string
 func descFieldEmbedded(d unsafe.Pointer, i int) bool
 func descBox(d, addr unsafe.Pointer) unsafe.Pointer
+func descImplements(d, iface unsafe.Pointer) bool
+func descZero(d unsafe.Pointer) unsafe.Pointer
+func descNumIn(d unsafe.Pointer) int64
+func descIn(d unsafe.Pointer, i int) unsafe.Pointer
+func descNumOut(d unsafe.Pointer) int64
+func descOut(d unsafe.Pointer, i int) unsafe.Pointer
+func descVariadic(d unsafe.Pointer) bool
+func descEqual(d, a, b unsafe.Pointer) bool
+func mapMake(d unsafe.Pointer) unsafe.Pointer
+func mapSet(d, m, k, v unsafe.Pointer)
+func mapDelete(d, m, k unsafe.Pointer)
 func descNumMethod(d unsafe.Pointer) int64
 func descMethodName(d unsafe.Pointer, i int) string
 func descMethodPkgPath(d unsafe.Pointer, i int) string
@@ -989,14 +1210,16 @@ func mapIndex(d, m, k unsafe.Pointer) (unsafe.Pointer, bool)
 // TypeFor returns the Type that represents the type argument T.
 //
 // A concrete T has a descriptor of its own, which boxing a zero value of it
-// produces. An interface T has none: rustygo emits descriptors for the
-// concrete types a program instantiates, not for its interfaces (DESIGN §6).
+// produces. An interface T does not box that way — the zero value of an
+// interface is nil and carries no type — so it is reached the way gc's reflect
+// reaches it, through the pointer type `*T`, whose descriptor names T as the
+// type it points at.
 func TypeFor[T any]() Type {
 	var zero T
 	if t := TypeOf(any(zero)); t != nil {
 		return t
 	}
-	panic(unsupported("TypeFor of an interface type"))
+	return TypeOf((*T)(nil)).Elem()
 }
 
 // TypeAssert is x.(T), for a Value.

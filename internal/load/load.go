@@ -44,6 +44,22 @@ type Result struct {
 // dependencies. Generic functions are instantiated, as the emitter needs
 // every body monomorphic.
 func Load(dir string, patterns ...string) (*Result, error) {
+	return load(dir, false, patterns...)
+}
+
+// LoadTests is Load over a package's tests.
+//
+// `go list -test` writes the test's main package — the one that registers each
+// `TestXxx` and calls `testing.Main` — and go/packages hands it back like any
+// other, so a test binary is an ordinary program to everything downstream of
+// here. The [Result] then holds four packages for each pattern: the package
+// itself, the copy compiled with its in-package `_test.go` files, the external
+// `_test` package, and that generated main.
+func LoadTests(dir string, patterns ...string) (*Result, error) {
+	return load(dir, true, patterns...)
+}
+
+func load(dir string, tests bool, patterns ...string) (*Result, error) {
 	overlay, err := goroot.Overlay()
 	if err != nil {
 		return nil, err
@@ -57,6 +73,7 @@ func Load(dir string, patterns ...string) (*Result, error) {
 			packages.NeedSyntax | packages.NeedTypesInfo | packages.NeedTypesSizes |
 			packages.NeedModule,
 		Dir:        dir,
+		Tests:      tests,
 		BuildFlags: []string{"-tags=" + joinTags()},
 		// Packages load with cgo off until M4 binds C (DESIGN §9a), so
 		// anything with both paths takes its pure-Go one.

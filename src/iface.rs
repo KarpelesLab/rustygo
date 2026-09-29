@@ -74,6 +74,11 @@ pub struct TypeDesc {
     pub align: usize,
     /// The type's method set, sorted by id.
     pub methods: &'static [(MethodId, ErasedFn)],
+    /// An interface type's own methods, by id and sorted. A concrete type
+    /// implements the interface exactly when its table holds all of them,
+    /// which is what `reflect.Type.Implements` asks and what an interface call
+    /// relies on.
+    pub iface_methods: &'static [MethodId],
     /// Compares two values of this type, or `None` if Go says the type is
     /// not comparable (a slice, map or func).
     pub equal: Option<fn(Data, Data) -> bool>,
@@ -85,6 +90,10 @@ pub struct TypeDesc {
     /// Copies a value at an address into a fresh heap object, which is how
     /// reflection hands one back as an interface.
     pub box_value: fn(crate::unsafe_ptr::UPtr) -> Data,
+    /// A fresh heap object holding this type's zero value, for
+    /// `reflect.Zero`. Go's zero value is all-zero bytes, but the *object*
+    /// has to exist, and it has to know how to trace itself.
+    pub zero: fn() -> Data,
     /// The element type of a pointer, slice, array, map or channel.
     pub elem: Option<&'static TypeDesc>,
     /// A map's key type.
@@ -96,6 +105,12 @@ pub struct TypeDesc {
     /// A map's accessors: our maps are hash tables, not memory gc's layout
     /// rules describe, so reflection reaches them through these.
     pub map_ops: Option<&'static MapOps>,
+    /// A func type's parameter types, and whether the last of them is `...`.
+    pub params: &'static [&'static TypeDesc],
+    /// A func type's result types.
+    pub results: &'static [&'static TypeDesc],
+    /// Whether a func type's last parameter is variadic.
+    pub variadic: bool,
     /// How many exported methods the type has, which
     /// `reflect.Type.NumMethod` reports. Always known, even when the table
     /// below is not generated: a program can ask how many methods a type has
@@ -161,6 +176,12 @@ pub struct MapOps {
     pub index: fn(Data, Data) -> (Data, bool),
     /// A fresh map holding the same entries, boxed, for `maps.Clone`.
     pub clone: fn(Data) -> Data,
+    /// An empty map of this type, boxed: `reflect.MakeMap`.
+    pub make: fn() -> Data,
+    /// `m[k] = v`, with both given boxed.
+    pub set: fn(Data, Data, Data),
+    /// `delete(m, k)`.
+    pub delete: fn(Data, Data),
 }
 
 impl TypeDesc {
@@ -174,18 +195,32 @@ impl TypeDesc {
         size: 0,
         align: 1,
         methods: &[],
+        iface_methods: &[],
         equal: None,
         hash: None,
         print: |_, out| out.extend_from_slice(b"<value>"),
         box_value: |_| Data::NONE,
+        zero: || Data::NONE,
         elem: None,
         key: None,
         len: 0,
         fields: &[],
         map_ops: None,
+        params: &[],
+        results: &[],
+        variadic: false,
         num_methods: 0,
         reflect_methods: &[],
     };
+
+    /// Whether this type's method set holds every method of the interface
+    /// type `iface`.
+    pub fn implements(&self, iface: &TypeDesc) -> bool {
+        iface
+            .iface_methods
+            .iter()
+            .all(|id| self.method(*id).is_some())
+    }
 
     fn method(&self, id: MethodId) -> Option<ErasedFn> {
         self.methods

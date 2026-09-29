@@ -1436,11 +1436,14 @@ func (e *emitter) linkTarget(key string) *ssa.Function {
 				if fn.Blocks != nil || intrinsics[target] != nil {
 					return fn
 				}
-				key = pkgPath + "." + name
-				continue
 			}
 		}
-		return nil
+		// A name in the chain need not be declared anywhere: both sides of a
+		// link may name a third symbol that only the linker ever sees.
+		// `runtime/pprof.runtime_cyclesPerSecond` is one of those — the
+		// package pulls from it and the runtime pushes to it, and no Go file
+		// declares it.
+		key = target
 	}
 	return nil
 }

@@ -70,6 +70,10 @@ pub fn run_main(init: fn(), main: fn()) -> ! {
     });
     match result {
         Ok(()) => exit(0),
+        // `runtime.Goexit` in the main goroutine ends it without ending the
+        // program: what is left runs, and the scheduler reports a deadlock
+        // once nothing can.
+        Err(payload) if crate::sched::is_goexit(&*payload) => crate::sched::park_forever(),
         Err(payload) => report_unrecovered(payload),
     }
 }

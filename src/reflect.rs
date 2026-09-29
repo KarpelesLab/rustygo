@@ -187,6 +187,80 @@ pub fn map_index(d: UPtr, m: UPtr, k: UPtr) -> (UPtr, bool) {
     (UPtr::from_addr(v.addr()), ok)
 }
 
+/// How many parameters a func type has.
+pub fn num_in(d: UPtr) -> i64 {
+    desc(d).params.len() as i64
+}
+
+/// The type of parameter `i`.
+pub fn type_in(d: UPtr, i: i64) -> UPtr {
+    match desc(d).params.get(i as usize) {
+        Some(t) => UPtr::from_addr(*t as *const TypeDesc as usize as u64),
+        None => crate::panic::runtime_error_msg(alloc::format!(
+            "reflect: In({i}) out of range for {}",
+            desc(d).name
+        )),
+    }
+}
+
+/// How many results a func type has.
+pub fn num_out(d: UPtr) -> i64 {
+    desc(d).results.len() as i64
+}
+
+/// The type of result `i`.
+pub fn type_out(d: UPtr, i: i64) -> UPtr {
+    match desc(d).results.get(i as usize) {
+        Some(t) => UPtr::from_addr(*t as *const TypeDesc as usize as u64),
+        None => crate::panic::runtime_error_msg(alloc::format!(
+            "reflect: Out({i}) out of range for {}",
+            desc(d).name
+        )),
+    }
+}
+
+/// Whether a func type's last parameter is `...`.
+pub fn is_variadic(d: UPtr) -> bool {
+    desc(d).variadic
+}
+
+/// Whether two values of this type are equal, for `reflect.Value.Equal`. Only
+/// asked of a comparable type.
+pub fn equal(d: UPtr, a: UPtr, b: UPtr) -> bool {
+    match desc(d).equal {
+        Some(eq) => eq(data(a), data(b)),
+        None => crate::panic::runtime_error_msg(alloc::format!(
+            "reflect: {} is not comparable",
+            desc(d).name
+        )),
+    }
+}
+
+/// Whether the type `d` has every method of the interface type `iface`.
+pub fn implements(d: UPtr, iface: UPtr) -> bool {
+    desc(d).implements(desc(iface))
+}
+
+/// A fresh zero value of this type, boxed: `reflect.Zero`.
+pub fn zero_value(d: UPtr) -> UPtr {
+    UPtr::from_addr((desc(d).zero)().addr())
+}
+
+/// An empty map of this type, boxed: `reflect.MakeMap`.
+pub fn map_make(d: UPtr) -> UPtr {
+    UPtr::from_addr((map_ops(d).make)().addr())
+}
+
+/// `m[k] = v`, all three given by address.
+pub fn map_set(d: UPtr, m: UPtr, k: UPtr, v: UPtr) {
+    (map_ops(d).set)(data(m), data(k), data(v))
+}
+
+/// `delete(m, k)`.
+pub fn map_delete(d: UPtr, m: UPtr, k: UPtr) {
+    (map_ops(d).delete)(data(m), data(k))
+}
+
 /// An address as a data word.
 fn data(p: UPtr) -> Data {
     Data::of::<u8>(unsafe { p.to_ptr() })

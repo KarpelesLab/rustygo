@@ -78,6 +78,11 @@ func signatureKey(sig *types.Signature) string {
 // type, which is its own spelling.
 func unaliased(t types.Type) types.Type {
 	switch t := types.Unalias(t).(type) {
+	case *types.Basic:
+		// `byte` and `rune` are not aliases in go/types but separate basic
+		// types with the same kinds, so that a printer can show the name that
+		// was written. Go shows what the type is: `[]uint8`, never `[]byte`.
+		return types.Typ[t.Kind()]
 	case *types.Pointer:
 		return types.NewPointer(unaliased(t.Elem()))
 	case *types.Slice:
@@ -126,52 +131,10 @@ func goName(t types.Type) string {
 	if b, ok := types.Unalias(t).(*types.Basic); ok {
 		return types.Typ[b.Kind()].Name()
 	}
-	return types.TypeString(withoutParamNames(t), func(p *types.Package) string { return p.Name() })
-}
-
-// withoutParamNames rebuilds t with every signature's parameter names
-// dropped.
-//
-// Go names a func type by its types alone — `func(int) int`, never
-// `func(d int) int` — while go/types keeps the names the declaration gave, so
-// a descriptor built from a declared type would otherwise be named differently
-// from one built from the same type written out. Recursion stops at a named
-// type, which prints as its name, so a recursive type cannot loop here.
-func withoutParamNames(t types.Type) types.Type {
-	switch t := t.(type) {
-	case *types.Signature:
-		return types.NewSignatureType(nil, nil, nil,
-			anonTuple(t.Params()), anonTuple(t.Results()), t.Variadic())
-	case *types.Pointer:
-		return types.NewPointer(withoutParamNames(t.Elem()))
-	case *types.Slice:
-		return types.NewSlice(withoutParamNames(t.Elem()))
-	case *types.Array:
-		return types.NewArray(withoutParamNames(t.Elem()), t.Len())
-	case *types.Chan:
-		return types.NewChan(t.Dir(), withoutParamNames(t.Elem()))
-	case *types.Map:
-		return types.NewMap(withoutParamNames(t.Key()), withoutParamNames(t.Elem()))
-	case *types.Struct:
-		fields := make([]*types.Var, t.NumFields())
-		tags := make([]string, t.NumFields())
-		for i := range fields {
-			f := t.Field(i)
-			fields[i] = types.NewField(f.Pos(), f.Pkg(), f.Name(), withoutParamNames(f.Type()), f.Embedded())
-			tags[i] = t.Tag(i)
-		}
-		return types.NewStruct(fields, tags)
-	}
-	return t
-}
-
-// anonTuple is a tuple of the same types with no names.
-func anonTuple(tup *types.Tuple) *types.Tuple {
-	vars := make([]*types.Var, tup.Len())
-	for i := range vars {
-		vars[i] = types.NewParam(token.NoPos, nil, "", withoutParamNames(tup.At(i).Type()))
-	}
-	return types.NewTuple(vars...)
+	// Aliases and parameter names both go: Go names a type by what it is, so
+	// `[]byte` prints as `[]uint8` and `func(d int)` as `func(int)`, which is
+	// what [unaliased] leaves behind.
+	return types.TypeString(unaliased(t), func(p *types.Package) string { return p.Name() })
 }
 
 // goIfaceName is the static interface type as gc names it in an interface
@@ -206,6 +169,7 @@ func (e *emitter) typeDesc(t types.Type, pos token.Pos) string {
 
 	place := e.types.place(t, e, pos)
 	methods := e.methodTable(t, pos)
+	ifaceMethods := e.ifaceMethodIDs(t)
 	reflectMethods := e.reflectMethods(t, pos)
 	numMethods := exportedMethods(t)
 	equal, hash := "None", "None"
@@ -214,9 +178,9 @@ func (e *emitter) typeDesc(t types.Type, pos token.Pos) string {
 		hash = fmt.Sprintf("Some(|d| GoKey::go_hash(&d.cast::<%s>().load()))", place)
 	}
 	var b strings.Builder
-	fmt.Fprintf(&b, "\npub static %s: TypeDesc = TypeDesc {\n    name: %q,\n    short: %q,\n    pkg_path: %q,\n    kind: %d,\n    size: %d,\n    align: %d,\n    methods: &[%s],\n    equal: %s,\n    hash: %s,\n    print: |d, out| { %s },\n    box_value: |p| Data::of(Ptr::<%s>::alloc(unsafe { p.to_ptr::<%s>() }.load())),\n",
+	fmt.Fprintf(&b, "\npub static %s: TypeDesc = TypeDesc {\n    name: %q,\n    short: %q,\n    pkg_path: %q,\n    kind: %d,\n    size: %d,\n    align: %d,\n    methods: &[%s],\n    equal: %s,\n    hash: %s,\n    print: |d, out| { %s },\n    box_value: |p| Data::of(Ptr::<%s>::alloc(unsafe { p.to_ptr::<%s>() }.load())),\n    zero: || Data::of(Ptr::<%s>::alloc(GoValue::zero())),\n",
 		name, goName(t), shortName(t), pkgPath(t), reflectKind(t), e.sizeof(t), e.alignof(t),
-		methods, equal, hash, e.printValue(t, place, pos), place, place)
+		methods, equal, hash, e.printValue(t, place, pos), place, place, place)
 	// What reflection needs to walk a value's structure.
 	switch u := t.Underlying().(type) {
 	case *types.Pointer:
@@ -230,6 +194,17 @@ func (e *emitter) typeDesc(t types.Type, pos token.Pos) string {
 			e.typeDesc(u.Elem(), pos), e.typeDesc(u.Key(), pos), e.mapOps(u, pos))
 	case *types.Struct:
 		fmt.Fprintf(&b, "    fields: &[%s],\n", e.fieldDescs(t, u, pos))
+	case *types.Signature:
+		// What reflection asks a func type: its parameters and its results.
+		// `Value.Call` will want them too.
+		fmt.Fprintf(&b, "    params: &[%s],\n    results: &[%s],\n",
+			e.descList(u.Params(), pos), e.descList(u.Results(), pos))
+		if u.Variadic() {
+			b.WriteString("    variadic: true,\n")
+		}
+	}
+	if ifaceMethods != "" {
+		fmt.Fprintf(&b, "    iface_methods: &[%s],\n", ifaceMethods)
 	}
 	if numMethods > 0 {
 		fmt.Fprintf(&b, "    num_methods: %d,\n", numMethods)
@@ -240,6 +215,15 @@ func (e *emitter) typeDesc(t types.Type, pos token.Pos) string {
 	b.WriteString("    ..TypeDesc::DEFAULT\n};\n")
 	e.types.at(band).WriteString(b.String())
 	return path
+}
+
+// descList renders a tuple as a list of descriptor references.
+func (e *emitter) descList(tup *types.Tuple, pos token.Pos) string {
+	parts := make([]string, tup.Len())
+	for i := range parts {
+		parts[i] = "&" + e.typeDesc(tup.At(i).Type(), pos)
+	}
+	return strings.Join(parts, ", ")
 }
 
 // shortName is the type's declared name alone, or "" if it has none.
@@ -380,8 +364,29 @@ pub static %s: MapOps = MapOps {
         });
         Data::of(Ptr::<Slot<%s>>::alloc(out))
     },
+    make: || {
+        // Two allocations: the map, and the box holding it. The second can
+        // collect the first, which nothing else refers to yet.
+        let m = GoMap::make(0);
+        let __roots = rustygo::gc::Frame::<1>::new();
+        __roots.scope(|| {
+            __roots.set(0, &m);
+            Data::of(Ptr::<Slot<%s>>::alloc(m))
+        })
+    },
+    set: |d, k, v| {
+        d.cast::<Slot<%s>>()
+            .load()
+            .set(k.cast::<%s>().load(), v.cast::<%s>().load())
+    },
+    delete: |d, k| {
+        d.cast::<Slot<%s>>()
+            .load()
+            .delete(k.cast::<%s>().load())
+    },
 };
-`, name, mapType, iterType, mapType, iterType, kPlace, vPlace, mapType, kPlace, vPlace, mapType, mapType)
+`, name, mapType, iterType, mapType, iterType, kPlace, vPlace, mapType, kPlace, vPlace, mapType, mapType,
+		mapType, mapType, kPlace, vPlace, mapType, kPlace)
 	return crateName(band) + "::ty::" + name
 }
 
@@ -565,6 +570,25 @@ func (f *fnEmitter) invokeOn(m *types.Func, recv string, args []string, pos toke
 // non-interface type, and only when the program reaches this part of
 // reflection: it is a lot of code to generate for a program that never asks.
 
+// ifaceMethodIDs renders an interface type's own method ids, sorted, which is
+// what says whether another type implements it.
+func (e *emitter) ifaceMethodIDs(t types.Type) string {
+	it, ok := t.Underlying().(*types.Interface)
+	if !ok {
+		return ""
+	}
+	ids := make([]string, 0, it.NumMethods())
+	nums := make([]uint32, 0, it.NumMethods())
+	for i := 0; i < it.NumMethods(); i++ {
+		nums = append(nums, e.methodID(it.Method(i)))
+	}
+	sort.Slice(nums, func(i, j int) bool { return nums[i] < nums[j] })
+	for _, n := range nums {
+		ids = append(ids, fmt.Sprint(n))
+	}
+	return strings.Join(ids, ", ")
+}
+
 // exportedMethods counts the methods `reflect.Type.NumMethod` reports, which
 // is always in the descriptor: asking how many is not asking which.
 func exportedMethods(t types.Type) int {
@@ -618,17 +642,17 @@ func (e *emitter) reflectMethods(t types.Type, pos token.Pos) string {
 // then the method's own parameters.
 func methodExprType(recv types.Type, sig *types.Signature) types.Type {
 	params := []*types.Var{types.NewParam(token.NoPos, nil, "", recv)}
-	anon := anonTuple(sig.Params())
+	anon := unaliasedTuple(sig.Params())
 	for i := 0; i < anon.Len(); i++ {
 		params = append(params, anon.At(i))
 	}
-	return types.NewSignatureType(nil, nil, nil, types.NewTuple(params...), anonTuple(sig.Results()), sig.Variadic())
+	return types.NewSignatureType(nil, nil, nil, types.NewTuple(params...), unaliasedTuple(sig.Results()), sig.Variadic())
 }
 
 // withoutRecv is the type of a method value `x.M`: the method's own signature,
 // with no receiver attached to it.
 func withoutRecv(sig *types.Signature) types.Type {
-	return types.NewSignatureType(nil, nil, nil, anonTuple(sig.Params()), anonTuple(sig.Results()), sig.Variadic())
+	return types.NewSignatureType(nil, nil, nil, unaliasedTuple(sig.Params()), unaliasedTuple(sig.Results()), sig.Variadic())
 }
 
 // methodFuncs emits the two func bodies reflection needs for one method and

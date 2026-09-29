@@ -1,133 +1,73 @@
 // Copyright 2026 Karpelès Lab Inc. MIT license.
 
-// Package reflectlite is rustygo's stand-in for gc's, which reads gc's type
-// descriptors. This one answers from rustygo's own (the runtime's TypeDesc,
-// DESIGN §6).
+// Package reflectlite is rustygo's stand-in for gc's.
 //
-// M1 covers what errors.Is needs: a type's name and whether it is
-// comparable. The rest of the API is present so its importers compile, and
-// panics with a clear message when used, until reflection lands (the
-// descriptors do not carry kinds, element types or sizes yet).
+// gc has a second, smaller reflect because `errors` and `sort` are below
+// `reflect` in its import graph and it will not have a cycle. rustygo's
+// `reflect` is its own package written over the runtime's type descriptors
+// (DESIGN §6) and imports almost nothing, so there is no cycle to avoid: this
+// is the same package under its other name, and the two cannot disagree.
 package reflectlite
 
-import "unsafe"
-
-// Kind is a type's kind, numbered as in package reflect.
-type Kind uint
-
-const (
-	Invalid Kind = iota
-	Bool
-	Int
-	Int8
-	Int16
-	Int32
-	Int64
-	Uint
-	Uint8
-	Uint16
-	Uint32
-	Uint64
-	Uintptr
-	Float32
-	Float64
-	Complex64
-	Complex128
-	Array
-	Chan
-	Func
-	Interface
-	Map
-	Pointer
-	Slice
-	String
-	Struct
-	UnsafePointer
+import (
+	"reflect"
+	"unsafe"
 )
 
-const Ptr = Pointer
+// Kind is a type's kind, numbered as in package reflect.
+type Kind = reflect.Kind
 
-// Type is the subset of reflect.Type the standard library's low levels use.
-type Type interface {
-	Name() string
-	PkgPath() string
-	Size() uintptr
-	Kind() Kind
-	Implements(u Type) bool
-	AssignableTo(u Type) bool
-	Comparable() bool
-	String() string
-	Elem() Type
-}
+const (
+	Invalid       = reflect.Invalid
+	Bool          = reflect.Bool
+	Int           = reflect.Int
+	Int8          = reflect.Int8
+	Int16         = reflect.Int16
+	Int32         = reflect.Int32
+	Int64         = reflect.Int64
+	Uint          = reflect.Uint
+	Uint8         = reflect.Uint8
+	Uint16        = reflect.Uint16
+	Uint32        = reflect.Uint32
+	Uint64        = reflect.Uint64
+	Uintptr       = reflect.Uintptr
+	Float32       = reflect.Float32
+	Float64       = reflect.Float64
+	Complex64     = reflect.Complex64
+	Complex128    = reflect.Complex128
+	Array         = reflect.Array
+	Chan          = reflect.Chan
+	Func          = reflect.Func
+	Interface     = reflect.Interface
+	Map           = reflect.Map
+	Pointer       = reflect.Pointer
+	Ptr           = reflect.Pointer
+	Slice         = reflect.Slice
+	String        = reflect.String
+	Struct        = reflect.Struct
+	UnsafePointer = reflect.UnsafePointer
+)
 
-// rtype is a type known by its runtime descriptor; a nil descriptor is a
-// type the M1 descriptors cannot describe yet (an element type, say).
-type rtype struct{ desc unsafe.Pointer }
+// Type and Value are reflect's own. gc's reflectlite.Type is a subset of
+// reflect.Type's method set, so code written against either compiles.
+type Type = reflect.Type
 
-// TypeOf returns the dynamic type of i, or nil for a nil interface.
-func TypeOf(i any) Type {
-	d := typeOf(i)
-	if d == nil {
-		return nil
-	}
-	return rtype{d}
-}
+type Value = reflect.Value
 
-func (t rtype) Comparable() bool {
-	t.need("Comparable")
-	return descComparable(t.desc)
-}
+func TypeOf(i any) Type                      { return reflect.TypeOf(i) }
+func ValueOf(i any) Value                    { return reflect.ValueOf(i) }
+func Swapper(slice any) func(i, j int)       { return reflect.Swapper(slice) }
+func TypeFor[T any]() Type                   { return reflect.TypeFor[T]() }
+func DeepEqual(x, y any) bool                { return reflect.DeepEqual(x, y) }
+func PtrTo(t Type) Type                      { return reflect.PointerTo(t) }
+func Zero(t Type) Value                      { return reflect.Zero(t) }
+func unused(p unsafe.Pointer) unsafe.Pointer { return p }
 
-func (t rtype) String() string {
-	if t.desc == nil {
-		return "<unknown type>"
-	}
-	return descName(t.desc)
-}
-
-// Elem cannot be answered yet, but errors computes one at init, so it returns
-// an unknown type rather than panicking.
-func (t rtype) Elem() Type { return rtype{} }
-
-func (t rtype) Name() string             { panic(unsupported("Type.Name")) }
-func (t rtype) PkgPath() string          { panic(unsupported("Type.PkgPath")) }
-func (t rtype) Size() uintptr            { panic(unsupported("Type.Size")) }
-func (t rtype) Kind() Kind               { panic(unsupported("Type.Kind")) }
-func (t rtype) Implements(u Type) bool   { panic(unsupported("Type.Implements")) }
-func (t rtype) AssignableTo(u Type) bool { panic(unsupported("Type.AssignableTo")) }
-
-func (t rtype) need(method string) {
-	if t.desc == nil {
-		panic(unsupported(method + " of an element type"))
-	}
-}
-
-// Value is present for its importers; M1 cannot build one.
-type Value struct{ _ unsafe.Pointer }
-
-func ValueOf(i any) Value              { panic(unsupported("ValueOf")) }
-func (v Value) Type() Type             { panic(unsupported("Value.Type")) }
-func (v Value) Kind() Kind             { panic(unsupported("Value.Kind")) }
-func (v Value) IsNil() bool            { panic(unsupported("Value.IsNil")) }
-func (v Value) Elem() Value            { panic(unsupported("Value.Elem")) }
-func (v Value) Set(x Value)            { panic(unsupported("Value.Set")) }
-func (v Value) Len() int               { panic(unsupported("Value.Len")) }
-func Swapper(slice any) func(i, j int) { panic(unsupported("Swapper")) }
-
-// A ValueError occurs when a Value method is invoked on a Value that does
-// not support it.
+// A ValueError occurs when a Value method is invoked on a Value that does not
+// support it.
 type ValueError struct {
 	Method string
 	Kind   Kind
 }
 
 func (e *ValueError) Error() string { return "reflect: call of " + e.Method + " on invalid Value" }
-
-func unsupported(what string) string {
-	return "internal/reflectlite." + what + ": not supported by rustygo yet (DESIGN §6)"
-}
-
-// Answered by the runtime from its type descriptors.
-func typeOf(i any) unsafe.Pointer
-func descComparable(d unsafe.Pointer) bool
-func descName(d unsafe.Pointer) string

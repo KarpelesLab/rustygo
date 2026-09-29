@@ -151,6 +151,9 @@ impl Defers {
         // value of a panic caught below.
         let frame = Frame::<2>::new();
         let mut began = None;
+        // `runtime.Goexit` runs every deferred call on its way out and cannot
+        // be recovered, so it waits here until the list is empty.
+        let mut goexit = None;
         frame.scope(|| {
             let _boundary = match mode {
                 // A deferred call of this frame is the one that may recover,
@@ -164,6 +167,10 @@ impl Defers {
                 };
                 frame.set(0, &env);
                 if let Err(p) = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| f(env))) {
+                    if crate::sched::is_goexit(&*p) {
+                        goexit = Some(p);
+                        continue;
+                    }
                     // The panic waits here while the rest of the list runs,
                     // and those calls allocate: nothing else holds its value
                     // until it reaches the panic stack.
@@ -193,6 +200,9 @@ impl Defers {
                 }
             }
         });
+        if let Some(p) = goexit {
+            std::panic::resume_unwind(p);
+        }
         began
     }
 

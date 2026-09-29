@@ -58,14 +58,34 @@ func UnlockOSThread()      {}
 // NumGoroutine counts the goroutines that exist, as the scheduler sees them.
 func NumGoroutine() int
 
-// Goexit is not supported before goroutines exist.
-func Goexit() { panic("runtime.Goexit: not supported yet (roadmap M2)") }
+// Goexit ends the running goroutine after its deferred calls, and is what
+// `testing`'s t.FailNow is written on.
+func Goexit() { goexit() }
 
-// Stack traces arrive in M3 (a Rust-line to Go-position table); until then
-// callers are unknown.
+func goexit()
 
-func Caller(skip int) (pc uintptr, file string, line int, ok bool) { return 0, "", 0, false }
-func Callers(skip int, pc []uintptr) int                           { return 0 }
+// Stack traces arrive with M3's Rust-line to Go-position table; until then a
+// caller has no name.
+//
+// It does have to *exist*: `testing` panics outright if `Callers` reports no
+// frames at all, so one comes back with nothing in it, and a failure prints
+// its position as `:0` rather than the file and line it came from.
+
+func Caller(skip int) (pc uintptr, file string, line int, ok bool) {
+	return unknownPC, "", 0, false
+}
+
+func Callers(skip int, pc []uintptr) int {
+	if len(pc) == 0 {
+		return 0
+	}
+	pc[0] = unknownPC
+	return 1
+}
+
+// unknownPC stands for a frame rustygo cannot name yet. Not zero: a zero
+// program counter means there is no frame there at all.
+const unknownPC = 1
 
 type Frame struct {
 	PC       uintptr
@@ -76,10 +96,17 @@ type Frame struct {
 	Entry    uintptr
 }
 
-type Frames struct{}
+type Frames struct{ left int }
 
-func CallersFrames(callers []uintptr) *Frames     { return &Frames{} }
-func (ci *Frames) Next() (frame Frame, more bool) { return Frame{}, false }
+func CallersFrames(callers []uintptr) *Frames { return &Frames{left: len(callers)} }
+
+func (ci *Frames) Next() (frame Frame, more bool) {
+	if ci.left == 0 {
+		return Frame{}, false
+	}
+	ci.left--
+	return Frame{PC: unknownPC}, ci.left > 0
+}
 
 type Func struct{}
 
@@ -162,6 +189,39 @@ func (r *MemProfileRecord) InUseObjects() int64 { return r.AllocObjects - r.Free
 func (r *MemProfileRecord) Stack() []uintptr    { return nil }
 
 func MemProfile(p []MemProfileRecord, inuseZero bool) (n int, ok bool) { return 0, true }
+
+// StackRecord and BlockProfileRecord are what the other profiles report, and
+// every one of them reports nothing.
+
+type StackRecord struct{ Stack0 [32]uintptr }
+
+func (r *StackRecord) Stack() []uintptr { return nil }
+
+type BlockProfileRecord struct {
+	Count  int64
+	Cycles int64
+	StackRecord
+}
+
+func ThreadCreateProfile(p []StackRecord) (n int, ok bool) { return 0, true }
+func BlockProfile(p []BlockProfileRecord) (n int, ok bool) { return 0, true }
+func MutexProfile(p []BlockProfileRecord) (n int, ok bool) { return 0, true }
+func GoroutineProfile(p []StackRecord) (n int, ok bool)    { return 0, true }
+func SetCPUProfileRate(hz int)                             {}
+func CPUProfile() []byte                                   { return nil }
+
+// The execution tracer, which `testing` reaches for when asked to write a
+// trace. Starting it reports that there is nothing to start.
+
+func StartTrace() error { return errUnsupported("runtime.StartTrace") }
+func StopTrace()        {}
+func ReadTrace() []byte { return nil }
+
+type traceUnsupported string
+
+func (e traceUnsupported) Error() string { return string(e) + ": not supported by rustygo yet" }
+
+func errUnsupported(what string) error { return traceUnsupported(what) }
 
 // Breakpoint would trap into a debugger; there is none to trap into.
 func Breakpoint() { panic("runtime.Breakpoint: no debugger (rustygo)") }
