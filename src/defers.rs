@@ -99,15 +99,60 @@ impl Defers {
         self.drain(Some(depth));
     }
 
+    /// Runs the list, in whichever of the two ways applies, changing from one
+    /// to the other as panics come and go.
+    ///
+    /// A frame that is returning normally can still end up panicking: one of
+    /// its own deferred calls may panic, and Go treats the frame as a
+    /// panicking one from that moment. What is left of the list runs as a
+    /// panicking frame's does, and one of those calls may `recover` the panic
+    /// — after which the frame is returning normally again, and the rest of
+    /// the list runs that way. That is how `try` in test/recover.go returns a
+    /// value its deferred call recovered.
     #[cfg(feature = "std")]
     fn drain(&self, recoverable: Option<usize>) {
-        let mut pending: Option<alloc::boxed::Box<dyn core::any::Any + Send>> = None;
+        let mut mode = recoverable;
+        // A panic one of this frame's own deferred calls raised, which this
+        // frame is therefore the one to carry on with if nothing recovers it.
+        let mut ours = None;
+        loop {
+            match self.drain_in(mode) {
+                // Either the list is empty or a deferred call recovered.
+                None => match ours {
+                    // It recovered a panic from this frame's own list, so the
+                    // frame is on its normal way out again and what is left of
+                    // the list runs that way.
+                    Some(depth) if crate::panic::recovered(depth) => {
+                        ours = None;
+                        mode = None;
+                    }
+                    _ => break,
+                },
+                Some(depth) => {
+                    mode = Some(depth);
+                    ours = Some(depth);
+                }
+            }
+        }
+        if let Some(depth) = ours
+            && !crate::panic::recovered(depth)
+        {
+            crate::panic::resume(depth);
+        }
+    }
+
+    /// Runs the list in one mode, and returns the depth of a panic a deferred
+    /// call raised while the frame was returning normally, if that happened:
+    /// the rest of the list has to run as a panicking frame's does.
+    #[cfg(feature = "std")]
+    fn drain_in(&self, mode: Option<usize>) -> Option<usize> {
         // Once popped, the call's environment is no longer reachable through
         // the list, so it is rooted here while it runs. Slot 1 holds the
         // value of a panic caught below.
         let frame = Frame::<2>::new();
+        let mut began = None;
         frame.scope(|| {
-            let _boundary = match recoverable {
+            let _boundary = match mode {
                 // A deferred call of this frame is the one that may recover,
                 // and this frame is the one just outside it.
                 Some(depth) => crate::panic::Boundary::panicking(frame.addr(), depth),
@@ -126,18 +171,29 @@ impl Defers {
                         let value = go.value();
                         frame.set(1, &value);
                     }
-                    pending = Some(p);
+                    match mode {
+                        // Already panicking: the new panic takes the old one's
+                        // place, keeping the depth this scope's boundary was
+                        // built with, so the rest of the list can recover it.
+                        Some(depth) => crate::panic::replace(depth, p),
+                        // The frame was on its way out normally. From here it
+                        // is a panicking one, which the caller arranges by
+                        // running the rest of the list again in the other
+                        // mode.
+                        None => {
+                            began = Some(crate::panic::begin(p));
+                            return;
+                        }
+                    }
                 }
                 // Go resumes the frame as soon as a deferred call recovers;
                 // what is left of the list runs on its normal path.
-                if recoverable.is_some_and(crate::panic::recovered) {
+                if mode.is_some_and(crate::panic::recovered) {
                     break;
                 }
             }
         });
-        if let Some(p) = pending {
-            std::panic::resume_unwind(p);
-        }
+        began
     }
 
     /// Runs the deferred calls, last deferred first (no unwinding here).

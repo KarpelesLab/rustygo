@@ -54,4 +54,5 @@ nethttp linux
 finalizers linux
 keywords
 rangefunc
-reflectmethods
+reflectmethods linux
+deferpanic linux

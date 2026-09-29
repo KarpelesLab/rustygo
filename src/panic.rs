@@ -196,6 +196,26 @@ pub fn begin(payload: alloc::boxed::Box<dyn core::any::Any + Send>) -> usize {
     }
 }
 
+/// Replaces the panic at `depth` with a new one.
+///
+/// A deferred call of a frame that is already panicking may panic itself, and
+/// Go's answer is that the new panic is the one that matters: `recover` in a
+/// later deferred call of the same frame returns the new value, and if nothing
+/// recovers it, it is the one that carries on. The panic it replaces belongs
+/// to the same frame and can no longer be reported by it either way.
+#[cfg(feature = "std")]
+pub fn replace(depth: usize, payload: alloc::boxed::Box<dyn core::any::Any + Send>) {
+    match payload.downcast::<GoPanic>() {
+        Ok(p) => CURRENT.with(|c| {
+            let mut v = c.borrow_mut();
+            debug_assert!(v.len() > depth, "replacing a panic that is not there");
+            v.truncate(depth);
+            v.push(*p);
+        }),
+        Err(other) => std::panic::resume_unwind(other),
+    }
+}
+
 // The frame of the `Defers::run` that is invoking a deferred call, and the
 // depth of the panic that call may recover. The frame tells the deferred
 // call apart from anything it goes on to call; the depth says which panic is
