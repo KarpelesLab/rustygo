@@ -106,3 +106,43 @@ func time_Sleep(ns int64) {
 
 //go:linkname os_sigpipe os.sigpipe
 func os_sigpipe() {}
+
+// Fork and exec.
+//
+// gc stops the world around a fork, because a forked child inherits only the
+// thread that called fork and must not touch a lock another thread held. One
+// goroutine on one thread has nothing to stop, and the child does nothing but
+// the raw system calls `syscall.forkAndExecInChild` makes. So these are the
+// hooks and none of them has anything to do.
+//
+// Everything else fork and exec need is Go in the `syscall` package, over the
+// raw system calls rustygo already answers.
+
+//go:linkname syscall_runtime_BeforeFork syscall.runtime_BeforeFork
+func syscall_runtime_BeforeFork() {}
+
+//go:linkname syscall_runtime_AfterFork syscall.runtime_AfterFork
+func syscall_runtime_AfterFork() {}
+
+//go:linkname syscall_runtime_AfterForkInChild syscall.runtime_AfterForkInChild
+func syscall_runtime_AfterForkInChild() {}
+
+//go:linkname syscall_runtime_BeforeExec syscall.runtime_BeforeExec
+func syscall_runtime_BeforeExec() {}
+
+//go:linkname syscall_runtime_AfterExec syscall.runtime_AfterExec
+func syscall_runtime_AfterExec() {}
+
+// The environment.
+//
+// `syscall` keeps the environment itself, in the Go slice and map it built from
+// what the runtime handed it, and every Go read goes there. These two only
+// exist so that the C environment a cgo program shares stays in step, and
+// rustygo has no C environment to keep — a child process gets its environment
+// from `os.Environ`, which is the Go side.
+
+//go:linkname syscall_runtimeSetenv syscall.runtimeSetenv
+func syscall_runtimeSetenv(k, v string) {}
+
+//go:linkname syscall_runtimeUnsetenv syscall.runtimeUnsetenv
+func syscall_runtimeUnsetenv(k string) {}

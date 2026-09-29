@@ -50,7 +50,7 @@ func signatureKey(sig *types.Signature) string {
 		if i > 0 {
 			b.WriteByte(',')
 		}
-		b.WriteString(types.TypeString(sig.Params().At(i).Type(), qualifiedPath))
+		b.WriteString(types.TypeString(unaliased(sig.Params().At(i).Type()), qualifiedPath))
 	}
 	if sig.Variadic() {
 		b.WriteString("...")
@@ -60,10 +60,59 @@ func signatureKey(sig *types.Signature) string {
 		if i > 0 {
 			b.WriteByte(',')
 		}
-		b.WriteString(types.TypeString(sig.Results().At(i).Type(), qualifiedPath))
+		b.WriteString(types.TypeString(unaliased(sig.Results().At(i).Type()), qualifiedPath))
 	}
 	b.WriteByte(')')
 	return b.String()
+}
+
+// unaliased rebuilds t with every alias replaced by what it names, wherever it
+// is nested.
+//
+// An alias is a second spelling of one type, and the two spell differently:
+// `os.FileMode` is `io/fs.FileMode` and `any` is `interface{}`. A method id is
+// a name and a signature rendered as text, and `os.fileStat.Mode` returns the
+// first spelling while `fs.FileInfo.Mode` returns the second — so the method
+// and the interface method it implements were getting different ids, and the
+// call through the interface could not find it. Recursion stops at a named
+// type, which is its own spelling.
+func unaliased(t types.Type) types.Type {
+	switch t := types.Unalias(t).(type) {
+	case *types.Pointer:
+		return types.NewPointer(unaliased(t.Elem()))
+	case *types.Slice:
+		return types.NewSlice(unaliased(t.Elem()))
+	case *types.Array:
+		return types.NewArray(unaliased(t.Elem()), t.Len())
+	case *types.Chan:
+		return types.NewChan(t.Dir(), unaliased(t.Elem()))
+	case *types.Map:
+		return types.NewMap(unaliased(t.Key()), unaliased(t.Elem()))
+	case *types.Signature:
+		return types.NewSignatureType(nil, nil, nil,
+			unaliasedTuple(t.Params()), unaliasedTuple(t.Results()), t.Variadic())
+	case *types.Struct:
+		fields := make([]*types.Var, t.NumFields())
+		tags := make([]string, t.NumFields())
+		for i := range fields {
+			f := t.Field(i)
+			fields[i] = types.NewField(f.Pos(), f.Pkg(), f.Name(), unaliased(f.Type()), f.Embedded())
+			tags[i] = t.Tag(i)
+		}
+		return types.NewStruct(fields, tags)
+	default:
+		return t
+	}
+}
+
+// unaliasedTuple is a tuple of the same types with their aliases resolved and
+// their names dropped, since a signature's text is its types alone.
+func unaliasedTuple(tup *types.Tuple) *types.Tuple {
+	vars := make([]*types.Var, tup.Len())
+	for i := range vars {
+		vars[i] = types.NewParam(token.NoPos, nil, "", unaliased(tup.At(i).Type()))
+	}
+	return types.NewTuple(vars...)
 }
 
 // qualifiedPath names packages by import path, so ids are stable and

@@ -197,15 +197,17 @@ var intrinsics = map[string]func(args []string) string{
 		return fmt.Sprintf("rustygo::rt::fcntl(%s, %s, %s)", a[0], a[1], a[2])
 	},
 
-	// The one raw system call the standard library funnels through.
+	// The one raw system call the standard library funnels through. `Syscall6`
+	// may block and `RawSyscall6` may not, which is the difference between
+	// them: a goroutine making the first one can be parked (src/syscall.rs).
 	"internal/runtime/syscall/linux.Syscall6": func(a []string) string {
-		return fmt.Sprintf("rustygo::syscall::syscall6(%s, %s, %s, %s, %s, %s, %s)",
+		return fmt.Sprintf("rustygo::syscall::syscall6_go(%s, %s, %s, %s, %s, %s, %s)",
 			a[0], a[1], a[2], a[3], a[4], a[5], a[6])
 	},
-	// The clone/vfork probe: rustygo starts no processes yet, so it reports
-	// ENOSYS and Go takes its fallback path.
-	"syscall.rawVforkSyscall": func([]string) string {
-		return "(u64::MAX, 38u64)"
+	// The clone that starts a child process, which gc writes in assembly
+	// because of the flags it asks for (src/syscall.rs).
+	"syscall.rawVforkSyscall": func(a []string) string {
+		return fmt.Sprintf("rustygo::syscall::vfork(%s, %s, %s, %s)", a[0], a[1], a[2], a[3])
 	},
 	"syscall.rawSyscallNoError": func(a []string) string {
 		return fmt.Sprintf("{ let (r1, r2, _) = rustygo::syscall::syscall6(%s, %s, %s, %s, 0, 0, 0); (r1, r2) }",

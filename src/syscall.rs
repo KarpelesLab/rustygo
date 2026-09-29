@@ -58,6 +58,94 @@ pub fn syscall6(num: u64, a1: u64, a2: u64, a3: u64, a4: u64, a5: u64, a6: u64) 
     split(ret, r2)
 }
 
+/// The system call numbers this module treats specially, which it only does
+/// where there are goroutines to yield to.
+#[cfg(all(target_os = "linux", target_arch = "x86_64", feature = "std"))]
+mod nr {
+    pub const WAIT4: u64 = 61;
+    pub const WAITID: u64 = 247;
+}
+#[cfg(all(target_os = "linux", target_arch = "aarch64", feature = "std"))]
+mod nr {
+    pub const WAIT4: u64 = 260;
+    pub const WAITID: u64 = 95;
+}
+
+/// `Syscall6`, with the one call that must not block outright.
+///
+/// Every goroutine shares one thread (roadmap M2), so a call that blocks the
+/// thread blocks all of them. `wait4` is where that bites: `os/exec` waits for
+/// a child while another goroutine is still feeding that child's standard
+/// input, and a child reading its input will not exit. So a wait that would
+/// block is asked not to, and tried again after letting everything else have a
+/// turn — including the netpoller, which is what the goroutine feeding the
+/// child is waiting on. gc gives the wait a thread of its own instead.
+#[cfg(all(target_os = "linux", feature = "std"))]
+pub fn syscall6_go(
+    num: u64,
+    a1: u64,
+    a2: u64,
+    a3: u64,
+    a4: u64,
+    a5: u64,
+    a6: u64,
+) -> (u64, u64, u64) {
+    const WNOHANG: u64 = 1;
+    match num {
+        // `wait4(pid, status, options, rusage)`: a pid of zero back means no
+        // child has changed state yet.
+        nr::WAIT4 if a3 & WNOHANG == 0 => loop {
+            let r = syscall6(num, a1, a2, a3 | WNOHANG, a4, a5, a6);
+            if r.0 != 0 || r.2 != 0 {
+                return r;
+            }
+            poll_again();
+        },
+        // `waitid(which, id, infop, options, rusage)`, which is how `os` waits
+        // for a process it will collect later. It answers in the `siginfo` it
+        // was given rather than in its return value, and leaves it alone when
+        // nothing is waitable, so it is cleared before each try.
+        nr::WAITID if a4 & WNOHANG == 0 && a3 != 0 => loop {
+            // SAFETY: the caller's own buffer, which it passed for the kernel
+            // to fill; Go's is 128 bytes and this writes the first 32.
+            unsafe { core::ptr::write_bytes(a3 as *mut u8, 0, 32) };
+            let r = syscall6(num, a1, a2, a3, a4 | WNOHANG, a5, a6);
+            // SAFETY: as above; `si_pid` is the fourth word of a `siginfo`.
+            let si_pid = unsafe { core::ptr::read_unaligned((a3 as *const u32).add(4)) };
+            if r.2 != 0 || si_pid != 0 {
+                return r;
+            }
+            poll_again();
+        },
+        _ => syscall6(num, a1, a2, a3, a4, a5, a6),
+    }
+}
+
+/// Lets everything else have a turn before asking the kernel again.
+///
+/// A short wait rather than a long one: there is no descriptor to park on for
+/// a child's exit, so this is the one place rustygo polls. It is also not a
+/// busy wait — [`crate::sched::sleep_until`] runs whatever is runnable first,
+/// and only sleeps the thread when nothing is.
+#[cfg(all(target_os = "linux", feature = "std"))]
+fn poll_again() {
+    crate::sched::sleep_until(crate::rt::nanotime() + 1_000_000);
+}
+
+/// Without the scheduler there is nothing to yield to.
+#[cfg(not(all(target_os = "linux", feature = "std")))]
+pub fn syscall6_go(
+    num: u64,
+    a1: u64,
+    a2: u64,
+    a3: u64,
+    a4: u64,
+    a5: u64,
+    a6: u64,
+) -> (u64, u64, u64) {
+    syscall6(num, a1, a2, a3, a4, a5, a6)
+}
+
 /// Splits a kernel return value into gc's `(r1, r2, errno)`.
 #[cfg(target_os = "linux")]
 fn split(ret: i64, r2: u64) -> (u64, u64, u64) {
@@ -83,4 +171,45 @@ pub fn syscall6(
 ) -> (u64, u64, u64) {
     const ENOSYS: u64 = 38;
     (u64::MAX, 0, ENOSYS)
+}
+
+/// The clone that starts a child process, which gc writes in assembly
+/// (`rawVforkSyscall`).
+///
+/// gc asks the kernel for `CLONE_VM|CLONE_VFORK`: the child shares the
+/// parent's memory and the parent is suspended until the child execs or exits.
+/// That is fast, and it requires that the child touch nothing the parent will
+/// look at again — a discipline gc's compiler keeps by holding the results in
+/// registers and returning from the frame at once. It is not a discipline this
+/// compiler can promise: the generated child would go on writing shadow-stack
+/// frames into memory the parent is still using.
+///
+/// So the two flags come off and this is an ordinary fork. The child gets its
+/// own copy of everything and can do as it likes, which is what Go itself did
+/// before it changed to vfork, and what the child does next is raw system calls
+/// and `execve` either way.
+///
+/// `clone3` is not answered: Go only reaches for it to put the child in a
+/// cgroup or a new time namespace, and reports the failure to its caller.
+#[cfg(target_os = "linux")]
+pub fn vfork(num: u64, a1: u64, a2: u64, a3: u64) -> (u64, u64) {
+    #[cfg(target_arch = "x86_64")]
+    const SYS_CLONE: u64 = 56;
+    #[cfg(target_arch = "aarch64")]
+    const SYS_CLONE: u64 = 220;
+    const CLONE_VM: u64 = 0x100;
+    const CLONE_VFORK: u64 = 0x4000;
+    const ENOSYS: u64 = 38;
+    if num != SYS_CLONE {
+        return (u64::MAX, ENOSYS);
+    }
+    let (r1, _, errno) = syscall6(num, a1 & !(CLONE_VM | CLONE_VFORK), a2, a3, 0, 0, 0);
+    (r1, errno)
+}
+
+/// Starting a process needs system calls this platform does not make yet.
+#[cfg(not(target_os = "linux"))]
+pub fn vfork(_num: u64, _a1: u64, _a2: u64, _a3: u64) -> (u64, u64) {
+    const ENOSYS: u64 = 38;
+    (u64::MAX, ENOSYS)
 }
