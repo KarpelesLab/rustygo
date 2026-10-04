@@ -3,41 +3,54 @@
 //! A channel is a heap object like a map, so it is a reference the collector
 //! traces, `nil` until it is made, and shared by every goroutine holding it.
 //!
-//! Every goroutine blocked on a channel parks on the channel's own address
-//! and re-tests its condition when woken, and every operation that changes
-//! the channel wakes all of them. That is more wakeups than Go's queues of
-//! waiters need, but with one thread and a handful of goroutines it costs
-//! little and cannot lose one; the M:N scheduler brings the queues.
+//! Its state sits behind a lock of its own, for two reasons. Goroutines on
+//! different threads reach the same channel at once; and the test a blocking
+//! operation makes and the queue it puts itself on have to happen together. A
+//! goroutine that found the channel empty and *then* registered as a waiter
+//! would never hear from the sender that arrived in between. So every operation
+//! decides what to do under the lock and registers itself there if it is going
+//! to wait, and only then — with the lock released, because a park switches
+//! stacks — parks.
+//!
+//! Every goroutine blocked on a channel waits on the channel's own address and
+//! re-tests its condition when woken, and every operation that changes the
+//! channel wakes all of them. That is more wakeups than Go's queues of waiters
+//! need, but it cannot lose one; the queues are still to come.
 
 use crate::heap;
 use crate::sched;
+use crate::tls::Lock;
 use crate::trace::{Trace, Tracer};
 use crate::value::GoValue;
 use alloc::collections::VecDeque;
-use core::cell::RefCell;
 
 /// The heap object behind a channel.
 struct ChanObj<T: 'static> {
-    state: RefCell<State<T>>,
+    state: Lock<State<T>>,
 }
 
 struct State<T> {
-    /// Values sent and not yet received. A synchronous channel holds one
-    /// here while its sender waits for the receiver to take it.
+    /// Values sent and not yet received. A synchronous channel holds one here
+    /// while its sender waits for the receiver to take it.
     buf: VecDeque<T>,
     cap: usize,
     closed: bool,
-    /// How many goroutines are parked waiting to receive. A synchronous send
-    /// needs one of them to hand its value to.
+    /// How many goroutines are waiting to receive. A synchronous send needs one
+    /// of them to hand its value to.
     receivers: usize,
 }
 
 impl<T: Trace> Trace for ChanObj<T> {
     fn trace(&self, t: &mut Tracer<'_>) {
-        // A value in flight is reachable from nothing else.
-        for v in self.state.borrow().buf.iter() {
-            v.trace(t);
-        }
+        // Taken while the collector holds the heap's own lock, which is safe
+        // because no goroutine is ever stopped inside a channel's critical
+        // section: they move words, and nothing in one allocates or parks.
+        self.state.with(|s| {
+            // A value in flight is reachable from nothing else.
+            for v in s.buf.iter() {
+                v.trace(t);
+            }
+        });
     }
 }
 
@@ -92,10 +105,9 @@ impl<T> Chan<T> {
 
     /// Where senders wait, which receivers wake.
     ///
-    /// The two directions have separate addresses so that a receiver only
-    /// ever wakes senders. Waking every waiter would make two `select`s that
-    /// are both receiving wake each other for ever without either making
-    /// progress.
+    /// The two directions have separate addresses so that a receiver only ever
+    /// wakes senders. Waking every waiter would make two `select`s that are
+    /// both receiving wake each other for ever without either making progress.
     #[inline]
     pub fn send_key(self) -> usize {
         self.addr() as usize
@@ -111,7 +123,7 @@ impl<T> Chan<T> {
         self.addr() as usize + 1
     }
 
-    fn state(self) -> &'static RefCell<State<T>> {
+    fn state(self) -> &'static Lock<State<T>> {
         let obj = self.obj.expect("nil channel");
         // Under GC torture, name a channel that was collected because
         // something failed to root it, rather than reading its poison.
@@ -120,6 +132,40 @@ impl<T> Chan<T> {
         // reachable, and this channel is one such reference.
         unsafe { &(*obj.as_ptr()).state }
     }
+}
+
+/// What a send found when it looked.
+enum Offer {
+    /// In the buffer: the send is over.
+    Sent,
+    /// Left for a receiver that is already waiting. The send is not over until
+    /// that receiver has taken it.
+    Handed,
+    /// No room and no receiver. The sender is on the queue.
+    Blocked,
+    /// Closed, which for a send is Go's panic.
+    Closed,
+}
+
+/// What a sender waiting for its value to be collected found.
+enum Handoff {
+    /// Taken: the send is over.
+    Taken,
+    /// Closed under it, which is still the sender's panic — its send never
+    /// completed.
+    Closed,
+    /// Still there. The sender is on the queue.
+    Waiting,
+}
+
+/// What a receive found when it looked.
+enum Got<T> {
+    /// A value, which is now this goroutine's.
+    Value(T),
+    /// Closed and drained: the zero value and `false`.
+    Drained,
+    /// Nothing yet. The receiver is on the queue and counted.
+    Blocked,
 }
 
 impl<T: GoValue + Trace> Chan<T> {
@@ -136,7 +182,7 @@ impl<T: GoValue + Trace> Chan<T> {
         }
         let cap = cap as usize;
         let obj = heap::allocate(ChanObj {
-            state: RefCell::new(State {
+            state: Lock::new(State {
                 buf: VecDeque::new(),
                 cap,
                 closed: false,
@@ -151,7 +197,7 @@ impl<T: GoValue + Trace> Chan<T> {
         if self.is_nil() {
             return 0;
         }
-        self.state().borrow().buf.len() as i64
+        self.state().with(|s| s.buf.len() as i64)
     }
 
     /// `cap(ch)`.
@@ -159,7 +205,7 @@ impl<T: GoValue + Trace> Chan<T> {
         if self.is_nil() {
             return 0;
         }
-        self.state().borrow().cap as i64
+        self.state().with(|s| s.cap as i64)
     }
 
     /// `len(ch) == 0`, for clippy's sake.
@@ -172,77 +218,117 @@ impl<T: GoValue + Trace> Chan<T> {
         if self.is_nil() {
             // A send on a nil channel blocks for ever, which is a deadlock
             // unless another goroutine can still run.
-            block_forever();
+            sched::block_forever();
         }
         loop {
-            {
-                let mut s = self.state().borrow_mut();
-                if s.closed {
-                    drop(s);
-                    crate::panic::runtime_error_msg(alloc::string::String::from(
-                        "send on closed channel",
-                    ));
-                }
-                if s.cap > 0 && s.buf.len() < s.cap {
-                    s.buf.push_back(v);
-                    drop(s);
+            match self.offer(v) {
+                Offer::Sent => {
                     sched::wake_all(self.recv_key());
                     return;
                 }
-                if s.cap == 0 && s.receivers > 0 && s.buf.is_empty() {
-                    // A synchronous hand-off: leave the value for the
-                    // receiver, then wait until it has been taken.
-                    s.buf.push_back(v);
-                    drop(s);
+                Offer::Handed => {
                     sched::wake_all(self.recv_key());
-                    loop {
-                        let s = self.state().borrow();
-                        if s.buf.is_empty() {
-                            return;
-                        }
-                        let closed = s.closed;
-                        drop(s);
-                        if closed {
-                            crate::panic::runtime_error_msg(alloc::string::String::from(
-                                "send on closed channel",
-                            ));
-                        }
-                        sched::park_on(self.send_key());
-                    }
+                    return self.wait_taken();
+                }
+                Offer::Closed => send_on_closed(),
+                Offer::Blocked => {
+                    // Waking the receivers first is what lets one of them see
+                    // that a sender is here and hand-shake with it, for a
+                    // channel with no buffer.
+                    sched::wake_all(self.recv_key());
+                    sched::park();
+                    sched::leave_park(self.send_key());
                 }
             }
-            // Nothing to do but wait. Waking the receivers first is what
-            // lets one of them see that a sender is here and hand-shake with
-            // it, for a channel with no buffer.
-            sched::wake_all(self.recv_key());
-            sched::park_on(self.send_key());
         }
+    }
+
+    /// One attempt at a send, deciding and registering under the lock.
+    fn offer(self, v: T) -> Offer {
+        self.state().with(|s| {
+            if s.closed {
+                return Offer::Closed;
+            }
+            if s.cap > 0 && s.buf.len() < s.cap {
+                s.buf.push_back(v);
+                return Offer::Sent;
+            }
+            if s.cap == 0 && s.receivers > 0 && s.buf.is_empty() {
+                s.buf.push_back(v);
+                sched::prepare_park(self.send_key());
+                return Offer::Handed;
+            }
+            sched::prepare_park(self.send_key());
+            Offer::Blocked
+        })
+    }
+
+    /// Waits for a synchronous send's value to be collected, which is what
+    /// makes the send and the receive happen together.
+    ///
+    /// The caller is already registered as a waiter — the offer that handed the
+    /// value over did it under the channel's lock, which is what keeps the
+    /// receiver's wake from arriving too early to be heard — and registers again
+    /// on every look, because a wake of an address takes every waiter off it.
+    /// What is left over is given back on the way out.
+    fn wait_taken(self) {
+        loop {
+            let step = self.state().with(|s| {
+                if s.buf.is_empty() {
+                    return Handoff::Taken;
+                }
+                if s.closed {
+                    return Handoff::Closed;
+                }
+                sched::prepare_park(self.send_key());
+                Handoff::Waiting
+            });
+            match step {
+                Handoff::Taken => break,
+                Handoff::Closed => {
+                    sched::leave_park(self.send_key());
+                    send_on_closed();
+                }
+                Handoff::Waiting => sched::park(),
+            }
+        }
+        sched::leave_park(self.send_key());
     }
 
     /// `v, ok := <-ch`. Blocks until a value arrives or the channel closes;
     /// `ok` is false once a closed channel has been drained.
     pub fn recv(self) -> (T, bool) {
         if self.is_nil() {
-            block_forever();
+            sched::block_forever();
         }
         loop {
-            {
-                let mut s = self.state().borrow_mut();
+            let got = self.state().with(|s| {
                 if let Some(v) = s.buf.pop_front() {
-                    drop(s);
+                    return Got::Value(v);
+                }
+                if s.closed {
+                    return Got::Drained;
+                }
+                s.receivers += 1;
+                sched::prepare_park(self.recv_key());
+                Got::Blocked
+            });
+            match got {
+                Got::Value(v) => {
                     sched::wake_all(self.send_key());
                     return (v, true);
                 }
-                if s.closed {
-                    return (T::zero(), false);
+                Got::Drained => return (T::zero(), false),
+                Got::Blocked => {
+                    // Telling the senders there is a receiver is what lets a
+                    // synchronous send go ahead.
+                    sched::wake_all(self.send_key());
+                    sched::park();
+                    sched::leave_park(self.recv_key());
+                    self.state()
+                        .with(|s| s.receivers = s.receivers.saturating_sub(1));
                 }
-                s.receivers += 1;
             }
-            // Telling the senders there is a receiver is what lets a
-            // synchronous send go ahead.
-            sched::wake_all(self.send_key());
-            sched::park_on(self.recv_key());
-            self.state().borrow_mut().receivers -= 1;
         }
     }
 
@@ -251,18 +337,92 @@ impl<T: GoValue + Trace> Chan<T> {
         self.recv().0
     }
 
+    /// Receives without blocking, for `select`: a value if the case was ready,
+    /// and nothing if it was not.
+    ///
+    /// One look under the lock, rather than asking whether a receive would
+    /// block and then receiving. Between those two another goroutine could take
+    /// the value, and the receive would block — which a `select` case may not
+    /// do, and a `select` with a `default` may not do at all.
+    pub fn try_recv(self) -> Option<(T, bool)> {
+        if self.is_nil() {
+            return None;
+        }
+        let got = self.state().with(|s| {
+            if let Some(v) = s.buf.pop_front() {
+                return Some((v, true));
+            }
+            if s.closed {
+                return Some((T::zero(), false));
+            }
+            None
+        });
+        if let Some((_, true)) = got {
+            // Room for a sender now, or a synchronous one waiting to hear that
+            // its value was collected.
+            sched::wake_all(self.send_key());
+        }
+        got
+    }
+
+    /// Sends without blocking, for `select`, and says whether the case was
+    /// taken.
+    ///
+    /// A synchronous send that finds a receiver waiting *is* taken, and then
+    /// waits for its value to be collected: the case has been chosen by then,
+    /// and what is left is Go's ordinary blocking send.
+    pub fn try_send(self, v: T) -> bool {
+        if self.is_nil() {
+            return false;
+        }
+        match self.offer_once(v) {
+            Offer::Sent => {
+                sched::wake_all(self.recv_key());
+                true
+            }
+            Offer::Handed => {
+                sched::wake_all(self.recv_key());
+                self.wait_taken();
+                true
+            }
+            // A closed channel "can" send: the send panics, which is what Go
+            // does when `select` picks that case.
+            Offer::Closed => send_on_closed(),
+            Offer::Blocked => false,
+        }
+    }
+
+    /// One attempt at a send that will not wait, so it registers nothing.
+    fn offer_once(self, v: T) -> Offer {
+        self.state().with(|s| {
+            if s.closed {
+                return Offer::Closed;
+            }
+            if s.cap > 0 && s.buf.len() < s.cap {
+                s.buf.push_back(v);
+                return Offer::Sent;
+            }
+            if s.cap == 0 && s.receivers > 0 && s.buf.is_empty() {
+                s.buf.push_back(v);
+                sched::prepare_park(self.send_key());
+                return Offer::Handed;
+            }
+            Offer::Blocked
+        })
+    }
+
     /// Counts the running goroutine as waiting to receive, and tells the
     /// senders so.
     ///
-    /// A plain receive does this as it parks. A `select` has to do it too, or
-    /// a synchronous send can never see it: the send waits for a receiver to
-    /// hand its value to, and two `select`s on the same unbuffered channel
-    /// would each wait for the other for ever.
+    /// A plain receive does this as it parks. A `select` has to do it too, or a
+    /// synchronous send can never see it: the send waits for a receiver to hand
+    /// its value to, and two `select`s on the same unbuffered channel would
+    /// each wait for the other for ever.
     pub fn enter_recv(self) {
         if self.is_nil() {
             return;
         }
-        self.state().borrow_mut().receivers += 1;
+        self.state().with(|s| s.receivers += 1);
         sched::wake_all(self.send_key());
     }
 
@@ -271,28 +431,8 @@ impl<T: GoValue + Trace> Chan<T> {
         if self.is_nil() {
             return;
         }
-        let mut s = self.state().borrow_mut();
-        s.receivers = s.receivers.saturating_sub(1);
-    }
-
-    /// Whether a receive would proceed without blocking, for `select`.
-    pub fn can_recv(self) -> bool {
-        if self.is_nil() {
-            return false;
-        }
-        let s = self.state().borrow();
-        !s.buf.is_empty() || s.closed
-    }
-
-    /// Whether a send would proceed without blocking, for `select`.
-    pub fn can_send(self) -> bool {
-        if self.is_nil() {
-            return false;
-        }
-        let s = self.state().borrow();
-        // A closed channel "can" send: the send panics, which is what Go
-        // does when `select` picks that case.
-        s.closed || (s.cap > 0 && s.buf.len() < s.cap) || (s.cap == 0 && s.receivers > 0)
+        self.state()
+            .with(|s| s.receivers = s.receivers.saturating_sub(1));
     }
 
     /// `close(ch)`.
@@ -300,25 +440,18 @@ impl<T: GoValue + Trace> Chan<T> {
         if self.is_nil() {
             crate::panic::runtime_error_msg(alloc::string::String::from("close of nil channel"));
         }
+        if self
+            .state()
+            .with(|s| core::mem::replace(&mut s.closed, true))
         {
-            let mut s = self.state().borrow_mut();
-            if s.closed {
-                drop(s);
-                crate::panic::runtime_error_msg(alloc::string::String::from(
-                    "close of closed channel",
-                ));
-            }
-            s.closed = true;
+            crate::panic::runtime_error_msg(alloc::string::String::from("close of closed channel"));
         }
         sched::wake_all(self.send_key());
         sched::wake_all(self.recv_key());
     }
 }
 
-/// Blocks the goroutine for ever, as an operation on a nil channel does. With
-/// nothing else to run, the scheduler reports Go's deadlock.
-fn block_forever() -> ! {
-    loop {
-        sched::park_on(0);
-    }
+/// Go's panic for a send on a closed channel, raised with no lock held.
+fn send_on_closed() -> ! {
+    crate::panic::runtime_error_msg(alloc::string::String::from("send on closed channel"))
 }

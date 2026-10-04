@@ -33,27 +33,41 @@ var (
 	timers      []*timeTimer
 	timerLoopOn bool
 	timerSema   uint32
+	// timerLock covers everything above. A timer may be created, stopped or
+	// reset from any goroutine, and goroutines run on several threads, so the
+	// list needs one owner at a time. The timer goroutine never holds it while
+	// a timer fires: firing sends on a channel, which blocks.
+	timerLock uint32 = 1
 )
 
 // yieldIfReady gives the processor to another goroutine if one is ready, and
 // says whether it did. It is the runtime's (src/sched.rs).
 func yieldIfReady() bool
 
-// wakeTimerLoop tells the timer goroutine that the list has changed.
+func lockTimers()   { semacquire(&timerLock) }
+func unlockTimers() { semrelease(&timerLock) }
+
+// wakeTimerLoop tells the timer goroutine that the list has changed. Called
+// with timerLock held.
 func wakeTimerLoop() {
 	if !timerLoopOn {
 		timerLoopOn = true
 		go timerLoop()
 		return
 	}
-	timerSema = 1
+	atomicStore32(&timerSema, 1)
 	semawake(uintptr(unsafe.Pointer(&timerSema)))
 }
 
 func timerLoop() {
 	for {
+		lockTimers()
 		now := nanotime()
 		next := int64(0)
+		// What is due is collected here and called below, with the list
+		// unlocked: a timer's function sends on a channel, which blocks, and
+		// another goroutine may well want to add a timer meanwhile.
+		var due []func()
 		for _, t := range timers {
 			if !t.active {
 				continue
@@ -77,10 +91,7 @@ func timerLoop() {
 				} else {
 					t.active = false
 				}
-				// A timer's function sends on a channel, which may run other
-				// goroutines, so the list is read again from the top after it.
-				f(arg, seq, delay)
-				now = nanotime()
+				due = append(due, func() { f(arg, seq, delay) })
 				continue
 			}
 			if next == 0 || t.when < next {
@@ -99,6 +110,16 @@ func timerLoop() {
 		}
 		clear(timers[len(live):])
 		timers = live
+		unlockTimers()
+
+		for _, fire := range due {
+			fire()
+		}
+		if len(due) > 0 {
+			// The list is read again from the top: firing ran other goroutines,
+			// which may have changed it.
+			continue
+		}
 
 		if next == 0 {
 			// Nothing to wait for. Parking here, rather than sleeping, is
@@ -120,6 +141,8 @@ func timerLoop() {
 
 //go:linkname time_newTimer time.newTimer
 func time_newTimer(when, period int64, f func(arg any, seq uintptr, delay int64), arg any, cp unsafe.Pointer) *timeTimer {
+	lockTimers()
+	defer unlockTimers()
 	t := &timeTimer{
 		when:   when,
 		period: period,
@@ -136,6 +159,8 @@ func time_newTimer(when, period int64, f func(arg any, seq uintptr, delay int64)
 
 //go:linkname time_stopTimer time.stopTimer
 func time_stopTimer(t *timeTimer) bool {
+	lockTimers()
+	defer unlockTimers()
 	was := t.active
 	t.active = false
 	return was
@@ -143,6 +168,8 @@ func time_stopTimer(t *timeTimer) bool {
 
 //go:linkname time_resetTimer time.resetTimer
 func time_resetTimer(t *timeTimer, when, period int64) bool {
+	lockTimers()
+	defer unlockTimers()
 	was := t.active
 	t.when = when
 	t.period = period

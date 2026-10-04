@@ -22,9 +22,12 @@
 //! heap is ever handed to generated code — [`Ptr::project`] takes a closure,
 //! so a borrow cannot outlive the call.
 //!
-//! **M1 status:** slots are single-threaded `Cell`s. M2 makes them shareable
-//! between threads (DESIGN §13, question 6); the API generated code sees stays
-//! the same.
+//! A slot is a `Cell`, so a load is a load and a store is a store. Two
+//! goroutines on different threads touching the same one is a Go data race,
+//! which Go says is the program's own bug and gives a defined if unhelpful
+//! meaning for word-sized values; whether every heap word should instead be a
+//! relaxed atomic, which would be sound and slower, is DESIGN §13 question 6
+//! and still open.
 
 use crate::heap;
 use crate::panic::{RuntimeError, runtime_error};

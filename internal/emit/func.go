@@ -1592,12 +1592,14 @@ func (e *emitter) linkTarget(key string) *ssa.Function {
 // receive case), with -1 for the default case.
 func (f *fnEmitter) selectStmt(v *ssa.Select) string {
 	n := len(v.States)
+	if n == 0 {
+		// `select {}` waits for nothing, for ever. A park may come back with
+		// nothing having happened, so the waiting belongs to the runtime rather
+		// than to one park here.
+		return "rustygo::sched::block_forever()"
+	}
 	var b strings.Builder
 	b.WriteString("{\n")
-	if n == 0 {
-		// `select {}` waits for nothing, for ever.
-		b.WriteString("        rustygo::sched::park_on_any(&[]);\n")
-	}
 	b.WriteString("        let mut __sel_i: i64 = -1;\n        let mut __sel_ok = false;\n")
 	recv := 0
 	for _, st := range v.States {
@@ -1615,17 +1617,42 @@ func (f *fnEmitter) selectStmt(v *ssa.Select) string {
 	}
 	if n > 0 {
 		b.WriteString("        'sel: loop {\n")
+		if v.Blocking {
+			// Registered on every channel *before* any case is tested. A
+			// sender that arrives between the test and the park has to find
+			// this goroutine on a queue, or its wake reaches nobody and the
+			// select never comes back.
+			b.WriteString("            let __sel_keys = [")
+			for i, st := range v.States {
+				key := "recv_key"
+				if st.Dir == types.SendOnly {
+					key = "send_key"
+				}
+				fmt.Fprintf(&b, "(__sel_c%d).%s(), ", i, key)
+			}
+			b.WriteString("];\n")
+			b.WriteString("            rustygo::sched::prepare_park_any(&__sel_keys);\n")
+		}
 		fmt.Fprintf(&b, "            let __start = rustygo::sched::pick(%d);\n", n)
 		fmt.Fprintf(&b, "            for __k in 0..%d {\n                match (__start + __k) %% %d {\n", n, n)
 		recv = 0
+		// A case is taken in one step, under the channel's own lock: asking
+		// whether an operation would block and then performing it leaves room
+		// for another goroutine to take the value in between, and the
+		// operation would then block — which no select case may do, and a
+		// select with a default may not do at all.
+		leave := ""
+		if v.Blocking {
+			leave = "rustygo::sched::leave_park_any(&__sel_keys); "
+		}
 		for i, st := range v.States {
 			if st.Dir == types.RecvOnly {
-				fmt.Fprintf(&b, "                    %d => if (__sel_c%d).can_recv() { let (__v, __o) = (__sel_c%d).recv(); __sel_r%d = __v; __sel_ok = __o; __sel_i = %d; break 'sel; },\n",
-					i, i, i, recv, i)
+				fmt.Fprintf(&b, "                    %d => if let Some((__v, __o)) = (__sel_c%d).try_recv() { %s__sel_r%d = __v; __sel_ok = __o; __sel_i = %d; break 'sel; },\n",
+					i, i, leave, recv, i)
 				recv++
 			} else {
-				fmt.Fprintf(&b, "                    %d => if (__sel_c%d).can_send() { (__sel_c%d).send(__sel_v%d); __sel_i = %d; break 'sel; },\n",
-					i, i, i, i, i)
+				fmt.Fprintf(&b, "                    %d => if (__sel_c%d).try_send(__sel_v%d) { %s__sel_i = %d; break 'sel; },\n",
+					i, i, i, leave, i)
 			}
 		}
 		b.WriteString("                    _ => {}\n                }\n            }\n")
@@ -1643,16 +1670,10 @@ func (f *fnEmitter) selectStmt(v *ssa.Select) string {
 			// wakes: a receive case among the receivers, a send case among
 			// the senders. Waiting on one address for both would mean a
 			// receiver's wake reached other receivers, and two selects both
-			// receiving would wake each other for ever.
-			b.WriteString("            rustygo::sched::park_on_any(&[")
-			for i, st := range v.States {
-				key := "recv_key"
-				if st.Dir == types.SendOnly {
-					key = "send_key"
-				}
-				fmt.Fprintf(&b, "(__sel_c%d).%s(), ", i, key)
-			}
-			b.WriteString("]);\n")
+			// receiving would wake each other for ever. Those keys were
+			// registered above, before the cases were tested.
+			b.WriteString("            rustygo::sched::park();\n")
+			b.WriteString("            rustygo::sched::leave_park_any(&__sel_keys);\n")
 			for i, st := range v.States {
 				if st.Dir == types.RecvOnly {
 					fmt.Fprintf(&b, "            (__sel_c%d).leave_recv();\n", i)

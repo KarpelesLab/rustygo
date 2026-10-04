@@ -2,9 +2,17 @@
 //!
 //! `internal/poll` wraps every socket and asks the runtime nine questions
 //! about readiness, all of them reached by `go:linkname`. This answers them
-//! with `epoll`, and the scheduler calls [`wait`] when it has nothing to run:
-//! a goroutine blocked on a socket is parked, not spinning, and the thread
-//! sleeps in the kernel until a descriptor moves.
+//! with `epoll`, and a worker with nothing to run sleeps in [`poll`]: a
+//! goroutine blocked on a socket is parked, not spinning, and the thread sleeps
+//! in the kernel until a descriptor moves.
+//!
+//! One worker does that sleeping, because one `epoll_wait` reports every
+//! descriptor at once, and it may sleep until a socket moves — which can be for
+//! ever. So the poller keeps a descriptor of its own that the scheduler writes
+//! to ([`interrupt`]) when something becomes runnable that the sleeping worker
+//! might be the one to run. Without it, a program that both waits on a socket
+//! and readies a goroutine from a timer would hang whenever the worker in the
+//! poller was the only one left.
 //!
 //! Level-triggered, with the interest mask following the waiters: a
 //! descriptor asks for readability only while a goroutine waits to read it.
@@ -98,6 +106,48 @@ struct Poller {
     descs: Vec<Option<Box<Desc>>>,
 }
 
+/// The context the poller's own wake descriptor is registered under. Zero is
+/// free for it precisely because `internal/poll` reads a zero context as "this
+/// descriptor has no poller", so no socket is ever given it.
+const WAKE_CTX: u64 = 0;
+
+/// The descriptor [`interrupt`] writes to, or -1 if the kernel would not give us
+/// one. Outside the lock, so that an interrupt costs no more than two atomic
+/// loads: it is written once, when the poller is created, and never changes.
+static WAKE_FD: core::sync::atomic::AtomicI32 = core::sync::atomic::AtomicI32::new(-1);
+
+/// Whether a worker is sleeping in [`poll`]. Only one may, and the scheduler
+/// reads it to decide whether an interrupt is worth a system call.
+static POLLING: core::sync::atomic::AtomicBool = core::sync::atomic::AtomicBool::new(false);
+
+/// Takes on the job of sleeping in the poller, if nobody else has it.
+pub fn claim_polling() -> bool {
+    !POLLING.swap(true, core::sync::atomic::Ordering::SeqCst)
+}
+
+/// Gives it back.
+pub fn release_polling() {
+    POLLING.store(false, core::sync::atomic::Ordering::SeqCst);
+}
+
+/// Ends the sleep of whichever worker is in the poller.
+///
+/// A no-op when nobody is, which is the common case and must not cost a system
+/// call: the scheduler calls this every time it readies a goroutine with a
+/// worker idle. What makes it sound is the ordering in `sched::wait_for_work`,
+/// which claims the poller before its last look at the scheduler, so a wake
+/// cannot both miss that look and miss the claim.
+pub fn interrupt() {
+    use core::sync::atomic::Ordering;
+    if !POLLING.load(Ordering::SeqCst) {
+        return;
+    }
+    let fd = WAKE_FD.load(Ordering::SeqCst);
+    if fd >= 0 {
+        write_wake(fd);
+    }
+}
+
 // The descriptors every goroutine waits on: one registry, not one per thread
 // (`src/tls.rs`). A socket is a Go value like any other, so the goroutine that
 // waits on a descriptor need not be on the thread that opened it, and whichever
@@ -115,6 +165,13 @@ fn with_poller<R>(body: impl FnOnce(&mut Poller) -> R) -> Option<R> {
     POLLER.with(|slot| {
         if slot.is_none() {
             let epfd = epoll_create()?;
+            // A poller with no way to be interrupted still works for a program
+            // whose waits all have an end in sight, so a kernel that will not
+            // give us a descriptor for it is not fatal here.
+            if let Some(wake) = wake_descriptor() {
+                epoll_ctl(epfd, EPOLL_CTL_ADD, wake, EPOLLIN, WAKE_CTX);
+                WAKE_FD.store(wake, core::sync::atomic::Ordering::SeqCst);
+            }
             *slot = Some(Poller {
                 epfd,
                 descs: Vec::new(),
@@ -330,6 +387,10 @@ pub fn wait(ctx: usize, mode: i32) -> i32 {
             desc.writer = Some(me);
         }
         let key = desc.key(mode);
+        // Registered as a waiter before the poller's lock is released. A
+        // descriptor that became ready between the two would otherwise be
+        // reported to a key nobody was waiting at, and the wake would be lost.
+        sched::prepare_park(key);
         let (fd, interest) = (desc.fd, wanted(desc));
         arm(p, ctx, fd, interest);
         Ok(key)
@@ -352,7 +413,8 @@ pub fn wait(ctx: usize, mode: i32) -> i32 {
             mode as u8 as char
         ));
     }
-    sched::park_on(key);
+    sched::park();
+    sched::leave_park(key);
     // Woken by readiness, by the deadline passing, or by the descriptor
     // closing under us.
     let now = crate::rt::nanotime();
@@ -433,6 +495,12 @@ pub fn poll(timeout_ms: i32) -> bool {
     let mut woke = false;
     for ev in events.iter().take(n) {
         let ctx = ev.data as usize;
+        if ctx == WAKE_CTX as usize {
+            // The scheduler asking for this wait to end. Drained, so that the
+            // next wait is not handed this same write again.
+            drain_wake(wake_fd());
+            continue;
+        }
         let ready = ev.events;
         let keys = with_poller(|p| {
             let Some(desc) = desc_at(p, ctx) else {
@@ -536,6 +604,9 @@ mod nr {
     pub const EPOLL_CREATE1: u64 = 291;
     pub const EPOLL_CTL: u64 = 233;
     pub const EPOLL_PWAIT: u64 = 281;
+    pub const EVENTFD2: u64 = 290;
+    pub const READ: u64 = 0;
+    pub const WRITE: u64 = 1;
 }
 
 #[cfg(all(target_os = "linux", target_arch = "aarch64"))]
@@ -543,6 +614,9 @@ mod nr {
     pub const EPOLL_CREATE1: u64 = 20;
     pub const EPOLL_CTL: u64 = 21;
     pub const EPOLL_PWAIT: u64 = 22;
+    pub const EVENTFD2: u64 = 19;
+    pub const READ: u64 = 63;
+    pub const WRITE: u64 = 64;
 }
 
 #[cfg(target_os = "linux")]
@@ -568,6 +642,40 @@ fn epoll_ctl(epfd: i32, op: u64, fd: i32, events: u32, data: u64) -> i32 {
         0,
     );
     errno as i32
+}
+
+/// The wake descriptor's number, which [`poll`] reads without the lock.
+#[cfg(target_os = "linux")]
+fn wake_fd() -> i32 {
+    WAKE_FD.load(core::sync::atomic::Ordering::SeqCst)
+}
+
+/// An `eventfd`: a counter the kernel reports as readable while it is non-zero,
+/// which is the smallest thing that can end another thread's `epoll_wait`.
+#[cfg(target_os = "linux")]
+fn wake_descriptor() -> Option<i32> {
+    const EFD_CLOEXEC: u64 = 0o2000000;
+    const EFD_NONBLOCK: u64 = 0o4000;
+    let (fd, _, errno) =
+        crate::syscall::syscall6(nr::EVENTFD2, 0, EFD_CLOEXEC | EFD_NONBLOCK, 0, 0, 0, 0);
+    if errno != 0 { None } else { Some(fd as i32) }
+}
+
+/// Adds one to the counter, which makes it readable.
+#[cfg(target_os = "linux")]
+fn write_wake(fd: i32) {
+    let one: u64 = 1;
+    let _ = crate::syscall::syscall6(nr::WRITE, fd as u64, &raw const one as u64, 8, 0, 0, 0);
+}
+
+/// Takes the counter back to zero, so that one write ends one wait.
+#[cfg(target_os = "linux")]
+fn drain_wake(fd: i32) {
+    if fd < 0 {
+        return;
+    }
+    let mut got: u64 = 0;
+    let _ = crate::syscall::syscall6(nr::READ, fd as u64, &raw mut got as u64, 8, 0, 0, 0);
 }
 
 #[cfg(target_os = "linux")]
@@ -600,6 +708,22 @@ fn epoll_ctl(_: i32, _: u64, _: i32, _: u32, _: u64) -> i32 {
 #[cfg(not(target_os = "linux"))]
 fn epoll_wait(_: i32, _: &mut [EpollEvent], _: i32) -> usize {
     0
+}
+
+#[cfg(not(target_os = "linux"))]
+fn wake_descriptor() -> Option<i32> {
+    None
+}
+
+#[cfg(not(target_os = "linux"))]
+fn write_wake(_: i32) {}
+
+#[cfg(not(target_os = "linux"))]
+fn drain_wake(_: i32) {}
+
+#[cfg(not(target_os = "linux"))]
+fn wake_fd() -> i32 {
+    -1
 }
 
 #[cfg(all(test, target_os = "linux"))]

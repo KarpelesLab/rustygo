@@ -261,6 +261,78 @@ fn pad(l: Layout) -> Layout {
     }
 }
 
+/// A Go package-level variable's storage.
+///
+/// One place for the program, not one per thread: a global that a goroutine
+/// writes on one worker has to be the one another goroutine reads on another,
+/// and registering it as a root has to happen exactly once. Before this, the
+/// emitter put every global in a thread-local, which was right while one thread
+/// ran everything and silently wrong as soon as two did.
+///
+/// Made on first use rather than at compile time, because a place is a struct of
+/// cells that no `const` expression can build. After that a read of the variable
+/// is a load and a branch, which is no worse than the thread-local access it
+/// replaces.
+pub struct Global<P: 'static> {
+    /// The place's address, as a `Ptr` holds it, or 0 before it is made.
+    at: core::sync::atomic::AtomicUsize,
+    /// Serializes the making of it, so that two goroutines reaching the variable
+    /// at the same moment do not each leak a place and register a root for it.
+    once: crate::tls::Lock<()>,
+    kind: core::marker::PhantomData<fn() -> P>,
+}
+
+impl<P: crate::place::Place + Trace> Default for Global<P> {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl<P: crate::place::Place + Trace> Global<P> {
+    /// Storage that has not been made yet.
+    pub const fn new() -> Self {
+        Global {
+            at: core::sync::atomic::AtomicUsize::new(0),
+            once: crate::tls::Lock::new(()),
+            kind: core::marker::PhantomData,
+        }
+    }
+
+    /// The pointer generated code reads and writes the variable through.
+    #[inline]
+    pub fn get(&self) -> crate::place::Ptr<P> {
+        let at = self.at.load(core::sync::atomic::Ordering::Acquire);
+        if at == 0 {
+            return self.make();
+        }
+        // SAFETY: the address was published by `make`, which leaked the place,
+        // so it is a live place of this type for the rest of the program.
+        unsafe { crate::place::Ptr::from_addr(at) }
+    }
+
+    #[cold]
+    fn make(&self) -> crate::place::Ptr<P> {
+        self.once.with(|()| {
+            let at = self.at.load(core::sync::atomic::Ordering::Acquire);
+            if at != 0 {
+                // Another thread got here first.
+                // SAFETY: as in `get`.
+                return unsafe { crate::place::Ptr::from_addr(at) };
+            }
+            // The place lives for the rest of the program, outside the heap;
+            // registering it is what makes its contents roots (DESIGN §3).
+            let p: &'static P = alloc::boxed::Box::leak(alloc::boxed::Box::new(P::new(
+                crate::value::GoValue::zero(),
+            )));
+            register_global(p);
+            let ptr = crate::place::Ptr::to_global(p);
+            self.at
+                .store(ptr.addr() as usize, core::sync::atomic::Ordering::Release);
+            ptr
+        })
+    }
+}
+
 /// Registers a global as a root. Globals live outside the heap and are never
 /// collected; their contents are traced.
 ///

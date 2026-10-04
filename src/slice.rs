@@ -293,8 +293,9 @@ impl Slice<crate::place::Slot<u8>> {
         }
         heap::check_live(self.ptr as usize);
         // SAFETY: a `Slot<u8>` is transparent over a `Cell<u8>`, which is a
-        // byte; the slice's `len` places are in bounds; and nothing writes
-        // them while `f` only reads (one goroutine in M1).
+        // byte, and the slice's `len` places are in bounds. `f` only reads
+        // them; a goroutine writing them meanwhile is a Go data race, which is
+        // the program's bug and DESIGN §13 question 6's subject.
         f(unsafe { core::slice::from_raw_parts(self.ptr as *const u8, self.len) })
     }
 

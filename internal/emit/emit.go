@@ -558,13 +558,14 @@ func (e *emitter) globalPath(g *ssa.Global) string {
 	p := crateName(band) + "::" + m.name + "::" + name
 	e.globals[g] = p
 	place := e.types.place(g.Type().(*types.Pointer).Elem(), e, g.Pos())
-	// Globals live in thread-local statics: M0 is single-threaded, and a
-	// `static` would need `Sync`. M2 replaces this with shared storage.
+	// One place for the program, not one per thread: a global a goroutine writes
+	// on one worker has to be the one another goroutine reads on another. The
+	// place itself lives forever, outside the heap, and is built on first use,
+	// because it is a struct of cells no `const` expression can make; the
+	// runtime does the building and registers it as a root (DESIGN §3).
 	cell := "G_" + strings.TrimPrefix(name, "r#")
-	// The place itself lives forever, outside the heap; registering it makes
-	// its contents roots (DESIGN §3).
-	fmt.Fprintf(m.at(band), "\nthread_local! {\n    static %s: Ptr<%s> = {\n        let p: &'static %s = Box::leak(Box::new(<%s as Place>::new(GoValue::zero())));\n        rustygo::heap::register_global(p);\n        Ptr::to_global(p)\n    };\n}\n", cell, place, place, place)
-	fmt.Fprintf(m.at(band), "pub fn %s() -> Ptr<%s> {\n    %s.with(|g| *g)\n}\n", name, place, cell)
+	fmt.Fprintf(m.at(band), "\nstatic %s: rustygo::heap::Global<%s> = rustygo::heap::Global::new();\n", cell, place)
+	fmt.Fprintf(m.at(band), "pub fn %s() -> Ptr<%s> {\n    %s.get()\n}\n", name, place, cell)
 	return p
 }
 

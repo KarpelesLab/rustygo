@@ -12,6 +12,17 @@
 //! Iteration starts at a pseudo-random bucket, like gc, so programs cannot
 //! come to depend on the order.
 //!
+//! **Not synchronized**, because a Go map is not. Go allows any number of
+//! goroutines to read one map at once and makes a concurrent write the
+//! program's own bug, which gc reports as a fatal error and rustygo does not yet
+//! detect. The table therefore sits in a plain [`UnsafeCell`] rather than a
+//! `RefCell`: a `RefCell`'s borrow counter is itself shared mutable state, so
+//! two reads that Go says are perfectly legal would race on *it*, and the
+//! program's own synchronization — which is what Go asks for around a write —
+//! would not help, because it was never told about the counter. Concurrent
+//! reads are then plain loads, which is the position DESIGN §2 takes for every
+//! other word on the heap and §13 question 6 leaves open.
+//!
 //! **M1 status:** one table, grown by rehashing, with no incremental growth
 //! and no per-size-class allocation.
 
@@ -20,7 +31,7 @@ use crate::panic::{RuntimeError, runtime_error};
 use crate::trace::{Trace, Tracer};
 use crate::value::GoValue;
 use alloc::vec::Vec;
-use core::cell::RefCell;
+use core::cell::UnsafeCell;
 
 /// A key type: Go's equality and hashing for map keys.
 pub trait GoKey: GoValue + Trace {
@@ -49,12 +60,16 @@ struct Table<K, V> {
 
 /// The heap object behind a map handle.
 pub struct MapObj<K, V> {
-    table: RefCell<Table<K, V>>,
+    table: UnsafeCell<Table<K, V>>,
 }
 
 impl<K: GoKey, V: GoValue + Trace> Trace for MapObj<K, V> {
     fn trace(&self, t: &mut Tracer<'_>) {
-        for slot in &self.table.borrow().slots {
+        // SAFETY: a collection reaches this with every goroutine stopped at a
+        // safe point, and no safe point falls inside one of the accessors
+        // below: they move words, and growing the table allocates from Rust's
+        // allocator rather than the Go heap.
+        for slot in &unsafe { &*self.table.get() }.slots {
             if let Slot::Live(k, v) = slot {
                 k.trace(t);
                 v.trace(t);
@@ -109,7 +124,7 @@ impl<K: GoKey, V: GoValue + Trace> GoMap<K, V> {
     pub fn make(hint: i64) -> Self {
         let cap = (hint.max(0) as usize).next_power_of_two().max(8);
         let obj = heap::allocate(MapObj {
-            table: RefCell::new(Table {
+            table: UnsafeCell::new(Table {
                 slots: (0..cap).map(|_| Slot::Empty).collect(),
                 live: 0,
                 used: 0,
@@ -159,8 +174,8 @@ impl<K: GoKey, V: GoValue + Trace> GoMap<K, V> {
         heap::check_live(obj.as_ptr() as usize);
         // SAFETY: a non-nil handle points at a live map object, which the
         // caller keeps rooted.
-        let table = unsafe { &obj.as_ref().table };
-        let mut t = table.borrow_mut();
+        // SAFETY: as `with_mut`.
+        let t = unsafe { &mut *obj.as_ref().table.get() };
         if (t.used + 1) * 4 >= t.slots.len() * 3 {
             t.grow();
         }
@@ -207,15 +222,18 @@ impl<K: GoKey, V: GoValue + Trace> GoMap<K, V> {
     fn with<R>(self, f: impl FnOnce(&Table<K, V>) -> R) -> Option<R> {
         let obj = self.obj?;
         heap::check_live(obj.as_ptr() as usize);
-        // SAFETY: as in `set`.
-        Some(f(&unsafe { obj.as_ref() }.table.borrow()))
+        // SAFETY: a non-nil handle points at a live map object, which the caller
+        // keeps rooted. Nothing in `f` reaches this map again — it reads slots
+        // and computes — and a Go program that reads a map while another
+        // goroutine writes it is in the wrong, as the module comment explains.
+        Some(f(unsafe { &*obj.as_ref().table.get() }))
     }
 
     fn with_mut<R>(self, f: impl FnOnce(&mut Table<K, V>) -> R) -> Option<R> {
         let obj = self.obj?;
         heap::check_live(obj.as_ptr() as usize);
-        // SAFETY: as in `set`.
-        Some(f(&mut unsafe { obj.as_ref() }.table.borrow_mut()))
+        // SAFETY: as `with`.
+        Some(f(unsafe { &mut *obj.as_ref().table.get() }))
     }
 }
 

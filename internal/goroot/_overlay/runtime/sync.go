@@ -7,27 +7,34 @@ import "unsafe"
 // What package sync and internal/sync ask of the runtime, through
 // go:linkname. A semaphore that cannot be taken parks the goroutine on the
 // address of its counter, and releasing it wakes the one that has waited
-// longest; with one thread and no preemption, nothing can run between the
-// test and the park (DESIGN §4).
+// longest (DESIGN §4).
+//
+// The whole of acquire and release is the runtime's, in Rust. It used to be the
+// loop below, written in Go; with goroutines on more than one thread that no
+// longer works, because the test of the counter and the park have to agree
+// about what happened between them, and only the side that owns the wait queue
+// can make them. The counter is also read and written atomically there, so two
+// goroutines cannot take the same unit.
+
+func semacquire(s *uint32)
+func semrelease(s *uint32)
 
 // semapark parks this goroutine on an address, and semawake readies the
-// goroutine that has waited longest on it.
+// goroutine that has waited longest on it. What is left of the pair that
+// semacquire used to be built from: a wait whose condition is the wake itself.
 func semapark(addr uintptr)
 func semawake(addr uintptr)
 
-func semacquire(s *uint32) {
-	for *s == 0 {
-		// Parking with nothing left to run is gc's deadlock, reported the
-		// same way by the scheduler.
-		semapark(uintptr(unsafe.Pointer(s)))
-	}
-	*s--
-}
+// The atomics the runtime package needs for its own bookkeeping. sync/atomic is
+// not reachable from here, so the runtime answers them itself.
+func atomicLoad32(p *uint32) uint32
+func atomicStore32(p *uint32, v uint32)
+func atomicAdd32(p *uint32, d uint32) uint32
 
-func semrelease(s *uint32) {
-	*s++
-	semawake(uintptr(unsafe.Pointer(s)))
-}
+// procPin keeps a goroutine on the processor it is running on, and reports that
+// processor's number, which is below GOMAXPROCS. sync shards caches by it.
+func procPin() int
+func procUnpin()
 
 //go:linkname sync_runtime_Semacquire sync.runtime_Semacquire
 func sync_runtime_Semacquire(s *uint32) { semacquire(s) }
@@ -50,15 +57,17 @@ func internal_sync_runtime_SemacquireMutex(s *uint32, lifo bool, skipframes int)
 //go:linkname internal_sync_runtime_Semrelease internal/sync.runtime_Semrelease
 func internal_sync_runtime_Semrelease(s *uint32, handoff bool, skipframes int) { semrelease(s) }
 
-// sync/atomic pins a goroutine to its processor while it publishes a value.
-// With one processor there is nothing to pin it to and nothing that could
-// move it.
+// sync/atomic and sync.Pool pin a goroutine to its processor while they work on
+// that processor's own data, and index arrays by the number they are given. The
+// runtime answers with a processor slot below GOMAXPROCS that no other running
+// goroutine holds, and keeps the goroutine where it is until it unpins — which
+// is what makes a per-processor shard safe to touch without a lock.
 
 //go:linkname atomic_runtime_procPin sync/atomic.runtime_procPin
-func atomic_runtime_procPin() int { return 0 }
+func atomic_runtime_procPin() int { return procPin() }
 
 //go:linkname atomic_runtime_procUnpin sync/atomic.runtime_procUnpin
-func atomic_runtime_procUnpin() {}
+func atomic_runtime_procUnpin() { procUnpin() }
 
 // A weak pointer is a strong one here. rustygo's collector has no way yet to
 // clear a reference when its object dies (that is the same machinery as
@@ -94,8 +103,6 @@ func sync_throw(s string) { fatal(s) }
 //go:linkname sync_fatal sync.fatal
 func sync_fatal(s string) { fatal(s) }
 
-// Condition variables: with one goroutine, a Wait has nobody to wake it.
-
 // sync.Cond's ticket list. The layout is sync's own, because the runtime is
 // handed a pointer to it; notifyListCheck is how sync asks whether the two
 // agree.
@@ -118,35 +125,39 @@ func notified(t, notify uint32) bool {
 	return int32(t-notify) < 0
 }
 
+// The two counters are read and written atomically: sync.Cond documents that
+// Signal and Broadcast may be called without holding the lock a Wait holds, so
+// a ticket taken on one thread and a notification sent from another meet here
+// and nowhere else.
+
 //go:linkname sync_runtime_notifyListAdd sync.runtime_notifyListAdd
 func sync_runtime_notifyListAdd(l *notifyList) uint32 {
-	t := l.wait
-	l.wait++
-	return t
+	return atomicAdd32(&l.wait, 1) - 1
 }
 
 //go:linkname sync_runtime_notifyListWait sync.runtime_notifyListWait
 func sync_runtime_notifyListWait(l *notifyList, t uint32) {
-	for !notified(t, l.notify) {
+	for !notified(t, atomicLoad32(&l.notify)) {
 		semaparkall(uintptr(unsafe.Pointer(l)))
 	}
 }
 
 //go:linkname sync_runtime_notifyListNotifyAll sync.runtime_notifyListNotifyAll
 func sync_runtime_notifyListNotifyAll(l *notifyList) {
-	if l.notify == l.wait {
+	wait := atomicLoad32(&l.wait)
+	if atomicLoad32(&l.notify) == wait {
 		return
 	}
-	l.notify = l.wait
+	atomicStore32(&l.notify, wait)
 	semawakeall(uintptr(unsafe.Pointer(l)))
 }
 
 //go:linkname sync_runtime_notifyListNotifyOne sync.runtime_notifyListNotifyOne
 func sync_runtime_notifyListNotifyOne(l *notifyList) {
-	if l.notify == l.wait {
+	if atomicLoad32(&l.notify) == atomicLoad32(&l.wait) {
 		return
 	}
-	l.notify++
+	atomicAdd32(&l.notify, 1)
 	semawakeall(uintptr(unsafe.Pointer(l)))
 }
 
@@ -162,16 +173,17 @@ func sync_runtime_notifyListCheck(size uintptr) {
 func semaparkall(addr uintptr)
 func semawakeall(addr uintptr)
 
-// sync.Pool: one processor, never cleaned (a cleanup may always be skipped).
+// sync.Pool: never cleaned (a cleanup may always be skipped). It shards its
+// cache by processor, so a pinned goroutine really has to stay where it is.
 
 //go:linkname sync_runtime_registerPoolCleanup sync.runtime_registerPoolCleanup
 func sync_runtime_registerPoolCleanup(cleanup func()) {}
 
 //go:linkname sync_runtime_procPin sync.runtime_procPin
-func sync_runtime_procPin() int { return 0 }
+func sync_runtime_procPin() int { return procPin() }
 
 //go:linkname sync_runtime_procUnpin sync.runtime_procUnpin
-func sync_runtime_procUnpin() {}
+func sync_runtime_procUnpin() { procUnpin() }
 
 // randn returns a pseudo-random number in [0, n), for sync.Pool and others.
 // gc's is seeded per process; this one is a fixed-seed wyrand, which no

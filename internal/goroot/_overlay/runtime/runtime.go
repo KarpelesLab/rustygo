@@ -60,15 +60,21 @@ func KeepAlive(x any) { keepAliveSink = x; keepAliveSink = nil }
 
 var keepAliveSink any
 
-// Goroutines run on one OS thread for now (DESIGN §4), cooperatively:
-// Gosched hands the processor to the next one, and there is no second
-// thread to report.
+// Goroutines run on GOMAXPROCS worker threads (DESIGN §4). Gosched hands the
+// processor to the next goroutine; GOMAXPROCS is the limit on how many run at
+// once, and lowering it idles the extra workers rather than stopping them.
 
 func Gosched()
-func GOMAXPROCS(n int) int { return 1 }
-func NumCPU() int          { return 1 }
-func LockOSThread()        {}
-func UnlockOSThread()      {}
+
+func GOMAXPROCS(n int) int { return gomaxprocs(n) }
+func NumCPU() int          { return numCPU() }
+func LockOSThread()        { lockOSThread() }
+func UnlockOSThread()      { unlockOSThread() }
+
+func gomaxprocs(n int) int
+func numCPU() int
+func lockOSThread()
+func unlockOSThread()
 
 // NumGoroutine counts the goroutines that exist, as the scheduler sees them.
 func NumGoroutine() int

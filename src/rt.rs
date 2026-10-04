@@ -93,11 +93,11 @@ pub fn nanotime() -> i64 {
         .as_nanos() as i64
 }
 
-/// Sleeps for at least `ns` nanoseconds, as `time.Sleep`.
+/// Sleeps this thread for at least `ns` nanoseconds.
 ///
-/// gc parks the goroutine and runs the others. rustygo has one goroutine
-/// (roadmap M2), so there is nothing else to run and sleeping the thread is
-/// the same thing.
+/// gc's `runtime.nanosleep` is the same low-level thing: it stops the thread
+/// rather than parking the goroutine. What `time.Sleep` uses is
+/// `sched::sleep_until`, which parks and leaves the worker to the others.
 pub fn nanosleep(ns: i64) {
     if ns <= 0 {
         return;
@@ -112,18 +112,12 @@ pub fn nanosleep(ns: i64) {
 /// (`panic: …`) matches gc exactly; the goroutine trace that follows does not
 /// yet.
 pub fn run_main(init: fn(), main: fn()) -> ! {
-    let result = std::panic::catch_unwind(|| {
-        init();
-        main();
-    });
-    match result {
-        Ok(()) => exit(0),
-        // `runtime.Goexit` in the main goroutine ends it without ending the
-        // program: what is left runs, and the scheduler reports a deadlock
-        // once nothing can.
-        Err(payload) if crate::sched::is_goexit(&*payload) => crate::sched::park_forever(),
-        Err(payload) => report_unrecovered(payload),
-    }
+    // The program runs on a goroutine of its own, like every other one, and
+    // this thread becomes the first of the scheduler's workers. What happens
+    // when `main` returns, panics or calls `runtime.Goexit` is decided there,
+    // because by then this thread may be running something else entirely
+    // (`sched::run_program`).
+    crate::sched::run_program(init, main)
 }
 
 /// Reports a panic nothing recovered, the way gc does, and ends the process.

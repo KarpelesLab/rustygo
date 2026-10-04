@@ -228,6 +228,24 @@ var intrinsics = map[string]func(args []string) string{
 	"runtime.sleepUntil": func(a []string) string {
 		return fmt.Sprintf("rustygo::sched::sleep_until(%s)", a[0])
 	},
+	"runtime.gomaxprocs": func(a []string) string {
+		return fmt.Sprintf("rustygo::sched::gomaxprocs(%s)", a[0])
+	},
+	"runtime.numCPU":         func([]string) string { return "rustygo::sched::num_cpu()" },
+	"runtime.lockOSThread":   func([]string) string { return "rustygo::sched::lock_os_thread()" },
+	"runtime.unlockOSThread": func([]string) string { return "rustygo::sched::unlock_os_thread()" },
+	"runtime.procPin":        func([]string) string { return "rustygo::sched::proc_pin()" },
+	"runtime.procUnpin":      func([]string) string { return "rustygo::sched::proc_unpin()" },
+	// A semaphore's counter and its queue of waiters belong together, so the
+	// whole of acquire and release lives in the runtime: with more than one
+	// thread, a test written in Go and a park in the runtime cannot agree
+	// about what happened between them.
+	"runtime.semacquire": func(a []string) string {
+		return fmt.Sprintf("rustygo::sched::sem_acquire((%s).addr() as usize)", a[0])
+	},
+	"runtime.semrelease": func(a []string) string {
+		return fmt.Sprintf("rustygo::sched::sem_release((%s).addr() as usize)", a[0])
+	},
 	"runtime.semapark": func(a []string) string {
 		return fmt.Sprintf("rustygo::sched::park_on(%s as usize)", a[0])
 	},
@@ -239,6 +257,17 @@ var intrinsics = map[string]func(args []string) string{
 	},
 	"runtime.semawakeall": func(a []string) string {
 		return fmt.Sprintf("rustygo::sched::wake_all(%s as usize)", a[0])
+	},
+	// The few atomics the runtime package needs for its own bookkeeping, which
+	// it cannot reach through sync/atomic from where it sits.
+	"runtime.atomicLoad32": func(a []string) string {
+		return fmt.Sprintf("rustygo::sched::atomic_load32((%s).addr() as usize)", a[0])
+	},
+	"runtime.atomicStore32": func(a []string) string {
+		return fmt.Sprintf("rustygo::sched::atomic_store32((%s).addr() as usize, %s)", a[0], a[1])
+	},
+	"runtime.atomicAdd32": func(a []string) string {
+		return fmt.Sprintf("rustygo::sched::atomic_add32((%s).addr() as usize, %s)", a[0], a[1])
 	},
 
 	// The netpoller (src/netpoll.rs).
