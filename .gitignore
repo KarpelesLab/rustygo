@@ -1,3 +1,6 @@
 /target/
 /out/
 Cargo.lock
+
+# Worktrees an agent is working in, which are checkouts of this repository.
+/.claude/worktrees/
