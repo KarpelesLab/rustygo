@@ -7,6 +7,32 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.0.3](https://github.com/KarpelesLab/rustygo/compare/v0.0.2...v0.0.3) - 2026-09-29
+
+### Other
+
+- Calling a function through reflection
+- A linkname on a variable, and a table of what the standard library's tests say
+- rustygo test: the standard library's own tests
+- Say what works now
+- Starting a process, and a method nobody could find
+- A frame that was returning normally when its own defer panicked
+- Methods through reflection, and the pair of func values each one needs
+- A defer that outlives its loop body, and what unsafe.Slice refuses
+- Waiters by address, and three things chanlinear was really failing on
+- Finalizers, and the phase of the collector that orders them
+- net/http, client and server, and the livelock in the way
+- One crate per band, and constant tables as static data
+- ReadMemStats reports what the collector knows
+- Untyped constants that reach the emitter, and reflect's two headers
+- Five bugs Go's own tests found, one of them the collector's
+- the netpoller, timers, and what net asked for on the way
+- Do not run the context-switch test where there is no switch
+- Goroutines, channels and select
+- The differential test says which platforms a program needs
+- recover, exactly as Go defines it, and five bugs behind it
+- Reflection, the file layer, and fmt
+
 ## [0.0.2](https://github.com/KarpelesLab/rustygo/compare/v0.0.1...v0.0.2) - 2026-09-19
 
 ### Other
