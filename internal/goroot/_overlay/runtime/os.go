@@ -101,11 +101,14 @@ func time_Sleep(ns int64) {
 	sleepUntil(nanotime() + ns)
 }
 
-// sigpipe is raised when a write to a closed pipe is ignored; with no signal
-// handling yet (M3) there is nothing to raise.
+// sigpipe is what os calls when a write to standard output or standard error
+// failed because nothing is reading the other end. Go's answer is the default
+// disposition — the process stops — and the runtime raises it.
+
+func sigpipe()
 
 //go:linkname os_sigpipe os.sigpipe
-func os_sigpipe() {}
+func os_sigpipe() { sigpipe() }
 
 // Fork and exec.
 //
@@ -146,3 +149,9 @@ func syscall_runtimeSetenv(k, v string) {}
 
 //go:linkname syscall_runtimeUnsetenv syscall.runtimeUnsetenv
 func syscall_runtimeUnsetenv(k string) {}
+
+// Clearenv hands the runtime the map it is about to empty, so that a C
+// environment could be cleared key by key. There is none to clear.
+
+//go:linkname syscall_runtimeClearenv syscall.runtimeClearenv
+func syscall_runtimeClearenv(env map[string]int) {}
