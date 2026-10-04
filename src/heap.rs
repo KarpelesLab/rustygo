@@ -13,13 +13,15 @@
 //!
 //! Roots are the shadow stack ([`crate::gc`]) and the registered globals.
 //!
-//! **Single-threaded.** M1 has no goroutines; M2 makes the heap shared.
+//! **One heap, one lock.** Every thread allocates from the same table, so
+//! every allocation takes the lock around it; what that costs, and whether
+//! per-thread caches over size classes are worth their complexity, is M6's
+//! question and wants measuring first.
 
 use crate::trace::{Trace, TraceFn, Tracer, trace_array_fn, trace_fn};
 use alloc::alloc::{Layout, alloc, dealloc};
 use alloc::collections::BTreeMap;
 use alloc::vec::Vec;
-use core::cell::RefCell;
 use core::ptr::NonNull;
 
 /// One heap object. Kept small: there is one of these per allocation, and a
@@ -74,25 +76,41 @@ pub struct Heap {
 /// Collect once the live set reaches this, before any doubling.
 const MIN_THRESHOLD: usize = 4 << 20;
 
-rt_global! {
-    // Const-initialized: no lazy-init check on the path every allocation
-    // takes.
-    static HEAP: RefCell<Heap> = RefCell::new(Heap {
-            objs: Vec::new(),
-            sorted: true,
-            live_bytes: 0,
-            threshold: MIN_THRESHOLD,
-            globals: Vec::new(),
-            collections: 0,
-            total_objects: 0,
-            total_bytes: 0,
-            quarantine: BTreeMap::new(),
-    });
+// One heap for the program, behind one lock (`src/tls.rs`). A Go value may be
+// reached from any goroutine, so it cannot be allocated out of storage that
+// belongs to a thread: the object table every mark phase walks has to hold
+// every object there is.
+//
+// One lock around the whole heap is the simplest thing that is correct, and
+// correct is what matters first (DESIGN §3, phase 1). It serializes
+// allocation, which a program that allocates on several threads at once will
+// feel; the answer is per-thread allocation caches over size classes, which is
+// M6's size-class allocator and wants the cost of this measured before it is
+// written.
+//
+// Const-initialized: no lazy-init check on the path every allocation takes.
+rt_shared! {
+    static HEAP: Heap = Heap {
+        objs: Vec::new(),
+        sorted: true,
+        live_bytes: 0,
+        threshold: MIN_THRESHOLD,
+        globals: Vec::new(),
+        collections: 0,
+        total_objects: 0,
+        total_bytes: 0,
+        quarantine: BTreeMap::new(),
+    };
 }
 
-/// Runs `f` on the heap.
+/// Runs `f` with the heap locked.
+///
+/// The outermost of the runtime's locks: a collection holds this one while it
+/// asks the scheduler for parked goroutines' roots and the finalizer table for
+/// its own, so nothing on the other side of those may allocate. Nothing does —
+/// their critical sections move words.
 fn with_heap<R>(f: impl FnOnce(&mut Heap) -> R) -> R {
-    HEAP.with(|h| f(&mut h.borrow_mut()))
+    HEAP.with(f)
 }
 
 /// Allocates space for a `T`, collecting first if the heap has grown enough,

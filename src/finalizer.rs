@@ -29,7 +29,6 @@ use crate::func::Env;
 use crate::trace::Tracer;
 use alloc::collections::BTreeMap;
 use alloc::vec::Vec;
-use core::cell::RefCell;
 
 /// A finalizer waiting for its object, or waiting to run.
 #[derive(Clone, Copy)]
@@ -53,17 +52,26 @@ struct Table {
     draining: bool,
 }
 
-rt_global! {
-    static TABLE: RefCell<Table> = RefCell::new(Table {
+// One table for the program (`src/tls.rs`): `SetFinalizer` may be called from
+// any goroutine, the collector reads the whole of it, and the goroutine that
+// drains the queue is wherever the scheduler puts it.
+rt_shared! {
+    static TABLE: Table = Table {
         set: BTreeMap::new(),
         ready: Vec::new(),
         running: None,
         draining: false,
-    });
+    };
 }
 
+// SAFETY: a registration is an address and a Go closure's environment. Neither
+// belongs to the thread that registered it, for the reasons `sched::G` gives.
+unsafe impl Send for Table {}
+
+/// Runs `f` with the table locked. Taken while the heap's lock is held, during
+/// a collection, and never the other way round.
 fn with_table<R>(f: impl FnOnce(&mut Table) -> R) -> R {
-    TABLE.with(|t| f(&mut t.borrow_mut()))
+    TABLE.with(f)
 }
 
 /// `runtime.SetFinalizer(obj, f)`, with `obj`'s address and the call the

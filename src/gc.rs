@@ -123,6 +123,16 @@ pub struct Frame<const N: usize> {
     slots: [Slot; N],
 }
 
+// The innermost frame linked on this thread, which is the running
+// goroutine's: the chain below it is that goroutine's Go call stack.
+//
+// Per thread, and the clearest case of it (`src/tls.rs`). Every generated
+// function that holds a reference links a frame here on the way in and
+// unlinks it on the way out, so a lock would be a lock per Go call; and the
+// chain is the running goroutine's by construction, because the scheduler
+// takes it away and puts the next goroutine's back on every switch. What the
+// collector needs — the chains of goroutines that are *not* running — it
+// reaches through the scheduler instead.
 rt_global! {
     static TOP: Cell<*const Header> = Cell::new(core::ptr::null());
 }

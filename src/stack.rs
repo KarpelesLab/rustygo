@@ -62,9 +62,14 @@ impl Stack {
     }
 }
 
-rt_global! {
-    static LEAKING: core::cell::Cell<bool> = core::cell::Cell::new(false);
-}
+/// Whether reservations are being kept rather than unmapped.
+///
+/// A plain atomic rather than state behind a lock: it is written once, by
+/// whichever thread is ending the process, and read by any thread that drops
+/// a stack after that. Relaxed is enough because nothing is ordered against
+/// it — a thread that reads the old value unmaps a stack its own goroutine
+/// had already finished with, which is what it would have done anyway.
+static LEAKING: core::sync::atomic::AtomicBool = core::sync::atomic::AtomicBool::new(false);
 
 /// Stops stacks from ever being unmapped again, for a process on its way out.
 ///
@@ -73,12 +78,12 @@ rt_global! {
 /// on, and the process would fault instead of exiting. Nothing is lost by
 /// keeping the reservations: the kernel takes them back.
 pub fn leak_all() {
-    LEAKING.with(|l| l.set(true));
+    LEAKING.store(true, core::sync::atomic::Ordering::Relaxed);
 }
 
 impl Drop for Stack {
     fn drop(&mut self) {
-        if LEAKING.with(|l| l.get()) {
+        if LEAKING.load(core::sync::atomic::Ordering::Relaxed) {
             return;
         }
         // SAFETY: this reservation was made by `reserve` and is not used any

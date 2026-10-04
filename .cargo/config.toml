@@ -1,0 +1,10 @@
+# The runtime has one heap, one scheduler and one netpoller, shared by every
+# thread (src/tls.rs). Its own unit tests share them too, and libtest runs each
+# test on a thread of its own: one test would then count another test's objects,
+# and a collection on one test's thread would free what another was holding in a
+# local the collector has no way to reach. So the tests run one at a time.
+#
+# A compiled Go program needs none of this. Its goroutines reach the collector
+# through the scheduler, and what they hold is rooted by emitted code.
+[env]
+RUST_TEST_THREADS = "1"

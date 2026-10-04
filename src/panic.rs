@@ -56,10 +56,14 @@ impl GoPanic {
 // Error() and String() return gc's message. Its method ids come from the
 // emitter, which numbers every method in the program, so the descriptor is
 // built once at startup.
-rt_global! {
-    static RUNTIME_ERROR: core::cell::Cell<Option<&'static TypeDesc>> =
-        core::cell::Cell::new(None);
-}
+//
+// The program has one, not one per thread: a pointer, written before `main`
+// and read by every runtime error afterwards. An atomic rather than state
+// behind a lock, because it is on the path of every nil dereference, and
+// Release/Acquire because the descriptor it points at is built just before
+// the store and read through the pointer long after.
+static RUNTIME_ERROR: core::sync::atomic::AtomicPtr<TypeDesc> =
+    core::sync::atomic::AtomicPtr::new(core::ptr::null_mut());
 
 /// Teaches the runtime the ids of `Error() string`, `String() string` and
 /// `RuntimeError()`, so a recovered runtime error satisfies both `error` and
@@ -96,12 +100,18 @@ pub fn init_runtime_errors(error_id: MethodId, string_id: MethodId, runtime_erro
         print: |d, out| out.extend_from_slice(message(d).bytes()),
         ..TypeDesc::DEFAULT
     }));
-    RUNTIME_ERROR.with(|c| c.set(Some(desc)));
+    RUNTIME_ERROR.store(
+        desc as *const TypeDesc as *mut TypeDesc,
+        core::sync::atomic::Ordering::Release,
+    );
 }
 
 /// The interface value for a runtime error's message, if the program has one.
 fn runtime_error_value(msg: &str) -> Iface {
-    match RUNTIME_ERROR.with(|c| c.get()) {
+    let desc = RUNTIME_ERROR.load(core::sync::atomic::Ordering::Acquire);
+    // SAFETY: the pointer is either null or the leaked descriptor stored by
+    // `init_runtime_errors`, which lives for the rest of the program.
+    match unsafe { desc.as_ref() } {
         Some(desc) => {
             let s = GoStr::from_bytes(msg.as_bytes());
             // Boxing allocates again, so the string needs a root of its own
@@ -123,6 +133,12 @@ fn runtime_error_value(msg: &str) -> Iface {
 // raised while another is being handled does not replace it: Go lets the
 // inner one be recovered and then carries on with the outer, so each frame
 // that catches an unwind adds its own and takes it back off.
+//
+// Per thread, and deliberately so (`src/tls.rs`). A panic belongs to one
+// goroutine, and a goroutine runs on one thread at a time, so the thread's
+// copy is always the running goroutine's: the scheduler takes it away and
+// puts the next one's back on every switch. Behind a lock it would be a
+// lookup by goroutine on a path that `recover` and every deferred call take.
 #[cfg(feature = "std")]
 rt_global! {
     static CURRENT: core::cell::RefCell<alloc::vec::Vec<GoPanic>> =
@@ -230,6 +246,9 @@ pub fn replace(depth: usize, payload: alloc::boxed::Box<dyn core::any::Any + Sen
 // call apart from anything it goes on to call; the depth says which panic is
 // its own, so a second `recover` in the same call cannot reach the panic of
 // a frame further out.
+//
+// Per thread, for the same reason the panic stack is, and moved with the
+// goroutine by the same code.
 #[cfg(feature = "std")]
 rt_global! {
     static BOUNDARY: core::cell::Cell<(usize, usize)> = core::cell::Cell::new((0, 0));

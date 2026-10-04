@@ -17,7 +17,6 @@
 use crate::sched::{self, Gid};
 use alloc::boxed::Box;
 use alloc::vec::Vec;
-use core::cell::RefCell;
 
 /// Ready, as `internal/poll` reads it.
 pub const NO_ERROR: i32 = 0;
@@ -99,13 +98,21 @@ struct Poller {
     descs: Vec<Option<Box<Desc>>>,
 }
 
-rt_global! {
-    static POLLER: RefCell<Option<Poller>> = RefCell::new(None);
+// The descriptors every goroutine waits on: one registry, not one per thread
+// (`src/tls.rs`). A socket is a Go value like any other, so the goroutine that
+// waits on a descriptor need not be on the thread that opened it, and whichever
+// thread runs out of work is the one that will sleep in `epoll_wait` for it.
+rt_shared! {
+    static POLLER: Option<Poller> = None;
 }
 
+/// Runs `body` with the poller locked, creating it on first use.
+///
+/// The lock is never held across a system call that can block, and never while
+/// a goroutine is readied: waking one takes the scheduler's lock, and that is
+/// the order the two are always taken in — poller, then scheduler.
 fn with_poller<R>(body: impl FnOnce(&mut Poller) -> R) -> Option<R> {
-    POLLER.with(|p| {
-        let mut slot = p.borrow_mut();
+    POLLER.with(|slot| {
         if slot.is_none() {
             let epfd = epoll_create()?;
             *slot = Some(Poller {
@@ -239,8 +246,7 @@ pub fn set_deadline(ctx: usize, at: i64, mode: i32) {
 /// The earliest deadline any descriptor is waiting on, so the scheduler knows
 /// how long it may sleep.
 pub fn next_deadline() -> Option<i64> {
-    POLLER.with(|p| {
-        let slot = p.borrow();
+    POLLER.with(|slot| {
         let poller = slot.as_ref()?;
         poller
             .descs
@@ -265,10 +271,7 @@ pub fn expire() -> bool {
     // telling epoll that a descriptor is no longer interesting.
     let mut keys = Vec::new();
     let mut rearm: Vec<(usize, i32, u32)> = Vec::new();
-    POLLER.with(|p| {
-        let Ok(mut slot) = p.try_borrow_mut() else {
-            return;
-        };
+    POLLER.with(|slot| {
         let Some(poller) = slot.as_mut() else { return };
         for (i, desc) in poller.descs.iter_mut().enumerate() {
             let Some(desc) = desc else { continue };
@@ -307,8 +310,10 @@ pub fn wait(ctx: usize, mode: i32) -> i32 {
             mode as u8 as char
         ));
     }
+    // Asked before the poller is locked, not inside it: `current` takes the
+    // scheduler's lock, and the two are only ever nested the other way round.
+    let me = sched::current();
     let key = match with_poller(|p| {
-        let me = sched::current();
         let now = crate::rt::nanotime();
         let Some(desc) = desc_at(p, ctx) else {
             return Err(ERR_NOT_POLLABLE);
@@ -397,9 +402,8 @@ pub fn unblock(ctx: usize) {
 /// Whether anything is registered, which is what tells the scheduler that a
 /// program with no runnable goroutine may still be waiting rather than stuck.
 pub fn watching() -> bool {
-    POLLER.with(|p| {
-        p.borrow()
-            .as_ref()
+    POLLER.with(|slot| {
+        slot.as_ref()
             .is_some_and(|poller| poller.descs.iter().any(|d| d.is_some()))
     })
 }
@@ -410,9 +414,8 @@ pub fn watching() -> bool {
 /// Returns whether anything was readied. The scheduler calls this when it has
 /// nothing to run.
 pub fn poll(timeout_ms: i32) -> bool {
-    let Some((epfd, count)) = POLLER.with(|p| {
-        p.borrow()
-            .as_ref()
+    let Some((epfd, count)) = POLLER.with(|slot| {
+        slot.as_ref()
             .map(|poller| (poller.epfd, poller.descs.len()))
     }) else {
         return false;
@@ -420,8 +423,8 @@ pub fn poll(timeout_ms: i32) -> bool {
     if count == 0 {
         return false;
     }
-    // The poller is not borrowed across the system call: a goroutine readied
-    // below will want it.
+    // The poller is not locked across the system call: another thread may be
+    // opening a descriptor meanwhile, and a goroutine readied below wants it.
     let mut events = [EpollEvent::ZERO; 64];
     let n = epoll_wait(epfd, &mut events, timeout_ms);
     if crate::rt::trace_sched() {

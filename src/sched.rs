@@ -21,7 +21,6 @@ use crate::stack::Stack;
 use alloc::boxed::Box;
 use alloc::collections::{BTreeMap, VecDeque};
 use alloc::vec::Vec;
-use core::cell::RefCell;
 
 /// How much stack a goroutine gets. Go starts at 8 KiB and grows; rustygo
 /// reserves instead (DESIGN §4), so this is the ceiling, not the cost —
@@ -110,20 +109,29 @@ impl Sched {
     }
 }
 
-rt_global! {
-    static SCHED: RefCell<Option<Sched>> = RefCell::new(None);
+// The goroutine table and its run queue: one for the program, not one per
+// thread (`src/tls.rs`). That is the point of the thing — a goroutine any
+// thread may pick up has to be recorded somewhere every thread can see — and
+// it is also why the lock below exists at all.
+rt_shared! {
+    static SCHED: Option<Sched> = None;
 }
 
-/// Runs `body` with the scheduler borrowed, creating it on first use.
+// SAFETY: a goroutine is a stack, a saved stack pointer, and Go values. None
+// of it belongs to the thread that created it: handing a goroutine from one
+// thread to another is exactly what the scheduler is for. The Go values are
+// the program's own, shared between goroutines by Go's rules rather than by
+// Rust's, which is the position DESIGN §2 takes and §13 question 6 leaves
+// open — a racy load would be a race whichever thread it came from.
+unsafe impl Send for G {}
+
+/// Runs `body` with the scheduler locked, creating it on first use.
 ///
-/// The borrow never spans a context switch: every caller takes what it needs,
-/// drops the borrow, and only then switches. A switch with the borrow held
-/// would hand the other goroutine a scheduler it cannot touch.
+/// The lock never spans a context switch: every caller takes what it needs,
+/// releases it, and only then switches. Holding it across a switch would hand
+/// the next goroutine a scheduler it cannot take.
 fn with_sched<R>(body: impl FnOnce(&mut Sched) -> R) -> R {
-    SCHED.with(|s| {
-        let mut slot = s.borrow_mut();
-        body(slot.get_or_insert_with(Sched::new))
-    })
+    SCHED.with(|slot| body(slot.get_or_insert_with(Sched::new)))
 }
 
 /// Whether the program has started more than the goroutine it was born with.
@@ -131,9 +139,8 @@ fn with_sched<R>(body: impl FnOnce(&mut Sched) -> R) -> R {
 /// Everything below is written for many goroutines, but a program that never
 /// says `go` should not pay for any of it.
 pub fn concurrent() -> bool {
-    SCHED.with(|s| {
-        s.borrow()
-            .as_ref()
+    SCHED.with(|slot| {
+        slot.as_ref()
             .is_some_and(|sched| sched.gs.len() > 1 || !sched.reap.is_empty())
     })
 }
@@ -448,10 +455,12 @@ fn put_thread_state(s: Saved) {
 /// collector walks directly; a parked goroutine's are on the chain saved
 /// when it switched away, and its stack is untouched until it resumes.
 pub(crate) fn trace_parked_roots(t: &mut crate::trace::Tracer<'_>) {
-    // The collector runs with the scheduler untouched, so this borrow cannot
-    // clash with one held across a switch — there are none.
-    SCHED.with(|s| {
-        let Ok(slot) = s.try_borrow() else { return };
+    // Taken while the heap's own lock is held, which is the one place the two
+    // are nested and therefore fixes their order: heap, then scheduler. It is
+    // safe to wait for because nothing on the other side allocates — the
+    // scheduler's critical sections move words and queue ids, and the Go heap
+    // is never touched under them.
+    SCHED.with(|slot| {
         let Some(sched) = slot.as_ref() else { return };
         for (id, g) in sched.gs.iter().enumerate() {
             let Some(g) = g else { continue };
@@ -477,8 +486,12 @@ pub(crate) fn trace_parked_roots(t: &mut crate::trace::Tracer<'_>) {
 // Goroutines parked until a moment on the monotonic clock: `time.Sleep`, and
 // the timer goroutine waiting for its next timer. The scheduler wakes them,
 // and their deadlines bound how long it may sleep.
-rt_global! {
-    static SLEEPERS: RefCell<Vec<(i64, Gid)>> = RefCell::new(Vec::new());
+//
+// Shared, like the run queue: whichever thread finds nothing to run is the one
+// that has to know when the earliest sleeper is due, and it is not necessarily
+// the thread that put it there.
+rt_shared! {
+    static SLEEPERS: Vec<(i64, Gid)> = Vec::new();
 }
 
 /// Parks the running goroutine until the monotonic clock reaches `deadline`.
@@ -491,14 +504,14 @@ pub fn sleep_until(deadline: i64) {
         return;
     }
     let me = current();
-    SLEEPERS.with(|s| s.borrow_mut().push((deadline, me)));
+    SLEEPERS.with(|s| s.push((deadline, me)));
     park();
-    SLEEPERS.with(|s| s.borrow_mut().retain(|&(_, g)| g != me));
+    SLEEPERS.with(|s| s.retain(|&(_, g)| g != me));
 }
 
 /// The earliest deadline anything is waiting for, if any.
 fn next_deadline() -> Option<i64> {
-    SLEEPERS.with(|s| s.borrow().iter().map(|&(d, _)| d).min())
+    SLEEPERS.with(|s| s.iter().map(|&(d, _)| d).min())
 }
 
 /// Readies every goroutine whose deadline has passed, and says whether any
@@ -506,8 +519,7 @@ fn next_deadline() -> Option<i64> {
 fn wake_expired() -> bool {
     let now = crate::rt::nanotime();
     let due: Vec<Gid> = SLEEPERS.with(|s| {
-        s.borrow()
-            .iter()
+        s.iter()
             .filter(|&&(d, _)| d <= now)
             .map(|&(_, g)| g)
             .collect()
@@ -527,8 +539,11 @@ fn wake_expired() -> bool {
 // in the number of wakes. Two things about one shared address therefore have
 // to be cheap: waking the goroutines at it, and *one* goroutine leaving it,
 // which is what a `select` does to every case it did not take.
-rt_global! {
-    static WAITERS: RefCell<BTreeMap<usize, Queue>> = RefCell::new(BTreeMap::new());
+// Shared for the same reason, and the reason it is a table rather than a field
+// on each goroutine: a wake names an address, not a goroutine, and the thread
+// that wakes it is rarely the thread that will run it.
+rt_shared! {
+    static WAITERS: BTreeMap<usize, Queue> = BTreeMap::new();
 }
 
 /// The goroutines waiting at one address, oldest first.
@@ -591,13 +606,12 @@ impl Queue {
 
 /// Records that `g` is waiting at `addr`.
 fn enqueue(addr: usize, g: Gid) {
-    WAITERS.with(|w| w.borrow_mut().entry(addr).or_default().push(g));
+    WAITERS.with(|w| w.entry(addr).or_default().push(g));
 }
 
 /// Takes `g` off `addr`, if it is still there.
 fn dequeue(addr: usize, g: Gid) {
     WAITERS.with(|w| {
-        let mut w = w.borrow_mut();
         if let Some(q) = w.get_mut(&addr) {
             q.remove(g);
             if q.is_empty() {
@@ -630,7 +644,6 @@ pub fn park_on(addr: usize) {
 /// another goroutine got to first.
 pub fn wake_all(addr: usize) {
     let woken = WAITERS.with(|w| {
-        let mut w = w.borrow_mut();
         let mut woken = Vec::new();
         if let Some(q) = w.get_mut(&addr) {
             while let Some(g) = q.pop() {
@@ -648,7 +661,6 @@ pub fn wake_all(addr: usize) {
 /// Readies the goroutine that has waited longest on `addr`, if any.
 pub fn wake_one(addr: usize) {
     let waiter = WAITERS.with(|w| {
-        let mut w = w.borrow_mut();
         let q = w.get_mut(&addr)?;
         let g = q.pop();
         if q.is_empty() {
@@ -685,6 +697,11 @@ pub fn park_on_any(addrs: &[usize]) {
 
 // Which ready case a `select` takes. Go picks uniformly at random, so that a
 // case cannot be starved by an earlier one that is always ready.
+// Per thread, because nothing about it has to be shared: each thread needs
+// only that its own choices are not all the same one, and a sequence per
+// thread is both cheaper and no less random than one behind a lock. Two
+// threads starting from the same seed is not a problem either — they are
+// choosing among different `select`s.
 rt_global! {
     static SEED: core::cell::Cell<u64> = core::cell::Cell::new(0x2545F4914F6CDD1D);
 }
