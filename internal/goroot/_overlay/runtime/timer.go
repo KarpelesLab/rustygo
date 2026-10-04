@@ -26,6 +26,7 @@ type timeTimer struct {
 	arg    any
 	seq    uintptr
 	active bool
+	queued bool // in the timers list, whether or not it is active
 }
 
 var (
@@ -33,6 +34,10 @@ var (
 	timerLoopOn bool
 	timerSema   uint32
 )
+
+// yieldIfReady gives the processor to another goroutine if one is ready, and
+// is the runtime's (src/sched.rs).
+func yieldIfReady()
 
 // wakeTimerLoop tells the timer goroutine that the list has changed.
 func wakeTimerLoop() {
@@ -55,8 +60,17 @@ func timerLoop() {
 			}
 			if t.when <= now {
 				f, arg, seq := t.f, t.arg, t.seq
+				// How late the firing is. time.sendTime subtracts it from the
+				// current time to send the moment the tick was *due*, so that
+				// a receiver that was slow to arrive still sees evenly spaced
+				// ticks rather than the times this loop got round to them.
+				delay := now - t.when
 				if t.period > 0 {
-					t.when = now + t.period
+					// Whole periods on from the time it was due, which is how
+					// gc keeps a ticker's phase: adding the period to `now`
+					// instead would let every late tick push the next one
+					// later still.
+					t.when += t.period * (1 + delay/t.period)
 					if t.when < next || next == 0 {
 						next = t.when
 					}
@@ -65,7 +79,7 @@ func timerLoop() {
 				}
 				// A timer's function sends on a channel, which may run other
 				// goroutines, so the list is read again from the top after it.
-				f(arg, seq, 0)
+				f(arg, seq, delay)
 				now = nanotime()
 				continue
 			}
@@ -73,11 +87,14 @@ func timerLoop() {
 				next = t.when
 			}
 		}
-		// Drop the timers that will never fire again.
+		// Drop the timers that will never fire again, and let a reset put one
+		// back.
 		live := timers[:0]
 		for _, t := range timers {
 			if t.active {
 				live = append(live, t)
+			} else {
+				t.queued = false
 			}
 		}
 		clear(timers[len(live):])
@@ -89,6 +106,13 @@ func timerLoop() {
 			// deadlock rather than a wait.
 			semacquire(&timerSema)
 		} else {
+			// A period short enough that the next firing is already due would
+			// otherwise spin here for ever: sleepUntil returns at once when the
+			// deadline has passed, and nothing else in this loop waits. A
+			// one-nanosecond ticker is the extreme case, and time's own tests
+			// make one — then wait to receive from it, which only happens if
+			// this goroutine gives the receiver a turn.
+			yieldIfReady()
 			sleepUntil(next)
 		}
 	}
@@ -102,6 +126,7 @@ func time_newTimer(when, period int64, f func(arg any, seq uintptr, delay int64)
 		f:      f,
 		arg:    arg,
 		active: true,
+		queued: true,
 		init:   true,
 	}
 	timers = append(timers, t)
@@ -122,7 +147,12 @@ func time_resetTimer(t *timeTimer, when, period int64) bool {
 	t.when = when
 	t.period = period
 	t.active = true
-	if !was {
+	// A timer the loop has already dropped has to go back in; one it has not
+	// got round to dropping is still there, and appending it again would leave
+	// two entries for one timer and grow the list for ever under a timer that
+	// is reset in a loop.
+	if !t.queued {
+		t.queued = true
 		timers = append(timers, t)
 	}
 	wakeTimerLoop()
