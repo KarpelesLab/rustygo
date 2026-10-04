@@ -282,7 +282,19 @@ func pollSetDeadline(ctx uintptr, at int64, mode int)
 
 //go:linkname poll_runtime_pollSetDeadline internal/poll.runtime_pollSetDeadline
 func poll_runtime_pollSetDeadline(ctx uintptr, d int64, mode int) {
-	pollSetDeadline(ctx, d, mode)
+	// What internal/poll hands over is how long from now, not when: zero for
+	// no deadline at all, and a negative value for one that has already
+	// passed. The poller wants the moment, so the sum is made here, as gc's
+	// runtime makes it. Getting this wrong is not obvious from a test that
+	// only asks whether the deadline fired — it did, immediately, because a
+	// duration read as a moment is a moment just after the process started.
+	at := d
+	if d > 0 {
+		if at = nanotime() + d; at <= 0 {
+			at = 1<<63 - 1 // so far off it never arrives
+		}
+	}
+	pollSetDeadline(ctx, at, mode)
 }
 
 //go:linkname poll_runtime_pollUnblock internal/poll.runtime_pollUnblock
