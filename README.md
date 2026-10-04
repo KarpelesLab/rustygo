@@ -27,12 +27,15 @@ cgo needed to get there.
 > written for the purpose, with channels, `select`, `sync`, timers and a
 > netpoller under them. The standard library is the Go distribution's own
 > source, compiled: `fmt`, `strings`, `sort`, `os`, `reflect`, `time`, `net`,
-> `os/exec`, and `net/http` as a server *and* a client in one process.
+> `os/exec`, and `net/http` as a server *and* a client in one process, over TLS
+> as well as plain HTTP — `crypto/tls` handshakes with the standard library's
+> own ML-KEM, X25519, ECDSA, SHA-2, SHA-3 and AEAD code, compiled.
 >
 > Not yet: threads — the scheduler runs every goroutine on one of them — and a
 > file and socket layer for anything but Linux, so macOS and Windows compile the
 > language but not the packages that reach the kernel. Nor `encoding/json`,
-> HTTPS end to end, or `rustygo test`. The plan is
+> `rustygo test`, or making a certificate, which marshals through
+> `encoding/asn1` and so wants the half of `reflect` that writes. The plan is
 > [docs/DESIGN.md](docs/DESIGN.md) for the architecture,
 > [docs/RATIONALE.md](docs/RATIONALE.md) for why this shape and not another,
 > and [docs/ROADMAP.md](docs/ROADMAP.md) for the milestones.

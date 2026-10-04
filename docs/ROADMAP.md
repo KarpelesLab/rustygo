@@ -409,6 +409,45 @@ practical — in the affirmative.
   `type R []R`, which `encoding/json`'s tests declare — now has a Rust spelling:
   its place form gets a name of its own, which is what closes the cycle.
 
+**Status (2026-10-04): HTTPS works, both ends, in one process.**
+
+* `testdata/programs/httpstls` is the service tests' HTTPS scenario in its
+  rustygo×rustygo form: a TLS 1.3 handshake, a second request over the same
+  kept-alive connection, a POST whose body the handler reads back, a fresh
+  connection resumed from the ticket the server sealed, a TLS 1.2 handshake,
+  and a last client that trusts nobody and is turned away. Status, protocol,
+  negotiated version, key exchange, the peer certificate's subject and every
+  body match gc's, byte for byte, under GC torture as well as normally.
+* **Nothing in the crypto packages had to be fixed to get there**, which was
+  not the expectation. The handshake agrees X25519MLKEM768, so ML-KEM, SHA-3,
+  X25519, P-256, ECDSA, SHA-2, HKDF and ChaCha20-Poly1305 all run — the whole
+  FIPS 140 module under `crypto/internal/fips140*`, as Go ships it. What
+  carried it was work already done: the `purego` build tag, which takes the
+  portable Go path in every package that has one; the redirects from the
+  assembly that has no such path; the indicator and bypass flags in the runtime
+  overlay; constant tables as static data, P-256's 88 KB of precomputed
+  multiples among them; and `unsafe.Pointer` reinterpretation, which SHA-3 and
+  P-256 both use to read a byte array as words.
+* The one thing the program cannot do is make its own certificate.
+  `x509.CreateCertificate` marshals through `encoding/asn1`, which reaches
+  `reflect.New` for a field with a `default:` tag — reflection's write half,
+  which is landing with `encoding/json`. So the certificate and its key are
+  fixed literals for now, and parsing them is the real thing:
+  `crypto/x509`'s parser is written on `cryptobyte` and needs no reflection at
+  all.
+* **The cipher suite rustygo picks is not gc's**, and that is correct rather
+  than wrong: `internal/cpu` reports no processor features, so `crypto/tls`
+  sees no AES hardware and prefers ChaCha20-Poly1305 where gc prefers
+  AES-128-GCM. Nothing is weaker for it and nothing fails to interoperate — a
+  suite is negotiated, not assumed — but the two builds do not print the same
+  name, so the differential program does not print it at all. A Rust
+  implementation of AES behind `internal/cpu` (M6) is what would make the two
+  agree.
+* A TLS handshake under GC torture takes half a minute, because every
+  allocation traces P-256's tables and ML-KEM's state, so the differential
+  harness's run cap is ten minutes under torture and the usual thirty seconds
+  otherwise.
+
 **Status (2026-09-29): `net/http` works, client and server, in one process.**
 
 * Go's own `net` package runs: a listener, an accepted connection, a dial,
