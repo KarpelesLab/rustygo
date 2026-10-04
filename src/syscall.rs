@@ -71,6 +71,46 @@ mod nr {
     pub const WAITID: u64 = 95;
 }
 
+/// How many system calls one goroutine may make before the others get a turn.
+///
+/// gc takes the processor away from a goroutine that will not give it up; this
+/// compiler emits no preemption checks, so a goroutine yields only where it
+/// waits for something. A loop that does nothing but make system calls — a
+/// test that opens and closes a file as fast as it can while another goroutine
+/// tries to close the directory under it is one of os's own — then never lets
+/// anything else run at all. A system call is the one place such a loop is
+/// certain to pass through, so it is where the turn is taken. The count is high
+/// enough that ordinary I/O does not pay for it and low enough that nothing
+/// waits long.
+#[cfg(all(target_os = "linux", feature = "std"))]
+const CALLS_PER_TURN: u32 = 128;
+
+#[cfg(all(target_os = "linux", feature = "std"))]
+static CALLS: core::sync::atomic::AtomicU32 = core::sync::atomic::AtomicU32::new(0);
+
+/// Gives the others a turn, every so often.
+///
+/// This must happen *after* the call and never before or during it. A pointer
+/// argument reaches here as a `uintptr`, and the Go frame that made it has no
+/// further use for the pointer it came from, so nothing roots the object any
+/// more: `openat`'s path is a byte slice whose only reference died in the
+/// conversion. Letting another goroutine run while the kernel still holds that
+/// address means the collector may take the object first, and the kernel then
+/// reads whatever replaced it — `open` of a file that is certainly there coming
+/// back ENOENT is what that looks like. (gc keeps such a pointer alive for the
+/// duration of the call, which is a rule this compiler's liveness does not
+/// model yet.) Once the call has returned the kernel is done with the
+/// addresses, and anything the Go code still needs is rooted by the use it is
+/// about to make of it.
+#[cfg(all(target_os = "linux", feature = "std"))]
+fn take_turn() {
+    use core::sync::atomic::Ordering;
+    if CALLS.fetch_add(1, Ordering::Relaxed) >= CALLS_PER_TURN {
+        CALLS.store(0, Ordering::Relaxed);
+        crate::sched::yield_now();
+    }
+}
+
 /// `Syscall6`, with the one call that must not block outright.
 ///
 /// Every goroutine shares one thread (roadmap M2), so a call that blocks the
@@ -117,7 +157,11 @@ pub fn syscall6_go(
             }
             poll_again();
         },
-        _ => syscall6(num, a1, a2, a3, a4, a5, a6),
+        _ => {
+            let r = syscall6(num, a1, a2, a3, a4, a5, a6);
+            take_turn();
+            r
+        }
     }
 }
 

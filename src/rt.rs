@@ -217,6 +217,11 @@ const SA_RESTART: u64 = 0x1000_0000;
 const SIGSET_BYTES: u64 = 8;
 
 /// The handler every enabled signal gets: one atomic `or`, and nothing else.
+///
+/// It runs on whatever stack the interrupted goroutine was using, which is why
+/// it stays this small. gc gives its handler a stack of its own, because gc's
+/// handler walks the goroutine, decides what the signal means and may start a
+/// traceback; this one needs a frame and an immediate.
 #[cfg(target_os = "linux")]
 extern "C" fn catch(sig: i32) {
     if (1..=64).contains(&sig) {
