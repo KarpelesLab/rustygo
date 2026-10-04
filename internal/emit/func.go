@@ -572,10 +572,21 @@ func (f *fnEmitter) callThunk(c *ssa.CallCommon, pos token.Pos, what string) (st
 func (f *fnEmitter) expr(v ssa.Value) string {
 	switch v := v.(type) {
 	case *ssa.Alloc:
+		elem := v.Type().(*types.Pointer).Elem()
 		if name, ok := f.tables[v]; ok {
-			return fmt.Sprintf("Ptr::<%s>::alloc(%s)", f.place(v.Type().(*types.Pointer).Elem(), v.Pos()), name)
+			return fmt.Sprintf("Ptr::<%s>::alloc(%s)", f.place(elem, v.Pos()), name)
 		}
-		return fmt.Sprintf("Ptr::<%s>::alloc(GoValue::zero())", f.place(v.Type().(*types.Pointer).Elem(), v.Pos()))
+		// An array too big to be a local is filled in place. `alloc` takes the
+		// value to store, so the array would be built in this frame first, and
+		// a goroutine's stack is a fixed 8 MB reservation: go/ssa turns
+		// `make([]byte, 40<<20)` into an allocation of a `[41943040]byte`, and
+		// building one of those on the stack walks off the end of it. The line
+		// is drawn at the guard page's size, which no ordinary frame comes
+		// near.
+		if _, ok := elem.Underlying().(*types.Array); ok && f.e.sizeof(elem) > 64<<10 {
+			return fmt.Sprintf("Ptr::<%s>::alloc_zeroed()", f.place(elem, v.Pos()))
+		}
+		return fmt.Sprintf("Ptr::<%s>::alloc(GoValue::zero())", f.place(elem, v.Pos()))
 	case *ssa.BinOp:
 		return f.binop(v)
 	case *ssa.UnOp:

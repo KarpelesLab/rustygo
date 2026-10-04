@@ -130,6 +130,23 @@ impl<P: Place + Trace> Ptr<P> {
     }
 }
 
+impl<P: Place + Trace, const N: usize> Ptr<[P; N]> {
+    /// Zeroed storage for an array, written in place.
+    ///
+    /// [`Ptr::alloc`] takes the value to store, so the caller builds it in its
+    /// own frame and the allocation is a copy of it — and an array value can be
+    /// megabytes. A goroutine's stack is a fixed reservation with a guard page
+    /// below it, so `make([]byte, 40<<20)`, which `crypto/rand`'s own test
+    /// reads into, ran off the end of one. Here the elements go straight into
+    /// the allocation, one at a time, which is what a slice's backing array
+    /// already does — the two are the same memory, laid out the same way.
+    ///
+    /// A safe point, as every allocation is.
+    pub fn alloc_zeroed() -> Self {
+        Ptr(Some(heap::allocate_array::<P>(N).cast()))
+    }
+}
+
 impl<P: Place> Ptr<P> {
     /// `*p`.
     #[inline]
