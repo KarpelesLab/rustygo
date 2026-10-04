@@ -206,18 +206,7 @@ func fatal(s string)
 // nanotime is the monotonic clock, in nanoseconds.
 func nanotime() int64
 
-// internal/godebug asks the runtime to tell it about $GODEBUG and to write
-// to stderr. rustygo has no GODEBUG settings, so the update is the empty
-// one, and nothing counts non-default uses.
-
-//go:linkname godebug_setUpdate internal/godebug.setUpdate
-func godebug_setUpdate(update func(string, string)) { update("", "") }
-
-//go:linkname godebug_registerMetric internal/godebug.registerMetric
-func godebug_registerMetric(name string, read func() uint64) {}
-
-//go:linkname godebug_setNewIncNonDefault internal/godebug.setNewIncNonDefault
-func godebug_setNewIncNonDefault(newIncNonDefault func(string) func()) {}
+// $GODEBUG is in os.go, with the rest of the environment.
 
 // write is what internal/godebug's `//go:linkname write runtime.write`
 // names: standard error, whatever the descriptor says.

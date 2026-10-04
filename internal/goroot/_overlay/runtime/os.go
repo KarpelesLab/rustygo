@@ -50,14 +50,18 @@ func exit(code int32)
 //go:linkname syscall_Exit syscall.Exit
 func syscall_Exit(code int) { exit(int32(code)) }
 
-// Signal handling waits for M3; nothing installs a handler, so there is
-// nothing to ignore or restore.
+// os brackets its probe for the pidfd system calls with these, because a
+// seccomp filter that disallows one answers with SIGSYS, whose default action
+// is to end the process. Ignoring it turns the refusal back into an error the
+// probe can read.
+
+const sigSYS = 31
 
 //go:linkname os_ignoreSIGSYS os.ignoreSIGSYS
-func os_ignoreSIGSYS() {}
+func os_ignoreSIGSYS() { signalIgnore(sigSYS) }
 
 //go:linkname os_restoreSIGSYS os.restoreSIGSYS
-func os_restoreSIGSYS() {}
+func os_restoreSIGSYS() { signalDisable(sigSYS) }
 
 var _ unsafe.Pointer
 
@@ -145,16 +149,95 @@ func syscall_runtime_AfterExec() {}
 // from `os.Environ`, which is the Go side.
 
 //go:linkname syscall_runtimeSetenv syscall.runtimeSetenv
-func syscall_runtimeSetenv(k, v string) {}
+func syscall_runtimeSetenv(k, v string) {
+	if k == "GODEBUG" {
+		godebugSet(v)
+	}
+}
 
 //go:linkname syscall_runtimeUnsetenv syscall.runtimeUnsetenv
-func syscall_runtimeUnsetenv(k string) {}
+func syscall_runtimeUnsetenv(k string) {
+	if k == "GODEBUG" {
+		godebugSet("")
+	}
+}
 
 // Clearenv hands the runtime the map it is about to empty, so that a C
-// environment could be cleared key by key. There is none to clear.
+// environment could be cleared key by key. There is none to clear, but
+// $GODEBUG goes with it.
 
 //go:linkname syscall_runtimeClearenv syscall.runtimeClearenv
-func syscall_runtimeClearenv(env map[string]int) {}
+func syscall_runtimeClearenv(env map[string]int) { godebugSet("") }
+
+// $GODEBUG.
+//
+// Settings are how Go lets a program keep an older behaviour that a release
+// changed, and the standard library reads them through internal/godebug, which
+// asks the runtime for the current value because it cannot import os. It is
+// told once, at its own package initialization, and again every time the
+// variable is set — which is how `t.Setenv("GODEBUG", …)` reaches a package
+// that read the setting long before.
+//
+// The default half of a setting, which gc's linker bakes in from the main
+// module's `//go:debug` directives and its language version, is empty here:
+// rustygo compiles no such directive, so every setting the environment does not
+// name keeps the behaviour its own code calls default.
+
+var (
+	godebugUpdate func(def, env string)
+	godebugEnv    string
+	godebugKnown  bool
+)
+
+//go:linkname godebug_setUpdate internal/godebug.setUpdate
+func godebug_setUpdate(update func(def, env string)) {
+	godebugUpdate = update
+	godebugNotify()
+}
+
+// godebugNotify tells internal/godebug what $GODEBUG says now.
+//
+// The first caller is the one that reads the environment. internal/godebug
+// imports nothing of the runtime — it reaches it by linkname — so nothing
+// orders this package's own initialization before that one's, and a value
+// computed in a `var` here could arrive too late to be told.
+func godebugNotify() {
+	if !godebugKnown {
+		godebugKnown, godebugEnv = true, lookupEnv("GODEBUG")
+	}
+	if godebugUpdate != nil {
+		godebugUpdate("", godebugEnv)
+	}
+}
+
+// godebugSet records a change to the variable, which os.Setenv makes.
+func godebugSet(v string) {
+	godebugKnown, godebugEnv = true, v
+	if godebugUpdate != nil {
+		godebugUpdate("", godebugEnv)
+	}
+}
+
+// lookupEnv reads a variable straight out of the environment the process
+// started with. The runtime cannot ask `os`, and this runs before `syscall` has
+// built its own copy.
+func lookupEnv(key string) string {
+	for _, kv := range envs() {
+		if len(kv) > len(key) && kv[len(key)] == '=' && kv[:len(key)] == key {
+			return kv[len(key)+1:]
+		}
+	}
+	return ""
+}
+
+// Nothing counts a non-default use, and there is no metrics package to forward
+// a registration to.
+
+//go:linkname godebug_registerMetric internal/godebug.registerMetric
+func godebug_registerMetric(name string, read func() uint64) {}
+
+//go:linkname godebug_setNewIncNonDefault internal/godebug.setNewIncNonDefault
+func godebug_setNewIncNonDefault(newIncNonDefault func(string) func()) {}
 
 // AllThreadsSyscall exists because a few pieces of per-thread kernel state —
 // the user and group a thread runs as, most of them — are per-thread and a Go
