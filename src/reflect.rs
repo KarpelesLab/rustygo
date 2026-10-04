@@ -12,8 +12,12 @@
 //! [`Iface::desc_addr`] hands out.
 
 use crate::iface::{Data, Iface, MapOps, TypeDesc};
+use crate::place::{Ptr, Slot};
 use crate::string::GoStr;
 use crate::unsafe_ptr::UPtr;
+use alloc::vec::Vec;
+use core::cell::UnsafeCell;
+use core::sync::atomic::{AtomicBool, Ordering};
 
 /// The descriptor at an address, which only ever comes from `desc_addr`.
 fn desc(p: UPtr) -> &'static TypeDesc {
@@ -296,6 +300,149 @@ pub fn make_slice(d: UPtr, len: i64, cap: i64) -> UPtr {
             t.name
         )),
     }
+}
+
+// Pointer types made at run time: `reflect.New`, `reflect.PointerTo` and
+// `Value.Addr`.
+//
+// Each of those hands back a `*T`, and the emitter writes descriptors only for
+// the types a program mentions (DESIGN §6), so the descriptor for `*T` may
+// simply not exist. A pointer's descriptor barely depends on what it points
+// at, though: it is one word wide, it is compared and hashed as an address,
+// and boxing or zeroing it moves that one word. All that is left is the name,
+// which is `*` and the element's, and a link to the element itself. So the
+// runtime builds the descriptor and leaks it.
+//
+// Identity is the catch. Go says a type is one type — `PointerTo(t) ==
+// PointerTo(t)`, and a value `New` made is assignable to a `*T` variable —
+// and identity here is the descriptor's *address*. So a derived descriptor is
+// built at most once per element type, and the emitted descriptor wins
+// whenever there is one: see [`TypeDesc::ptr`].
+
+/// `reflect.Kind` numbers `Pointer` 22, which is the one kind this module
+/// mints descriptors for.
+const POINTER_KIND: u8 = 22;
+
+/// How a pointer value is boxed: one word that the collector follows.
+///
+/// A `Slot<UPtr>` is the bytes of any `*T` — generated code boxes the same
+/// word as `Slot<Ptr<…>>` — and it traces as the one edge a pointer is, so a
+/// derived descriptor can box and zero a pointer without knowing its type.
+type BoxedPtr = Slot<UPtr>;
+
+/// The pointer descriptors built so far, keyed by the element descriptor's
+/// address.
+///
+/// A spin lock rather than a mutex: the crate is `no_std` at heart, a given
+/// element type is looked up a handful of times and built once ever, and
+/// nothing under the lock can block or touch the Go heap.
+struct PointerCache {
+    busy: AtomicBool,
+    table: UnsafeCell<Vec<(usize, &'static TypeDesc)>>,
+}
+
+// SAFETY: the lock serialises every access to the table, and a descriptor is
+// immutable once it is in there.
+unsafe impl Sync for PointerCache {}
+
+static POINTERS: PointerCache = PointerCache {
+    busy: AtomicBool::new(false),
+    table: UnsafeCell::new(Vec::new()),
+};
+
+impl PointerCache {
+    /// The descriptor for `*T`, built on the first ask and kept for ever.
+    fn get(&self, elem: &'static TypeDesc) -> &'static TypeDesc {
+        let key = elem as *const TypeDesc as usize;
+        while self
+            .busy
+            .compare_exchange_weak(false, true, Ordering::Acquire, Ordering::Relaxed)
+            .is_err()
+        {
+            core::hint::spin_loop();
+        }
+        // SAFETY: the lock is held, so this is the only live reference to the
+        // table, and nothing below re-enters.
+        let table = unsafe { &mut *self.table.get() };
+        let found = match table.iter().find(|(k, _)| *k == key) {
+            Some(&(_, d)) => d,
+            None => {
+                let d = pointer_desc(elem);
+                table.push((key, d));
+                d
+            }
+        };
+        self.busy.store(false, Ordering::Release);
+        found
+    }
+}
+
+/// Builds the descriptor for `*T` from the one for `T`, and leaks it: a type
+/// descriptor is `'static` by the time anything can see it.
+fn pointer_desc(elem: &'static TypeDesc) -> &'static TypeDesc {
+    let name: &'static str = alloc::string::String::leak(alloc::format!("*{}", elem.name));
+    alloc::boxed::Box::leak(alloc::boxed::Box::new(TypeDesc {
+        name,
+        // `short` and `pkg_path` are left empty by the default below, which is
+        // what `*T` is: an unnamed type with no defining package.
+        kind: POINTER_KIND,
+        size: size_of::<UPtr>(),
+        align: align_of::<UPtr>(),
+        equal: Some(|a, b| a.cast::<BoxedPtr>().load() == b.cast::<BoxedPtr>().load()),
+        hash: Some(|d| crate::map::GoKey::go_hash(&d.cast::<BoxedPtr>().load())),
+        // Where an emitted descriptor writes `(*main.T) 0x…`, this one writes
+        // the address alone: `print` is a plain fn pointer, with nowhere to
+        // carry the name. Giving it the descriptor would thread an argument
+        // through every emitted one for the sake of `panic` on a pointer the
+        // program never wrote a type for.
+        print: |d, out| crate::print::format(out, &[crate::print::Arg::Pointer(d.addr())], false),
+        box_value: |p| {
+            // SAFETY: the Go side only boxes from the address of a value of
+            // this type, which is the one word a pointer is.
+            Data::of(Ptr::<BoxedPtr>::alloc(
+                unsafe { p.to_ptr::<BoxedPtr>() }.load(),
+            ))
+        },
+        zero: || Data::of(Ptr::<BoxedPtr>::alloc(UPtr::from_addr(0))),
+        elem: Some(elem),
+        // The method set is the one part of a pointer's descriptor that
+        // depends on what it points at, and nothing here can make a method
+        // wrapper. The emitter names the emitted descriptor in
+        // `TypeDesc::ptr` for every `T` whose `*T` has methods, so a derived
+        // descriptor is only ever reached where the method set is empty
+        // anyway.
+        ..TypeDesc::DEFAULT
+    }))
+}
+
+/// The type `*T`: `reflect.PointerTo`, and the type of what `New` and
+/// `Value.Addr` return.
+pub fn pointer_to(d: UPtr) -> UPtr {
+    let elem = desc(d);
+    let p = match elem.ptr {
+        Some(p) => p,
+        None => POINTERS.get(elem),
+    };
+    UPtr::from_addr(p as *const TypeDesc as usize as u64)
+}
+
+/// A pointer to a fresh zero value of this type, boxed as a `reflect.Value`
+/// holds one: `reflect.New`.
+///
+/// Two allocations — the value, then the box holding the pointer to it — and
+/// the value is rooted across the second, nothing else referring to it yet.
+pub fn new_value(d: UPtr) -> UPtr {
+    let obj = UPtr::from_addr((desc(d).zero)().addr());
+    let frame = crate::gc::Frame::<1>::new();
+    frame.scope(|| {
+        frame.set(0, &obj);
+        box_pointer(obj)
+    })
+}
+
+/// A pointer value boxed the way a `reflect.Value` holds one: `Value.Addr`.
+pub fn box_pointer(p: UPtr) -> UPtr {
+    UPtr::from_addr(Data::of(Ptr::<BoxedPtr>::alloc(p)).addr())
 }
 
 /// An empty map of this type, boxed: `reflect.MakeMap`.

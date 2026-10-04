@@ -937,15 +937,15 @@ func (f *fnEmitter) nilComparison(v *ssa.BinOp) (string, bool) {
 	return "", false
 }
 
-// noteReflectMethod records that the program asks reflection for a method,
-// which is what makes the per-method tables worth generating (iface.go). A
-// program that never asks pays nothing for them.
+// noteReflectUse records that the program asks reflection for something the
+// descriptors only carry when asked: a method, a call through a func value, or
+// a pointer type (iface.go). A program that never asks pays nothing for them.
 //
-// The test is the name, not the package: `reflect.Type` is an interface, and a
-// program may call `Method` through an interface of its own that reflect knows
-// nothing about (test/reflectmethod3.go does exactly that). Being wrong this
-// way round costs generated code and nothing else.
-func (f *fnEmitter) noteReflectMethod(obj types.Object) {
+// For methods the test is the name, not the package: `reflect.Type` is an
+// interface, and a program may call `Method` through an interface of its own
+// that reflect knows nothing about (test/reflectmethod3.go does exactly that).
+// Being wrong this way round costs generated code and nothing else.
+func (f *fnEmitter) noteReflectUse(obj types.Object) {
 	if obj == nil {
 		return
 	}
@@ -953,6 +953,17 @@ func (f *fnEmitter) noteReflectMethod(obj types.Object) {
 	// and the package is worth insisting on: "Call" is a common enough name.
 	if obj.Name() == "Call" && obj.Pkg() != nil && obj.Pkg().Path() == "reflect" {
 		f.e.usesReflectCall = true
+		return
+	}
+	// `New`, `PointerTo` and `Value.Addr` all hand back a `*T`, and a
+	// descriptor for `*T` has to exist and has to be the one the rest of the
+	// program uses. All three are reflect's own, called statically, so the
+	// package is known and these common names cost nothing elsewhere.
+	switch obj.Name() {
+	case "New", "PointerTo", "Addr":
+		if obj.Pkg() != nil && obj.Pkg().Path() == "reflect" && !f.inReflect() {
+			f.e.usesReflectPointer = true
+		}
 		return
 	}
 	// Not `NumMethod`: the count is in every descriptor already, because a
@@ -966,13 +977,19 @@ func (f *fnEmitter) noteReflectMethod(obj types.Object) {
 	}
 	// Not reflect's own plumbing calling itself: `MethodByName` is written in
 	// terms of `Method`, and neither says anything about the program.
-	if f.fn.Pkg != nil && f.fn.Pkg.Pkg.Path() == "reflect" {
+	if f.inReflect() {
 		return
 	}
 	if f.e.res.Prog.ImportedPackage("reflect") == nil {
 		return
 	}
 	f.e.usesReflectMethods = true
+}
+
+// inReflect reports whether the function being emitted is reflect's own code,
+// whose calls into itself say nothing about what the program asks for.
+func (f *fnEmitter) inReflect() bool {
+	return f.fn.Pkg != nil && f.fn.Pkg.Pkg.Path() == "reflect"
 }
 
 // isNilConst reports the literal nil, whatever type it was given.
@@ -1022,14 +1039,14 @@ func (f *fnEmitter) call(v *ssa.Call) string {
 		args[i] = f.val(a)
 	}
 	if c.IsInvoke() {
-		f.noteReflectMethod(c.Method)
+		f.noteReflectUse(c.Method)
 		return f.invoke(c, args, v.Pos())
 	}
 	if b, ok := c.Value.(*ssa.Builtin); ok {
 		return f.builtin(b, c, v.Type(), v.Pos(), args)
 	}
 	if callee := c.StaticCallee(); callee != nil && c.Value == callee {
-		f.noteReflectMethod(callee.Object())
+		f.noteReflectUse(callee.Object())
 		// A finalizer's call has to be written where the types are still
 		// known (finalizer.go).
 		if callee.Pkg != nil && callee.Pkg.Pkg.Path() == "runtime" && callee.Name() == "SetFinalizer" {
@@ -1241,7 +1258,7 @@ func (f *fnEmitter) val(val ssa.Value) string {
 	case *ssa.Function:
 		// A plain function used as a value: its shim takes an environment.
 		// `var h = reflect.Type.Method` is one of these.
-		f.noteReflectMethod(v.Object())
+		f.noteReflectUse(v.Object())
 		return fmt.Sprintf("Func::new(%s as %s, Env::NONE)",
 			f.e.shimPath(v), f.e.types.fnPtr(v.Signature, f.e, v.Pos()))
 	case *ssa.FreeVar:

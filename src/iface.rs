@@ -99,6 +99,16 @@ pub struct TypeDesc {
     pub make_slice: Option<fn(i64, i64) -> Data>,
     /// The element type of a pointer, slice, array, map or channel.
     pub elem: Option<&'static TypeDesc>,
+    /// The descriptor of `*T`, for the types whose pointer the emitter wrote
+    /// one for.
+    ///
+    /// `reflect.New`, `reflect.PointerTo` and `Value.Addr` all hand back a
+    /// `*T`, and the runtime can derive most of a pointer's descriptor on its
+    /// own (`crate::reflect`). What it cannot derive is the method set, and
+    /// Go's type identity says a type has exactly one descriptor — so
+    /// wherever a program already contains `*T`, or `*T` has methods, the
+    /// emitted descriptor is named here and wins.
+    pub ptr: Option<&'static TypeDesc>,
     /// A map's key type.
     pub key: Option<&'static TypeDesc>,
     /// An array's length.
@@ -214,6 +224,7 @@ impl TypeDesc {
         zero: || Data::NONE,
         make_slice: None,
         elem: None,
+        ptr: None,
         key: None,
         len: 0,
         fields: &[],
@@ -229,10 +240,19 @@ impl TypeDesc {
     /// Whether this type's method set holds every method of the interface
     /// type `iface`.
     pub fn implements(&self, iface: &TypeDesc) -> bool {
-        iface
-            .iface_methods
-            .iter()
-            .all(|id| self.method(*id).is_some())
+        iface.iface_methods.iter().all(|id| self.has_method(*id))
+    }
+
+    /// Whether the method set holds the method with this id.
+    ///
+    /// A concrete type answers from its wrapper table and an interface type
+    /// from its own method list, because an interface type has no wrappers —
+    /// its values' methods come from their dynamic types. One interface
+    /// implementing another is a question `reflect.Type.Implements` is asked
+    /// all the same, and `encoding/json` asks it of every field whose type is
+    /// `json.Marshaler`.
+    fn has_method(&self, id: MethodId) -> bool {
+        self.method(id).is_some() || self.iface_methods.binary_search(&id).is_ok()
     }
 
     fn method(&self, id: MethodId) -> Option<ErasedFn> {

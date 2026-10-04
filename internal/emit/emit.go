@@ -54,7 +54,7 @@ type Options struct {
 // variables anything outside initialization reads, so the second can skip
 // building the rest (deadinit.go).
 func Crate(res *load.Result, opt Options) error {
-	first, err := run(res, nil, nil, nil, false, false)
+	first, err := run(res, nil, nil, nil, false, false, false, nil)
 	if err != nil {
 		return err
 	}
@@ -65,7 +65,8 @@ func Crate(res *load.Result, opt Options) error {
 	// The first pass also collects the program's functions, which is what
 	// says who must link a shadow-stack frame for `recover` (recover.go).
 	e, err := run(res, live, framesForRecover(first.emitted), first.bands,
-		first.usesReflectMethods, first.usesReflectCall)
+		first.usesReflectMethods, first.usesReflectCall,
+		first.usesReflectPointer, &first.ptrSeen)
 	if err != nil {
 		return err
 	}
@@ -74,8 +75,9 @@ func Crate(res *load.Result, opt Options) error {
 
 // run emits the whole program into memory. liveGlobals, when set, lets
 // package initializers skip variables nothing else reads; needsFrame, when
-// set, names the functions that link a frame whatever their roots.
-func run(res *load.Result, liveGlobals map[*ssa.Global]bool, needsFrame map[*ssa.Function]bool, placed *bands, reflectMethods, reflectCall bool) (*emitter, error) {
+// set, names the functions that link a frame whatever their roots; ptrDescs,
+// when set, names the pointer types the previous pass wrote descriptors for.
+func run(res *load.Result, liveGlobals map[*ssa.Global]bool, needsFrame map[*ssa.Function]bool, placed *bands, reflectMethods, reflectCall, reflectPointer bool, ptrDescs *typeutil.Map) (*emitter, error) {
 	var mainPkg *ssa.Package
 	for _, p := range res.Pkgs {
 		if p != nil && p.Pkg.Name() == "main" {
@@ -104,6 +106,8 @@ func run(res *load.Result, liveGlobals map[*ssa.Global]bool, needsFrame map[*ssa
 		needsFrame:          needsFrame,
 		needsReflectMethods: reflectMethods,
 		needsReflectCall:    reflectCall,
+		needsReflectPointer: reflectPointer,
+		ptrDescs:            ptrDescs,
 		readGlobals:         map[*ssa.Global]bool{},
 		calledFrom:          map[*ssa.Function]*ssa.Function{},
 		sizes:               types.SizesFor("gc", build.Default.GOARCH),
@@ -190,9 +194,18 @@ type emitter struct {
 	// The same for `reflect.Value.Call`, which needs a closure per func type.
 	needsReflectCall bool
 	usesReflectCall  bool
-	queue            []*ssa.Function
-	types            *typeReg
-	errs             []diag
+	// And for the pointer half — `reflect.New`, `reflect.PointerTo` and
+	// `Value.Addr`, which all hand back a `*T` (iface.go). ptrDescs is the
+	// pointer types the previous pass wrote descriptors for, which is what
+	// says whether `*T` already has one that the rest of the program compares
+	// against; ptrSeen is this pass collecting the same.
+	needsReflectPointer bool
+	usesReflectPointer  bool
+	ptrDescs            *typeutil.Map
+	ptrSeen             typeutil.Map
+	queue               []*ssa.Function
+	types               *typeReg
+	errs                []diag
 }
 
 // diag is one unsupported construct.

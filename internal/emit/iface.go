@@ -314,6 +314,11 @@ func (e *emitter) typeDesc(t types.Type, pos token.Pos) string {
 	band := e.bands.typ(t)
 	path := crateName(band) + "::ty::" + name
 	e.descs.Set(t, path)
+	if _, isPtr := types.Unalias(t).(*types.Pointer); isPtr {
+		// What the next pass consults to decide whether `*T` already has a
+		// descriptor of its own (pointerDesc).
+		e.ptrSeen.Set(t, true)
+	}
 
 	place := e.types.place(t, e, pos)
 	methods := e.methodTable(t, pos)
@@ -363,6 +368,9 @@ func (e *emitter) typeDesc(t types.Type, pos token.Pos) string {
 			fmt.Fprintf(&b, "    call: Some(%s),\n", shim)
 		}
 	}
+	if p := e.pointerDesc(t, pos); p != "" {
+		fmt.Fprintf(&b, "    ptr: Some(&%s),\n", p)
+	}
 	if ifaceMethods != "" {
 		fmt.Fprintf(&b, "    iface_methods: &[%s],\n", ifaceMethods)
 	}
@@ -375,6 +383,45 @@ func (e *emitter) typeDesc(t types.Type, pos token.Pos) string {
 	b.WriteString("    ..TypeDesc::DEFAULT\n};\n")
 	e.types.at(band).WriteString(b.String())
 	return path
+}
+
+// pointerDesc names the descriptor of `*t` for t's own descriptor to point at,
+// or "" to leave the runtime to derive one.
+//
+// `reflect.New`, `reflect.PointerTo` and `Value.Addr` all hand back a `*T`, and
+// the runtime can build most of a pointer's descriptor itself: every pointer is
+// one word, compared and boxed the same way (src/reflect.rs). Two things it
+// cannot. One is `*T`'s method set, which is what decides whether
+// `PointerTo(T).Implements(json.Marshaler)` — the question `encoding/json` asks
+// of every type it encodes. The other is Go's promise that a type has one
+// descriptor: a value `New` made has to be assignable to a `*T` variable, and
+// that test compares descriptor addresses. So the emitted descriptor is named
+// here whenever `*T` has methods, or whenever the program already contains
+// `*T` — which only a whole pass knows, so the previous one is asked.
+//
+// The previous pass is not quite the whole answer. Naming `*T` here generates
+// its method wrappers, which pull in method bodies this pass is the first to
+// emit, and those bodies can mention a pointer type the previous pass never
+// saw. If reflection then asks for that one, it gets a derived descriptor
+// beside the emitted one and the two are not the same type. Closing that would
+// take iterating to a fixed point, which costs a pass for every program that
+// uses `reflect.New`; the shape it needs is unusual enough to wait for a
+// program that hits it.
+func (e *emitter) pointerDesc(t types.Type, pos token.Pos) string {
+	if !e.needsReflectPointer {
+		return ""
+	}
+	if _, isTuple := t.(*types.Tuple); isTuple {
+		// Not a type a program can write: the emitter uses one for multiple
+		// results, and nothing points at it.
+		return ""
+	}
+	pt := types.NewPointer(t)
+	seen := e.descs.At(pt) != nil || (e.ptrDescs != nil && e.ptrDescs.At(pt) != nil)
+	if !seen && types.NewMethodSet(pt).Len() == 0 {
+		return ""
+	}
+	return e.typeDesc(pt, pos)
 }
 
 // descList renders a tuple as a list of descriptor references.

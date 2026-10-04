@@ -375,6 +375,40 @@ work fails too, decision gate 1 says stop.
 * Stdlib build time and a small program's incremental rebuild time are recorded
   (decision gate 3).
 
+**Status (2026-10-04): `encoding/json` passes its own test suite.**
+
+All 104 of the package's tests and every one of their 592 subtests pass, built
+with rustygo and run as `go test` runs them. One test is left out:
+`TestSynctestMarshal` needs `testing/synctest`, which belongs to the scheduler.
+Together with `fmt`, that answers decision gate 2 — whether `reflect` is
+practical — in the affirmative.
+
+* **Pointer types are made at run time.** `reflect.New`, `reflect.PointerTo` and
+  `Value.Addr` all hand back a `*T`, and the emitter writes descriptors only for
+  the types a program mentions. A pointer's descriptor barely depends on what it
+  points at, so the runtime builds it from the element's and leaks it
+  ([DESIGN §6](DESIGN.md#6-reflect-and-type-descriptors)). What it cannot derive
+  — `*T`'s method set, and Go's promise that a type has exactly one descriptor —
+  the emitter supplies, by naming the emitted `*T` in `T`'s own descriptor
+  wherever the program contains that type or `*T` has methods.
+* **Reading an unexported field no longer grants writing it.** A `reflect.Value`
+  now carries gc's two read-only bits, so `CanSet` and `CanInterface` say what
+  Go says. `encoding/json` refuses to allocate an embedded pointer to an
+  unexported struct for exactly that reason, and `fmt` prints such a field
+  structurally rather than through its `String` method, as gc does.
+* `Type.Implements` was answering "no" whenever the receiver was itself an
+  interface type — an interface type has no method wrappers, so its method set
+  has to be read from its own method list. `encoding/json` asks that of every
+  field whose type is `json.Marshaler`, and of `omitzero`'s `IsZero`.
+* `Value.IsZero` over arrays and structs, `Value.Grow`, `Value.FieldByIndex`,
+  `Value.Equal` through an interface on either side, and `DeepEqual` of two nil
+  funcs. `reflect.StructOf` is still out: a struct's descriptor needs a layout
+  and a way for the collector to find the pointers in it, neither of which can
+  be derived from anything.
+* A named type that contains itself with no struct to break the cycle —
+  `type R []R`, which `encoding/json`'s tests declare — now has a Rust spelling:
+  its place form gets a name of its own, which is what closes the cycle.
+
 **Status (2026-09-29): `net/http` works, client and server, in one process.**
 
 * Go's own `net` package runs: a listener, an accepted connection, a dial,

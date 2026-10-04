@@ -10,10 +10,13 @@
 // per-map accessors the emitter generates, because a rustygo map is a hash
 // table rather than memory Go's layout rules describe.
 //
-// This is the read-only half of reflection, which is what `fmt` and
-// `errors.As` need: inspecting values, walking structs, slices and maps, and
-// handing a value back as an interface. Setting values, calling methods and
-// constructing types are not here yet and say so when used.
+// Reading, writing, calling and making values are all here: inspecting a
+// value, walking structs, slices and maps, handing one back as an interface,
+// setting one, calling a method or a func value, and making a pointer, slice
+// or map of a type chosen at run time. Building a *type* out of parts —
+// `StructOf`, `SliceOf`, `MapOf` — is not, and says so when used: a pointer's
+// descriptor can be derived from the one it points at, because every pointer
+// has the same shape, and a struct's cannot.
 package reflect
 
 import (
@@ -247,7 +250,7 @@ func (t rtype) Method(i int) Method {
 	// gc's reflect reports it.
 	var fn Value
 	if p := descMethodExprFunc(t.d, i); p != nil {
-		fn = Value{d, p, false}
+		fn = Value{d: d, p: p}
 	}
 	return Method{
 		Name:    descMethodName(t.d, i),
@@ -402,13 +405,26 @@ func (t rtype) AssignableTo(u Type) bool {
 }
 
 // Value is a Go value, as reflection sees it: its type, the address of the
-// value itself, and whether that address is the value's own storage rather
-// than a copy (gc's flagAddr).
+// value itself, whether that address is the value's own storage rather than a
+// copy (gc's flagAddr), and whether it was reached through an unexported
+// field.
+//
+// Go lets reflection read an unexported field and nothing more: such a value
+// cannot be set and cannot be handed back as an interface. gc keeps two bits
+// for that, and so does this. sticky says the value itself came through an
+// unexported field. embed says it *is* an unexported embedded struct, whose
+// own fields are ordinary values again — which is how `encoding/json` fills in
+// the fields promoted from one while refusing to allocate the struct itself.
 type Value struct {
-	d    unsafe.Pointer
-	p    unsafe.Pointer
-	addr bool
+	d      unsafe.Pointer
+	p      unsafe.Pointer
+	addr   bool
+	sticky bool
+	embed  bool
 }
+
+// ro reports whether the value came through an unexported field, either way.
+func (v Value) ro() bool { return v.sticky || v.embed }
 
 // ValueOf returns a Value for the value in i.
 func ValueOf(i any) Value {
@@ -417,7 +433,7 @@ func ValueOf(i any) Value {
 		return Value{}
 	}
 	// The interface holds a copy, so it is not the variable's own storage.
-	return Value{d, ifaceData(i), false}
+	return Value{d: d, p: ifaceData(i)}
 }
 
 func (v Value) IsValid() bool { return v.d != nil }
@@ -437,7 +453,20 @@ func (v Value) Type() Type {
 }
 
 // Interface returns the value as an interface, copying it out.
+//
+// A value read out of an unexported field cannot leave reflection, because
+// handing it back as an interface is exactly the access Go refuses.
 func (v Value) Interface() any {
+	if v.ro() {
+		panic("reflect.Value.Interface: cannot return value obtained from unexported field or method")
+	}
+	return v.iface()
+}
+
+// iface boxes the value without that check, which is what comparison needs:
+// DeepEqual reads unexported fields, as Go's own `==` does, and only passing
+// one out to the program is forbidden.
+func (v Value) iface() any {
 	if v.d == nil {
 		return nil
 	}
@@ -447,9 +476,9 @@ func (v Value) Interface() any {
 	return makeIface(v.d, descBox(v.d, v.p))
 }
 
-// CanInterface is true for every Value this package produces: it never hands
-// out one obtained through an unexported field.
-func (v Value) CanInterface() bool { return v.d != nil }
+// CanInterface reports whether Interface may be called: not for a value read
+// out of an unexported field, which Go does not let out of reflection.
+func (v Value) CanInterface() bool { return v.d != nil && !v.ro() }
 
 func (v Value) IsNil() bool {
 	switch v.Kind() {
@@ -474,13 +503,31 @@ func (v Value) IsZero() bool {
 	case Uint, Uint8, Uint16, Uint32, Uint64, Uintptr:
 		return v.Uint() == 0
 	case Float32, Float64:
+		// `-0.0` is zero, which is what the comparison says and the bytes do
+		// not: `omitzero` on a float field turns on this distinction.
 		return v.Float() == 0
+	case Complex64, Complex128:
+		return v.Complex() == 0
 	case String:
 		return v.String() == ""
 	case Pointer, UnsafePointer, Func, Map, Slice, Interface, Chan:
 		return v.IsNil()
+	case Array:
+		for i := 0; i < v.Len(); i++ {
+			if !v.Index(i).IsZero() {
+				return false
+			}
+		}
+		return true
+	case Struct:
+		for i := 0; i < v.NumField(); i++ {
+			if !v.Field(i).IsZero() {
+				return false
+			}
+		}
+		return true
 	}
-	return false
+	panic("reflect: IsZero of " + v.Kind().String() + " value")
 }
 
 // The numeric and string readers: a place holds exactly the bytes gc would
@@ -623,7 +670,8 @@ func (v Value) Index(i int) Value {
 		if i < 0 || i >= n {
 			panic("reflect: array index out of range")
 		}
-		return Value{elem, unsafe.Add(v.p, uintptr(i)*uintptr(descSize(elem))), v.addr}
+		return Value{d: elem, p: unsafe.Add(v.p, uintptr(i)*uintptr(descSize(elem))),
+			addr: v.addr, sticky: v.ro()}
 	case Slice:
 		h := (*sliceHeader)(v.p)
 		if i < 0 || i >= h.len {
@@ -631,7 +679,8 @@ func (v Value) Index(i int) Value {
 		}
 		elem := descElem(v.d)
 		// A slice's elements are always its own storage.
-		return Value{elem, unsafe.Add(h.data, uintptr(i)*uintptr(descSize(elem))), true}
+		return Value{d: elem, p: unsafe.Add(h.data, uintptr(i)*uintptr(descSize(elem))),
+			addr: true, sticky: v.ro()}
 	case String:
 		s := *(*string)(v.p)
 		if i < 0 || i >= len(s) {
@@ -651,7 +700,43 @@ func (v Value) Field(i int) Value {
 	if i < 0 || i >= int(descNumField(v.d)) {
 		panic("reflect: struct field index out of range")
 	}
-	return Value{descFieldType(v.d, i), unsafe.Add(v.p, uintptr(descFieldOffset(v.d, i))), v.addr}
+	f := Value{
+		d:    descFieldType(v.d, i),
+		p:    unsafe.Add(v.p, uintptr(descFieldOffset(v.d, i))),
+		addr: v.addr,
+		// Only the sticky bit is inherited: the fields of an unexported embedded
+		// struct are ordinary values, which is what lets `encoding/json` fill in
+		// the ones promoted out of it.
+		sticky: v.sticky,
+	}
+	if descFieldPkgPath(v.d, i) != "" {
+		if descFieldEmbedded(v.d, i) {
+			f.embed = true
+		} else {
+			f.sticky = true
+		}
+	}
+	return f
+}
+
+// FieldByIndex returns the nested field of a struct, following the index
+// `Type.Field` reports. A pointer to an embedded struct along the way is
+// followed, as gc's does.
+func (v Value) FieldByIndex(index []int) Value {
+	if len(index) == 1 {
+		return v.Field(index[0])
+	}
+	v.mustBe(Struct, "FieldByIndex")
+	for i, x := range index {
+		if i > 0 && v.Kind() == Pointer && descKind(descElem(v.d)) == uint8(Struct) {
+			if v.IsNil() {
+				panic("reflect: indirection through nil pointer to embedded struct")
+			}
+			v = v.Elem()
+		}
+		v = v.Field(x)
+	}
+	return v
 }
 
 // NumMethod returns the number of exported methods of v's type.
@@ -675,7 +760,7 @@ func (v Value) Method(i int) Value {
 	if p == nil {
 		panic("reflect: Method on an interface type's value")
 	}
-	return Value{descMethodValueType(v.d, i), p, false}
+	return Value{d: descMethodValueType(v.d, i), p: p, sticky: v.ro()}
 }
 
 // MethodByName returns the named method bound to v, or the zero Value.
@@ -707,10 +792,17 @@ func (v Value) Elem() Value {
 			return Value{}
 		}
 		// What a pointer points at is addressable.
-		return Value{descElem(v.d), p, true}
+		// Both bits carry over: what an unexported embedded pointer points at is
+		// still that struct, whose own fields are readable.
+		return Value{d: descElem(v.d), p: p, addr: true, sticky: v.sticky, embed: v.embed}
 	case Interface:
-		i := *(*any)(v.p)
-		return ValueOf(i)
+		e := ValueOf(*(*any)(v.p))
+		if e.IsValid() {
+			// What was in the interface is a copy, so only the read-only bit
+			// follows it out.
+			e.sticky = v.ro()
+		}
+		return e
 	}
 	panic("reflect: Elem of " + v.Kind().String() + " value")
 }
@@ -728,7 +820,7 @@ func (v Value) MapKeys() []Value {
 		if !ok {
 			return keys
 		}
-		keys = append(keys, Value{keyType, k, false})
+		keys = append(keys, Value{d: keyType, p: k, sticky: v.ro()})
 	}
 }
 
@@ -741,7 +833,7 @@ func (v Value) MapIndex(key Value) Value {
 	if !ok {
 		return Value{}
 	}
-	return Value{descElem(v.d), val, false}
+	return Value{d: descElem(v.d), p: val, sticky: v.ro()}
 }
 
 // MapRange returns an iterator over a map.
@@ -749,7 +841,7 @@ func (v Value) MapRange() *MapIter {
 	if v.Kind() != Map {
 		panic("reflect: MapRange of " + v.Kind().String() + " value")
 	}
-	return &MapIter{d: v.d, it: mapIter(v.d, v.p)}
+	return &MapIter{d: v.d, it: mapIter(v.d, v.p), ro: v.ro()}
 }
 
 // MapIter walks a map, one entry at a time.
@@ -759,6 +851,9 @@ type MapIter struct {
 	k  unsafe.Pointer
 	v  unsafe.Pointer
 	ok bool
+	// Whether the map came through an unexported field, which its keys and
+	// values inherit.
+	ro bool
 }
 
 func (it *MapIter) Next() bool {
@@ -770,14 +865,14 @@ func (it *MapIter) Key() Value {
 	if !it.ok {
 		panic("reflect: MapIter.Key called before Next")
 	}
-	return Value{descKey(it.d), it.k, false}
+	return Value{d: descKey(it.d), p: it.k, sticky: it.ro}
 }
 
 func (it *MapIter) Value() Value {
 	if !it.ok {
 		panic("reflect: MapIter.Value called before Next")
 	}
-	return Value{descElem(it.d), it.v, false}
+	return Value{d: descElem(it.d), p: it.v, sticky: it.ro}
 }
 
 // The setting half. A value can be written when the Value refers to the
@@ -787,13 +882,16 @@ func (it *MapIter) Value() Value {
 
 func (v Value) CanAddr() bool { return v.addr }
 
-func (v Value) CanSet() bool { return v.addr }
+func (v Value) CanSet() bool { return v.addr && !v.ro() }
 
+// Addr returns a pointer to v, which must be addressable. The pointer itself
+// is not: gc's Addr does not hand back a variable either.
 func (v Value) Addr() Value {
 	if !v.addr {
 		panic("reflect.Value.Addr of unaddressable value")
 	}
-	panic(unsupported("Value.Addr"))
+	d := descPtrTo(v.d)
+	return Value{d: d, p: boxPointer(v.p), sticky: v.sticky, embed: v.embed}
 }
 
 // Set assigns x to v, which must have the same type, or be assignable to an
@@ -891,11 +989,16 @@ func (v Value) SetString(x string) {
 // Equal reports whether v and u are equal, which for two values of one
 // comparable type is what `==` would say.
 func (v Value) Equal(u Value) bool {
+	// An interface is compared by what it holds, on either side: `decode.go`
+	// asks whether the value inside an `any` is the pointer it came from.
+	if v.Kind() == Interface {
+		v = v.Elem()
+	}
+	if u.Kind() == Interface {
+		u = u.Elem()
+	}
 	if !v.IsValid() || !u.IsValid() {
 		return v.IsValid() == u.IsValid()
-	}
-	if v.Kind() == Interface {
-		return *(*any)(v.p) == *(*any)(u.p)
 	}
 	if v.d != u.d {
 		return false
@@ -984,6 +1087,9 @@ func (v Value) mustBeAssignable(method string) {
 	if !v.IsValid() {
 		panic("reflect: " + method + " on the zero Value")
 	}
+	if v.ro() {
+		panic("reflect: reflect.Value." + method + " using value obtained using unexported field")
+	}
 	if !v.addr {
 		panic("reflect: reflect.Value." + method + " using unaddressable value")
 	}
@@ -1025,8 +1131,8 @@ func Swapper(slice any) func(i, j int) {
 	}
 }
 
-// Constructing types and values, and calling a method through reflection
-// rather than through a func value, are not here yet.
+// Constructing values, and calling a function through reflection rather than
+// through a func value.
 
 // Call calls the function v with the arguments in, and returns its results.
 //
@@ -1061,11 +1167,50 @@ func (v Value) Call(in []Value) []Value {
 	results := descCall(v.d, v.p, args)
 	out := make([]Value, len(results))
 	for i := range results {
-		out[i] = Value{descOut(v.d, i), results[i], false}
+		out[i] = Value{d: descOut(v.d, i), p: results[i]}
 	}
 	return out
 }
-func (v Value) Grow(n int) { panic(unsupported("Value.Grow")) }
+
+// Grow makes room in a slice for n more elements, reallocating its backing
+// array if it has to, as `append` would.
+func (v Value) Grow(n int) {
+	v.mustBeAssignable("Grow")
+	v.mustBe(Slice, "Grow")
+	if n < 0 {
+		panic("reflect.Value.Grow: negative len")
+	}
+	h := (*sliceHeader)(v.p)
+	need := h.len + n
+	if need < 0 {
+		panic("reflect.Value.Grow: slice overflow")
+	}
+	if need <= h.cap {
+		return
+	}
+	// Go's growth, the rule the runtime's own append uses (src/slice.rs):
+	// double while small, then widen by about a quarter. Growing by exactly
+	// what was asked would make `encoding/json`, which calls Grow(1) per
+	// element, quadratic.
+	newcap := h.cap
+	if newcap == 0 {
+		newcap = need
+	}
+	for newcap < need {
+		if newcap < 256 {
+			newcap *= 2
+		} else {
+			newcap += newcap / 4
+		}
+	}
+	// The element size is read first: between the new array and the store
+	// below there must be no allocation, because until the store nothing the
+	// collector can see refers to the new array.
+	width := int(descSize(descElem(v.d)))
+	grown := (*sliceHeader)(descMakeSlice(v.d, h.len, newcap))
+	copyBytes(grown.data, h.data, h.len*width)
+	h.data, h.cap = grown.data, grown.cap
+}
 
 // MakeSlice makes a slice of a type the program mentions, so the slice's own
 // `make` is there to make it with. The result is not addressable, as gc's is
@@ -1081,12 +1226,24 @@ func MakeSlice(typ Type, len, cap int) Value {
 	if cap < len {
 		panic("reflect.MakeSlice: len > cap")
 	}
-	return Value{rt.d, descMakeSlice(rt.d, len, cap), false}
+	return Value{d: rt.d, p: descMakeSlice(rt.d, len, cap)}
 }
 
-// PointerTo would need a type descriptor rustygo's emitter did not write, the
-// program never having mentioned the type (DESIGN §6).
-func PointerTo(t Type) Type { panic(unsupported("PointerTo")) }
+// PointerTo returns the type *t.
+//
+// The descriptor for `*T` is either one the emitter wrote, because the program
+// contains the type, or one the runtime builds and keeps: every pointer has the
+// same shape, so there is little in it that depends on T (src/reflect.rs).
+func PointerTo(t Type) Type {
+	rt, ok := t.(rtype)
+	if !ok {
+		panic("reflect: PointerTo of a nil Type")
+	}
+	return rtype{descPtrTo(rt.d)}
+}
+
+// PtrTo is the old name of PointerTo.
+func PtrTo(t Type) Type { return PointerTo(t) }
 
 // MakeMap makes an empty map of a type the program does mention, so the map's
 // own accessors are there to make it with.
@@ -1098,12 +1255,29 @@ func MakeMap(t Type) Value {
 	m := mapMake(rt.d)
 	// The Value refers to a box holding the map, which is the map's own
 	// storage as far as anything here is concerned.
-	return Value{rt.d, m, true}
+	return Value{d: rt.d, p: m, addr: true}
 }
 
-// New would hand back a `*T`, and the descriptor for that pointer type is one
-// the program never mentioned, so the emitter never wrote it (DESIGN §6).
-func New(typ Type) Value { panic(unsupported("New")) }
+// New returns a Value holding a pointer to a new zero value of typ.
+//
+// The pointer is not itself addressable, as gc's is not; what it points at is.
+func New(typ Type) Value {
+	rt, ok := typ.(rtype)
+	if !ok {
+		panic("reflect: New(nil)")
+	}
+	// The type first: deriving a descriptor allocates outside the Go heap, so
+	// it cannot collect the value descNew is about to make.
+	d := descPtrTo(rt.d)
+	return Value{d: d, p: descNew(rt.d)}
+}
+
+// StructOf would need a descriptor assembled field by field at run time: a
+// layout, a way for the collector to find the pointers among those fields, and
+// comparison, boxing and zeroing over bytes whose shape is only known then.
+// Pointer types do without all of that because every pointer has one shape
+// (src/reflect.rs); a struct does not.
+func StructOf(fields []StructField) Type { panic(unsupported("StructOf")) }
 
 // Zero returns the zero value of a type: all-zero bytes, in an object of the
 // right size that knows how to trace itself. The result is not addressable,
@@ -1113,7 +1287,7 @@ func Zero(typ Type) Value {
 	if !ok {
 		panic("reflect.Zero of a nil Type")
 	}
-	return Value{rt.d, descZero(rt.d), false}
+	return Value{d: rt.d, p: descZero(rt.d)}
 }
 
 // DeepEqual compares two values the way gc's does, for the kinds this
@@ -1168,6 +1342,10 @@ func deepValueEqual(x, y Value) bool {
 			}
 		}
 		return true
+	case Func:
+		// Go compares two func values only against nil, and DeepEqual says so:
+		// two nil funcs are equal and nothing else is.
+		return x.IsNil() && y.IsNil()
 	case Map:
 		if x.IsNil() != y.IsNil() || x.Len() != y.Len() {
 			return false
@@ -1183,7 +1361,7 @@ func deepValueEqual(x, y Value) bool {
 		if !x.Type().Comparable() {
 			return false
 		}
-		return x.Interface() == y.Interface()
+		return x.iface() == y.iface()
 	}
 }
 
@@ -1254,6 +1432,9 @@ func descCall(d, f unsafe.Pointer, args []unsafe.Pointer) []unsafe.Pointer
 func descImplements(d, iface unsafe.Pointer) bool
 func descZero(d unsafe.Pointer) unsafe.Pointer
 func descMakeSlice(d unsafe.Pointer, len, cap int) unsafe.Pointer
+func descPtrTo(d unsafe.Pointer) unsafe.Pointer
+func descNew(d unsafe.Pointer) unsafe.Pointer
+func boxPointer(p unsafe.Pointer) unsafe.Pointer
 func descNumIn(d unsafe.Pointer) int64
 func descIn(d unsafe.Pointer, i int) unsafe.Pointer
 func descNumOut(d unsafe.Pointer) int64
@@ -1372,11 +1553,12 @@ func (v Value) OverflowFloat(x float64) bool {
 	panic("reflect: OverflowFloat of " + v.Kind().String() + " value")
 }
 
-// The rest of reflect needs type information rustygo does not have yet, or a
-// call shim generated per signature, and says so rather than guessing:
+// The rest of reflect needs more than the descriptors carry, and says so
+// rather than guessing:
 //
-//   - Append and MakeSlice must allocate a slice of a type chosen at run
-//     time, which needs the descriptor to carry how to make one;
+//   - Append and AppendSlice have to hand back a slice that shares the
+//     original's array whenever there is room in it, as `append` does, which
+//     means boxing a slice header the runtime did not just allocate;
 //   - Convert and ConvertibleTo need every conversion Go's rules allow,
 //     between types the program may never have converted itself;
 //   - MakeFunc needs a trampoline for a signature the program may not

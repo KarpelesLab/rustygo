@@ -315,6 +315,7 @@ preemption, `runtime.Goexit`, and `testing/synctest`.
   signature.
 * **Known gap:** `reflect.StructOf` / `MapOf` and other runtime type
   construction need heap-allocated descriptors; possible, but deferred.
+  `PointerTo` is the exception that turned out to be easy — see below.
 
 **As built (M3).** `reflect` is rustygo's own package, swapped in through the
 overlay (§8), and it is ordinary Go: a `Type` is a descriptor address, a
@@ -337,8 +338,38 @@ fills them in:
 
 That is enough for `fmt` to compile and run unmodified — the whole of
 `Printf`'s `%v`/`%+v`/`%#v`/`%T`, `Stringer`, `error` and `%w` wrapping — and
-for `reflect.DeepEqual` and `Swapper`. `Value.Call`, `New`, `Zero`,
-`MakeSlice` and `Type.Method`/`Implements` are not in yet.
+for `reflect.DeepEqual` and `Swapper`. `Zero`, `MakeSlice`, `MakeMap`,
+`Type.Method`/`Implements` and `Value.Call` followed, each one a question the
+descriptor answers or a closure generated per type.
+
+**Pointer types made at run time.** `reflect.New`, `reflect.PointerTo` and
+`Value.Addr` all hand back a `*T`, and the emitter writes descriptors only for
+the types a program mentions — so the one for `*T` may not exist. A pointer's
+descriptor hardly depends on what it points at, though: it is one word, it is
+compared and hashed as an address, and boxing or zeroing it moves that one
+word. So the runtime builds it from the element's descriptor and leaks it,
+keyed by the element so that a type is built once.
+
+Two things it cannot derive, and both come from the emitter. `*T`'s **method
+set**, which is what `PointerTo(t).Implements(json.Marshaler)` asks of every
+type `encoding/json` encodes. And **type identity**: Go says a type is one
+type, and identity here is the descriptor's *address*, so a value `New` made
+has to carry the same descriptor a `*T` variable in the program does. A
+descriptor therefore names its own `*T` (`TypeDesc::ptr`) wherever the program
+already contains that type or `*T` has methods, and only where neither holds —
+a pointer type nothing in the program writes, whose method set is empty — does
+the runtime derive one.
+
+**Reading an unexported field is not writing it.** A `Value` carries gc's two
+read-only bits as well: `sticky`, which says the value came through an
+unexported field, and `embed`, which says it *is* an unexported embedded
+struct, whose own fields are ordinary values again. `CanSet` and `CanInterface`
+are what they are made of, and `encoding/json` depends on both — it reads the
+fields promoted out of an unexported embedded struct and refuses to allocate a
+pointer to one.
+
+That is enough for `encoding/json`: all 104 of its tests and their 592 subtests
+pass, `TestSynctestMarshal` aside, which needs `testing/synctest`.
 
 ## 7. `unsafe.Pointer` and package `unsafe`
 
