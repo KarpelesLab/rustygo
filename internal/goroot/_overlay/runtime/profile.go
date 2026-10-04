@@ -67,31 +67,42 @@ func pprof_expandFinalInlineFrame(stk []uintptr) []uintptr { return stk }
 //go:linkname pprof_goroutineleakcount runtime/pprof.runtime_goroutineleakcount
 func pprof_goroutineleakcount() int { return 0 }
 
-// Signals. Nothing delivers one, so nothing is ever received: the goroutine
-// waiting for one waits for ever, which is what it does under gc in a process
-// that is sent no signals.
+// Signals.
+//
+// `os/signal` asks the runtime to start and stop delivering each signal it is
+// interested in, and keeps one goroutine inside signal_recv waiting for the
+// next one. The runtime installs a handler and queues what arrives (src/rt.rs);
+// these are the names the standard library reaches it by.
+//
+// gc catches nearly every signal from the start and decides what to do with
+// one when it comes. rustygo only catches what a program asked for, so a
+// program that asks for nothing is still killed by SIGINT the way any other
+// process is — which is what gc does too for a signal nobody wanted.
+
+func signalEnable(s uint32)
+func signalDisable(s uint32)
+func signalIgnore(s uint32)
+func signalIgnored(s uint32) bool
+func signalRecv() uint32
+func signalWaitIdle()
 
 //go:linkname signal_enable os/signal.signal_enable
-func signal_enable(s uint32) {}
+func signal_enable(s uint32) { signalEnable(s) }
 
 //go:linkname signal_disable os/signal.signal_disable
-func signal_disable(s uint32) {}
+func signal_disable(s uint32) { signalDisable(s) }
 
 //go:linkname signal_ignore os/signal.signal_ignore
-func signal_ignore(s uint32) {}
+func signal_ignore(s uint32) { signalIgnore(s) }
 
 //go:linkname signal_ignored os/signal.signal_ignored
-func signal_ignored(s uint32) bool { return true }
+func signal_ignored(s uint32) bool { return signalIgnored(s) }
 
 //go:linkname signal_recv os/signal.signal_recv
-func signal_recv() uint32 {
-	for {
-		semapark(0)
-	}
-}
+func signal_recv() uint32 { return signalRecv() }
 
 //go:linkname signalWaitUntilIdle os/signal.signalWaitUntilIdle
-func signalWaitUntilIdle() {}
+func signalWaitUntilIdle() { signalWaitIdle() }
 
 // The traceback setting, which only matters to a crash report rustygo writes
 // its own way.

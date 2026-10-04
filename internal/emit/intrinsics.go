@@ -242,6 +242,26 @@ var intrinsics = map[string]func(args []string) string{
 	},
 	"runtime.walltime": func([]string) string { return "rustygo::rt::walltime()" },
 	"runtime.envs":     func([]string) string { return "rustygo::rt::envs()" },
+	"runtime.sigpipe":  func([]string) string { return "rustygo::rt::sigpipe()" },
+
+	// Signals: the handler and the queue are the runtime's, and os/signal
+	// reaches them through the overlay's runtime (src/rt.rs).
+	"runtime.signalEnable": func(a []string) string {
+		return fmt.Sprintf("rustygo::rt::signal_enable(%s)", a[0])
+	},
+	"runtime.signalDisable": func(a []string) string {
+		return fmt.Sprintf("rustygo::rt::signal_disable(%s)", a[0])
+	},
+	"runtime.signalIgnore": func(a []string) string {
+		return fmt.Sprintf("rustygo::rt::signal_ignore(%s)", a[0])
+	},
+	"runtime.signalIgnored": func(a []string) string {
+		return fmt.Sprintf("rustygo::rt::signal_ignored(%s)", a[0])
+	},
+	"runtime.signalRecv": func([]string) string { return "rustygo::rt::signal_recv()" },
+	"runtime.signalWaitIdle": func([]string) string {
+		return "rustygo::rt::signal_wait_until_idle()"
+	},
 	"runtime.fcntl": func(a []string) string {
 		return fmt.Sprintf("rustygo::rt::fcntl(%s, %s, %s)", a[0], a[1], a[2])
 	},
