@@ -16,6 +16,8 @@ type shape interface {
 	Name() string
 }
 
+type point struct{ X, Y int }
+
 type square struct{ side float64 }
 
 func (s square) Area() float64 { return s.side * s.side }
@@ -89,6 +91,17 @@ func main() {
 	bv := reflect.ValueOf(&bs).Elem()
 	bv.SetBytes([]byte("after"))
 	fmt.Println(string(bs))
+
+	// A slice made through reflection, whose elements are its own storage.
+	pt := reflect.TypeOf([]point(nil))
+	pv := reflect.MakeSlice(pt, 2, 4)
+	fmt.Println(pv.Len(), pv.Cap(), pv.Kind(), pv.Type())
+	pv.Index(0).Field(0).SetInt(7)
+	pv.Index(1).Set(reflect.ValueOf(point{3, 4}))
+	fmt.Println(pv.Interface())
+	made := reflect.MakeSlice(reflect.TypeOf([]byte(nil)), 3, 3)
+	made.Index(1).SetUint(65)
+	fmt.Println(made.Interface(), made.Bytes())
 
 	// A map made and written through reflection.
 	mt := reflect.TypeOf(map[string]int(nil))

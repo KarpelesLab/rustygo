@@ -15,6 +15,7 @@ import (
 	"go/token"
 	"go/types"
 	"os"
+	"path/filepath"
 	"strings"
 
 	"github.com/KarpelesLab/rustygo/internal/goroot"
@@ -42,6 +43,10 @@ type Result struct {
 	// which shares the storage of the one it names: `math/bits` reaches the
 	// runtime's division error that way.
 	LinknameVars map[string]string
+	// Dir is the first requested package's own directory. A test binary is
+	// run there, as `go test` runs one, because a test that opens
+	// `testdata/something` expects to find it.
+	Dir string
 }
 
 // Load type-checks the packages matching patterns (relative to dir, or the
@@ -110,9 +115,22 @@ func load(dir string, tests bool, patterns ...string) (*Result, error) {
 		collectLinknames(p, links, vars)
 	})
 
+	// Where the first requested package's own files are, which is where a test
+	// binary built from it is run.
+	pkgDir := ""
+	for _, p := range pkgs {
+		if len(p.GoFiles) > 0 {
+			pkgDir = filepath.Dir(p.GoFiles[0])
+			break
+		}
+	}
+
 	prog, ssaPkgs := ssautil.AllPackages(pkgs, ssa.InstantiateGenerics)
 	prog.Build()
-	return &Result{Prog: prog, Pkgs: ssaPkgs, Std: std, Linknames: links, LinknameVars: vars}, nil
+	return &Result{
+		Prog: prog, Pkgs: ssaPkgs, Std: std,
+		Linknames: links, LinknameVars: vars, Dir: pkgDir,
+	}, nil
 }
 
 // collectLinknames records p's `//go:linkname local target` directives.

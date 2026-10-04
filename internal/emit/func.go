@@ -137,7 +137,12 @@ func (e *emitter) function(fn *ssa.Function) {
 	}
 	f.body()
 	if f.hasDefers {
-		f.out.WriteString("    }));\n    match __r {\n        Ok(v) => { __defers.run(); v }\n        Err(p) => {\n            let __d = rustygo::panic::begin(p);\n            __defers.run_panicking(__d);\n")
+		// `runtime.Goexit` is not a panic: nothing recovers it, but every
+		// frame's deferred calls still run on the way out, which is the whole
+		// of what it promises.
+		f.out.WriteString("    }));\n    match __r {\n        Ok(v) => { __defers.run(); v }\n" +
+			"        Err(p) if rustygo::sched::is_goexit(&*p) => {\n            __defers.run();\n            rustygo::panic::resume_payload(p)\n        }\n" +
+			"        Err(p) => {\n            let __d = rustygo::panic::begin(p);\n            __defers.run_panicking(__d);\n")
 		if fn.Recover != nil {
 			// A deferred call recovered: Go resumes at the recover block,
 			// which reads the named results back. Whatever is left of the

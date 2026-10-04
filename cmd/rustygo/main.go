@@ -141,6 +141,9 @@ func runTest(args []string) error {
 		return nil
 	}
 	cmd := exec.Command(bin, rest...)
+	// In the package's own directory, as `go test` runs a test binary: a test
+	// that opens `testdata/something` expects to find it.
+	cmd.Dir = res.Dir
 	cmd.Stdout, cmd.Stderr, cmd.Stdin = os.Stdout, os.Stderr, os.Stdin
 	if err := cmd.Run(); err != nil {
 		var exit *exec.ExitError

@@ -557,9 +557,23 @@ func (v Value) String() string {
 	return "<" + v.Type().String() + " Value>"
 }
 
+// Bytes returns v's underlying bytes: a []byte as it is, and an addressable
+// array of bytes as a slice over it, which is what `fmt` asks of a `[N]byte`.
 func (v Value) Bytes() []byte {
-	if v.Kind() == Slice && v.Type().Elem().Kind() == Uint8 {
+	switch v.Kind() {
+	case Slice:
+		if v.Type().Elem().Kind() != Uint8 {
+			break
+		}
 		return *(*[]byte)(v.p)
+	case Array:
+		if v.Type().Elem().Kind() != Uint8 {
+			break
+		}
+		if !v.addr {
+			panic("reflect.Value.Bytes of unaddressable byte array")
+		}
+		return unsafe.Slice((*byte)(v.p), v.Len())
 	}
 	panic("reflect: Bytes of " + v.Kind().String() + " value")
 }
@@ -1051,8 +1065,24 @@ func (v Value) Call(in []Value) []Value {
 	}
 	return out
 }
-func (v Value) Grow(n int)                   { panic(unsupported("Value.Grow")) }
-func MakeSlice(typ Type, len, cap int) Value { panic(unsupported("MakeSlice")) }
+func (v Value) Grow(n int) { panic(unsupported("Value.Grow")) }
+
+// MakeSlice makes a slice of a type the program mentions, so the slice's own
+// `make` is there to make it with. The result is not addressable, as gc's is
+// not; its elements are.
+func MakeSlice(typ Type, len, cap int) Value {
+	rt, ok := typ.(rtype)
+	if !ok || typ.Kind() != Slice {
+		panic("reflect.MakeSlice of non-slice type")
+	}
+	if len < 0 {
+		panic("reflect.MakeSlice: negative len")
+	}
+	if cap < len {
+		panic("reflect.MakeSlice: len > cap")
+	}
+	return Value{rt.d, descMakeSlice(rt.d, len, cap), false}
+}
 
 // PointerTo would need a type descriptor rustygo's emitter did not write, the
 // program never having mentioned the type (DESIGN §6).
@@ -1223,6 +1253,7 @@ func descBox(d, addr unsafe.Pointer) unsafe.Pointer
 func descCall(d, f unsafe.Pointer, args []unsafe.Pointer) []unsafe.Pointer
 func descImplements(d, iface unsafe.Pointer) bool
 func descZero(d unsafe.Pointer) unsafe.Pointer
+func descMakeSlice(d unsafe.Pointer, len, cap int) unsafe.Pointer
 func descNumIn(d unsafe.Pointer) int64
 func descIn(d unsafe.Pointer, i int) unsafe.Pointer
 func descNumOut(d unsafe.Pointer) int64

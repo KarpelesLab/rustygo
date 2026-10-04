@@ -240,6 +240,11 @@ work fails too, decision gate 1 says stop.
   containing the `range`, not to the closure go/ssa turns the body into. go/ssa
   says so with an intrinsic of its own, `ssa:deferstack()`
   (`testdata/programs/rangefunc`).
+* **`runtime.Goexit`** ends a goroutine after every frame's deferred calls,
+  which is what `testing`'s `t.Skip` and `t.FailNow` are written on
+  (`testdata/programs/goexit`). It is not a panic: `recover` returns nil during
+  one and nothing can stop it. In the main goroutine it ends that goroutine
+  without ending the program, as Go says.
 * Not yet: weak references; `runtime.AddCleanup`.
 * Standard-library plumbing: **done for the packages that do not need
   reflection or files.** `strings`, `strconv`, `sort`, `errors`, `unicode`,
@@ -315,8 +320,9 @@ work fails too, decision gate 1 says stop.
   timer list use. `time.NewTimer`, `After` and `Ticker` work, fired by a
   timer goroutine in the runtime overlay.
 * Not yet: the M:N scheduler over threads, work stealing, preemption,
-  `GOMAXPROCS` above 1, `runtime.Goexit`, `testing/synctest`, and read and
-  write deadlines on a descriptor (a deadline is accepted and ignored).
+  `GOMAXPROCS` above 1, and `testing/synctest`. Read and write deadlines on a
+  descriptor, and `runtime.Goexit`, have since landed — see the M1 and M3
+  status notes.
 
 ## M3 — Standard library bring-up
 

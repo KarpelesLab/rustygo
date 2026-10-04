@@ -285,6 +285,19 @@ pub fn zero_value(d: UPtr) -> UPtr {
     UPtr::from_addr((desc(d).zero)().addr())
 }
 
+/// A slice of this type with this length and capacity, boxed:
+/// `reflect.MakeSlice`.
+pub fn make_slice(d: UPtr, len: i64, cap: i64) -> UPtr {
+    let t = desc(d);
+    match t.make_slice {
+        Some(make) => UPtr::from_addr(make(len, cap).addr()),
+        None => crate::panic::runtime_error_msg(alloc::format!(
+            "reflect: MakeSlice of {}, which is not a slice type",
+            t.name
+        )),
+    }
+}
+
 /// An empty map of this type, boxed: `reflect.MakeMap`.
 pub fn map_make(d: UPtr) -> UPtr {
     UPtr::from_addr((map_ops(d).make)().addr())

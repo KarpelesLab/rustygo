@@ -46,6 +46,11 @@ var fallbacks = map[string]string{
 	"math.archLdexp":     "math.ldexp",
 	"math.archModf":      "math.modf",
 	"math.archRemainder": "math.remainder",
+	"math.archFloor":     "math.floor",
+	"math.archCeil":      "math.ceil",
+	"math.archTrunc":     "math.trunc",
+	"math.archMax":       "math.max",
+	"math.archMin":       "math.min",
 
 	// The ChaCha8 block function behind math/rand/v2 and the runtime's own
 	// randomness.

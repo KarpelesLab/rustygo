@@ -196,6 +196,15 @@ pub fn begin(payload: alloc::boxed::Box<dyn core::any::Any + Send>) -> usize {
     }
 }
 
+/// Carries an unwinding payload on unchanged.
+///
+/// For one that is not a Go panic: `runtime.Goexit` runs every frame's
+/// deferred calls and then goes on, and nothing may stop it.
+#[cfg(feature = "std")]
+pub fn resume_payload(p: alloc::boxed::Box<dyn core::any::Any + Send>) -> ! {
+    std::panic::resume_unwind(p)
+}
+
 /// Replaces the panic at `depth` with a new one.
 ///
 /// A deferred call of a frame that is already panicking may panic itself, and

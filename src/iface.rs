@@ -94,6 +94,9 @@ pub struct TypeDesc {
     /// `reflect.Zero`. Go's zero value is all-zero bytes, but the *object*
     /// has to exist, and it has to know how to trace itself.
     pub zero: fn() -> Data,
+    /// A slice type's `make`, boxed: `reflect.MakeSlice`. The elements have to
+    /// be traced as that element type, which only this type knows how.
+    pub make_slice: Option<fn(i64, i64) -> Data>,
     /// The element type of a pointer, slice, array, map or channel.
     pub elem: Option<&'static TypeDesc>,
     /// A map's key type.
@@ -209,6 +212,7 @@ impl TypeDesc {
         print: |_, out| out.extend_from_slice(b"<value>"),
         box_value: |_| Data::NONE,
         zero: || Data::NONE,
+        make_slice: None,
         elem: None,
         key: None,
         len: 0,

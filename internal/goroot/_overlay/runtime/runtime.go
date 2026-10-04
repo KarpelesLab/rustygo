@@ -244,6 +244,32 @@ func Breakpoint() { panic("runtime.Breakpoint: no debugger (rustygo)") }
 func SetMutexProfileFraction(rate int) int { return 0 }
 func SetBlockProfileRate(rate int)         {}
 
+// What `runtime/debug` asks the runtime for. The collector has no percentage
+// to set and no limit to keep — it collects when the live set has doubled
+// (src/heap.rs) — and a fault is a fault: rustygo does not catch one and turn
+// it into a panic, so `SetPanicOnFault` cannot honestly say it did.
+
+//go:linkname debug_readGCStats runtime/debug.readGCStats
+func debug_readGCStats(p *[]int64) {}
+
+//go:linkname debug_freeOSMemory runtime/debug.freeOSMemory
+func debug_freeOSMemory() { GC() }
+
+//go:linkname debug_setMaxStack runtime/debug.setMaxStack
+func debug_setMaxStack(n int) int { return 1 << 20 }
+
+//go:linkname debug_setGCPercent runtime/debug.setGCPercent
+func debug_setGCPercent(n int32) int32 { return 100 }
+
+//go:linkname debug_setPanicOnFault runtime/debug.setPanicOnFault
+func debug_setPanicOnFault(b bool) bool { return false }
+
+//go:linkname debug_setMaxThreads runtime/debug.setMaxThreads
+func debug_setMaxThreads(n int) int { return 10000 }
+
+//go:linkname debug_setMemoryLimit runtime/debug.setMemoryLimit
+func debug_setMemoryLimit(n int64) int64 { return 1<<63 - 1 }
+
 // PanicNilError is what recover returns after panic(nil).
 type PanicNilError struct{ _ [0]*PanicNilError }
 

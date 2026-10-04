@@ -5,6 +5,7 @@ import (
 	"go/token"
 	"go/types"
 	"sort"
+	"strconv"
 	"strings"
 
 	"golang.org/x/tools/go/ssa"
@@ -124,17 +125,164 @@ func unaliasedTuple(tup *types.Tuple) *types.Tuple {
 // distinct across packages.
 func qualifiedPath(p *types.Package) string { return p.Path() }
 
-// goName is the type's name as Go prints it: `main.Point`, `*main.Node`,
-// `int`. Packages are named, not pathed, exactly as gc's panic messages do,
-// and an alias prints as the type it names (`byte` is `uint8`).
+// goName is the type's name as Go prints it: `%T`, a `reflect.Type`'s String,
+// and a panic's message all use this spelling.
+//
+// It is not quite go/types' spelling. Go writes `struct { A int }` and
+// `interface {}` where go/types writes `struct{A int}` and `any`, and a type
+// is named by what it is rather than by what it was called, so an alias is
+// resolved (`[]byte` is `[]uint8`) and a parameter's name is dropped
+// (`func(int)`, never `func(d int)`). Packages are named, not pathed, exactly
+// as gc's panic messages do it.
 func goName(t types.Type) string {
-	if b, ok := types.Unalias(t).(*types.Basic); ok {
-		return types.Typ[b.Kind()].Name()
+	var b strings.Builder
+	writeGoName(&b, t)
+	return b.String()
+}
+
+func writeGoName(b *strings.Builder, t types.Type) {
+	switch t := types.Unalias(t).(type) {
+	case *types.Basic:
+		// `byte` and `rune` are separate basic types with the same kinds as
+		// `uint8` and `int32`, so that a printer can show the name that was
+		// written. Go shows what the type is.
+		b.WriteString(types.Typ[t.Kind()].Name())
+	case *types.Named:
+		obj := t.Obj()
+		if obj.Pkg() != nil {
+			b.WriteString(obj.Pkg().Name())
+			b.WriteByte('.')
+		}
+		b.WriteString(obj.Name())
+		if args := t.TypeArgs(); args != nil {
+			b.WriteByte('[')
+			for i := 0; i < args.Len(); i++ {
+				if i > 0 {
+					b.WriteByte(',')
+				}
+				writeGoName(b, args.At(i))
+			}
+			b.WriteByte(']')
+		}
+	case *types.Pointer:
+		b.WriteByte('*')
+		writeGoName(b, t.Elem())
+	case *types.Slice:
+		b.WriteString("[]")
+		writeGoName(b, t.Elem())
+	case *types.Array:
+		fmt.Fprintf(b, "[%d]", t.Len())
+		writeGoName(b, t.Elem())
+	case *types.Map:
+		b.WriteString("map[")
+		writeGoName(b, t.Key())
+		b.WriteByte(']')
+		writeGoName(b, t.Elem())
+	case *types.Chan:
+		switch t.Dir() {
+		case types.SendOnly:
+			b.WriteString("chan<- ")
+		case types.RecvOnly:
+			b.WriteString("<-chan ")
+		default:
+			b.WriteString("chan ")
+		}
+		writeGoName(b, t.Elem())
+	case *types.Signature:
+		b.WriteString("func")
+		writeGoSignature(b, t)
+	case *types.Struct:
+		if t.NumFields() == 0 {
+			b.WriteString("struct {}")
+			return
+		}
+		b.WriteString("struct { ")
+		for i := 0; i < t.NumFields(); i++ {
+			if i > 0 {
+				b.WriteString("; ")
+			}
+			f := t.Field(i)
+			// An embedded field is spelled by its type alone.
+			if !f.Embedded() {
+				b.WriteString(f.Name())
+				b.WriteByte(' ')
+			}
+			writeGoName(b, f.Type())
+			if tag := t.Tag(i); tag != "" {
+				b.WriteByte(' ')
+				b.WriteString(strconv.Quote(tag))
+			}
+		}
+		b.WriteString(" }")
+	case *types.Interface:
+		if t.NumMethods() == 0 {
+			b.WriteString("interface {}")
+			return
+		}
+		b.WriteString("interface { ")
+		methods := make([]*types.Func, t.NumMethods())
+		for i := range methods {
+			methods[i] = t.Method(i)
+		}
+		sort.Slice(methods, func(i, j int) bool { return methods[i].Name() < methods[j].Name() })
+		for i, m := range methods {
+			if i > 0 {
+				b.WriteString("; ")
+			}
+			b.WriteString(m.Name())
+			writeGoSignature(b, m.Signature())
+		}
+		b.WriteString(" }")
+	case *types.Tuple:
+		// Not a type a program can write; the emitter uses one for multiple
+		// results.
+		b.WriteByte('(')
+		for i := 0; i < t.Len(); i++ {
+			if i > 0 {
+				b.WriteString(", ")
+			}
+			writeGoName(b, t.At(i).Type())
+		}
+		b.WriteByte(')')
+	default:
+		b.WriteString(types.TypeString(t, func(p *types.Package) string { return p.Name() }))
 	}
-	// Aliases and parameter names both go: Go names a type by what it is, so
-	// `[]byte` prints as `[]uint8` and `func(d int)` as `func(int)`, which is
-	// what [unaliased] leaves behind.
-	return types.TypeString(unaliased(t), func(p *types.Package) string { return p.Name() })
+}
+
+// writeGoSignature writes a signature's parameters and results, without the
+// `func` and without any parameter's name.
+func writeGoSignature(b *strings.Builder, sig *types.Signature) {
+	b.WriteByte('(')
+	params := sig.Params()
+	for i := 0; i < params.Len(); i++ {
+		if i > 0 {
+			b.WriteString(", ")
+		}
+		if sig.Variadic() && i == params.Len()-1 {
+			b.WriteString("...")
+			if s, ok := params.At(i).Type().Underlying().(*types.Slice); ok {
+				writeGoName(b, s.Elem())
+				continue
+			}
+		}
+		writeGoName(b, params.At(i).Type())
+	}
+	b.WriteByte(')')
+	switch res := sig.Results(); res.Len() {
+	case 0:
+	case 1:
+		b.WriteByte(' ')
+		writeGoName(b, res.At(0).Type())
+	default:
+		b.WriteString(" (")
+		for i := 0; i < res.Len(); i++ {
+			if i > 0 {
+				b.WriteString(", ")
+			}
+			writeGoName(b, res.At(i).Type())
+		}
+		b.WriteByte(')')
+	}
 }
 
 // goIfaceName is the static interface type as gc names it in an interface
@@ -186,7 +334,16 @@ func (e *emitter) typeDesc(t types.Type, pos token.Pos) string {
 	case *types.Pointer:
 		fmt.Fprintf(&b, "    elem: Some(&%s),\n", e.typeDesc(u.Elem(), pos))
 	case *types.Slice:
-		fmt.Fprintf(&b, "    elem: Some(&%s),\n", e.typeDesc(u.Elem(), pos))
+		// `make` for this slice type, which is what `reflect.MakeSlice` needs:
+		// the elements have to be traced as this element type. The slice is
+		// rooted across the allocation that boxes it, which nothing else
+		// refers to it through yet.
+		fmt.Fprintf(&b, "    elem: Some(&%s),\n    make_slice: Some(|__len, __cap| {\n"+
+			"        let __s = Slice::<%s>::make(__len, __cap);\n"+
+			"        let __roots = rustygo::gc::Frame::<1>::new();\n"+
+			"        __roots.scope(|| {\n            __roots.set(0, &__s);\n"+
+			"            Data::of(Ptr::<%s>::alloc(__s))\n        })\n    }),\n",
+			e.typeDesc(u.Elem(), pos), e.types.place(u.Elem(), e, pos), place)
 	case *types.Array:
 		fmt.Fprintf(&b, "    elem: Some(&%s),\n    len: %d,\n", e.typeDesc(u.Elem(), pos), u.Len())
 	case *types.Map:
@@ -493,11 +650,16 @@ func (e *emitter) printValue(t types.Type, place string, pos token.Pos) string {
 		}
 		// A named basic type prints as `main.T(v)`, strings quoted.
 		if b.Info()&types.IsString != 0 {
-			return fmt.Sprintf("out.extend_from_slice(b\"%s(\\\"\"); rustygo::print::format(out, &[%s], false); out.extend_from_slice(b\"\\\")\");", goName(t), arg)
+			return fmt.Sprintf("out.extend_from_slice(%s); rustygo::print::format(out, &[%s], false); out.extend_from_slice(b\"\\\")\");",
+				byteString(goName(t)+"(\""), arg)
 		}
-		return fmt.Sprintf("out.extend_from_slice(b\"%s(\"); rustygo::print::format(out, &[%s], false); out.push(b')');", goName(t), arg)
+		return fmt.Sprintf("out.extend_from_slice(%s); rustygo::print::format(out, &[%s], false); out.push(b')');",
+			byteString(goName(t)+"("), arg)
 	}
-	return fmt.Sprintf("out.extend_from_slice(b\"(%s) \"); rustygo::print::format(out, &[rustygo::print::Arg::Pointer(d.addr())], false);", goName(t))
+	// The name may hold a quote of its own — a struct tag inside an anonymous
+	// struct type — so it is written as a literal rather than pasted in.
+	return fmt.Sprintf("out.extend_from_slice(%s); rustygo::print::format(out, &[rustygo::print::Arg::Pointer(d.addr())], false);",
+		byteString("("+goName(t)+") "))
 }
 
 // implementsStringMethod returns t's zero-argument, string-returning method
