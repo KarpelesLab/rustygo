@@ -36,8 +36,8 @@ var (
 )
 
 // yieldIfReady gives the processor to another goroutine if one is ready, and
-// is the runtime's (src/sched.rs).
-func yieldIfReady()
+// says whether it did. It is the runtime's (src/sched.rs).
+func yieldIfReady() bool
 
 // wakeTimerLoop tells the timer goroutine that the list has changed.
 func wakeTimerLoop() {
