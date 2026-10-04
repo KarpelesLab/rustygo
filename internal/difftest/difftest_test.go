@@ -35,7 +35,22 @@ const (
 	moduleRoot  = "../.."
 	programsDir = "testdata/programs"
 	runTimeout  = 30 * time.Second
+	// Under GC torture every allocation walks the whole live heap, so a
+	// program carrying crypto's tables takes minutes where it took
+	// milliseconds: httpstls does five TLS handshakes, and P-256's precomputed
+	// multiples and ML-KEM's state are traced at each of their allocations.
+	// The cap is still here to catch a program that has stopped making
+	// progress; it is only no longer a cap on how much work one may do.
+	tortureTimeout = 10 * time.Minute
 )
+
+// runLimit is how long a test binary may run before it counts as hung.
+func runLimit() time.Duration {
+	if build.ConfigFromEnv().GcTorture {
+		return tortureTimeout
+	}
+	return runTimeout
+}
 
 type outcome struct {
 	stdout, stderr string
@@ -123,7 +138,8 @@ func TestPrograms(t *testing.T) {
 // in the child rather than asking the host for it.
 func run(t *testing.T, bin string, capped bool) outcome {
 	t.Helper()
-	ctx, cancel := context.WithTimeout(context.Background(), runTimeout)
+	limit := runLimit()
+	ctx, cancel := context.WithTimeout(context.Background(), limit)
 	defer cancel()
 	cmd := exec.CommandContext(ctx, bin)
 	if capped {
@@ -136,7 +152,7 @@ func run(t *testing.T, bin string, capped bool) outcome {
 	var ee *exec.ExitError
 	switch {
 	case ctx.Err() != nil:
-		t.Fatalf("%s: timed out after %v", filepath.Base(bin), runTimeout)
+		t.Fatalf("%s: timed out after %v", filepath.Base(bin), limit)
 	case errors.As(err, &ee):
 		exit = ee.ExitCode()
 	case err != nil:
