@@ -102,8 +102,20 @@ func time_Sleep(ns int64) {
 	if ns <= 0 {
 		return
 	}
+	// gc parks the goroutine however short the sleep is, so the others always
+	// get a turn. A deadline a nanosecond away has already passed by the time
+	// the scheduler looks at it, and sleepUntil then returns without parking,
+	// so the turn is taken outright first — which is what a goroutine looping
+	// on Sleep(Nanosecond) to let a ticker through is asking for, and time's
+	// own stress tests do exactly that.
+	yieldIfReady()
 	sleepUntil(nanotime() + ns)
 }
+
+// haveHighResSleep says whether a sleep of about a millisecond is honoured,
+// which on anything but old Windows it is. time's own tests read it by name to
+// decide whether to allow for a coarse clock.
+var haveHighResSleep = true
 
 // sigpipe is what os calls when a write to standard output or standard error
 // failed because nothing is reading the other end. Go's answer is the default
