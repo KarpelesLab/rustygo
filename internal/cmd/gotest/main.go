@@ -10,6 +10,14 @@
 // expectations files are not needed.
 //
 // Tests that gc itself cannot build here are skipped, not counted.
+//
+// `-n` builds that many tests at once, and defaults to one on purpose. cargo
+// decides how many `rustc` processes a build runs with its own `jobs` setting,
+// which a machine's `~/.cargo/config.toml` may set deliberately low; building
+// several tests at once multiplies that number rather than sharing it. Raise it
+// only if you know the machine can take it — and note that a `// run` test
+// measuring time, as `chanlinear` does, is measured under whatever load the
+// other workers are making.
 package main
 
 import (
@@ -43,7 +51,7 @@ type result struct {
 }
 
 func main() {
-	workers := flag.Int("n", runtime.NumCPU()/2+1, "tests to build at once")
+	workers := flag.Int("n", 1, "tests to build at once (see the note on -n above)")
 	outFile := flag.String("o", "", "also write the markdown report here")
 	dir := flag.String("dir", filepath.Join(runtime.GOROOT(), "test"), "directory of Go's own tests")
 	timeout := flag.Duration("timeout", 30*time.Second, "per-program run timeout")

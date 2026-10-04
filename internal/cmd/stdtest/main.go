@@ -8,6 +8,13 @@
 // run with `-test.v`, so the report counts the tests Go ships rather than any
 // written here. gc's own result is not compared: these are Go's tests, and a
 // test that fails under gc too would be gc's news, not rustygo's.
+//
+// `-n` builds that many packages at once, and defaults to one on purpose.
+// cargo decides how many `rustc` processes a build runs with its own `jobs`
+// setting, which a machine's `~/.cargo/config.toml` may set deliberately low;
+// building several packages at once multiplies that number rather than sharing
+// it, so `-n 8` on a machine configured for two jobs asks for sixteen
+// compilers. Raise it only if you know the machine can take it.
 package main
 
 import (
@@ -53,7 +60,7 @@ type result struct {
 }
 
 func main() {
-	workers := flag.Int("n", runtime.NumCPU()/8+1, "packages to build at once")
+	workers := flag.Int("n", 1, "packages to build at once (see the note on -n above)")
 	outFile := flag.String("o", "", "also write the markdown report here")
 	timeout := flag.Duration("timeout", 5*time.Minute, "per-binary run timeout")
 	flag.Parse()
