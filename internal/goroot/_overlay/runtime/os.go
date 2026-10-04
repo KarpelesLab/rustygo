@@ -155,3 +155,19 @@ func syscall_runtimeUnsetenv(k string) {}
 
 //go:linkname syscall_runtimeClearenv syscall.runtimeClearenv
 func syscall_runtimeClearenv(env map[string]int) {}
+
+// AllThreadsSyscall exists because a few pieces of per-thread kernel state —
+// the user and group a thread runs as, most of them — are per-thread and a Go
+// program expects them to be process-wide. gc stops the world and makes the
+// call on every OS thread it has.
+//
+// Every goroutine shares one thread here (DESIGN §4), so making the call once
+// leaves every thread in step, which is the whole of the contract. The day the
+// scheduler has threads of its own this has to grow to match.
+
+func doAllThreadsSyscall(trap, a1, a2, a3, a4, a5, a6 uintptr) (r1, r2, errno uintptr)
+
+//go:linkname syscall_runtime_doAllThreadsSyscall syscall.runtime_doAllThreadsSyscall
+func syscall_runtime_doAllThreadsSyscall(trap, a1, a2, a3, a4, a5, a6 uintptr) (r1, r2, errno uintptr) {
+	return doAllThreadsSyscall(trap, a1, a2, a3, a4, a5, a6)
+}

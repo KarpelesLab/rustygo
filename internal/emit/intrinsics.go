@@ -278,6 +278,12 @@ var intrinsics = map[string]func(args []string) string{
 	"syscall.rawVforkSyscall": func(a []string) string {
 		return fmt.Sprintf("rustygo::syscall::vfork(%s, %s, %s, %s)", a[0], a[1], a[2], a[3])
 	},
+	// The same call, made on every OS thread. There is one, so it is the same
+	// call made once (internal/goroot/_overlay/runtime/os.go).
+	"runtime.doAllThreadsSyscall": func(a []string) string {
+		return fmt.Sprintf("rustygo::syscall::syscall6_go(%s, %s, %s, %s, %s, %s, %s)",
+			a[0], a[1], a[2], a[3], a[4], a[5], a[6])
+	},
 	"syscall.rawSyscallNoError": func(a []string) string {
 		return fmt.Sprintf("{ let (r1, r2, _) = rustygo::syscall::syscall6(%s, %s, %s, %s, 0, 0, 0); (r1, r2) }",
 			a[0], a[1], a[2], a[3])
