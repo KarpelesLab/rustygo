@@ -91,6 +91,7 @@ type Type interface {
 	NumField() int
 	Field(i int) StructField
 	FieldByName(name string) (StructField, bool)
+	FieldByNameFunc(match func(string) bool) (StructField, bool)
 	Implements(u Type) bool
 	AssignableTo(u Type) bool
 	NumMethod() int
@@ -373,6 +374,22 @@ func (t rtype) Field(i int) StructField {
 func (t rtype) FieldByName(name string) (StructField, bool) {
 	for i := 0; i < t.NumField(); i++ {
 		if f := t.Field(i); f.Name == name {
+			return f, true
+		}
+	}
+	return StructField{}, false
+}
+
+// FieldByNameFunc returns the first field whose name satisfies match.
+//
+// gc searches breadth-first through embedded fields and reports nothing when
+// two fields at the same depth both match, because neither is the one the
+// selector would mean. Neither this nor FieldByName promotes an embedded
+// field at all, so the shallow search is all there is, and declaration order
+// decides.
+func (t rtype) FieldByNameFunc(match func(string) bool) (StructField, bool) {
+	for i := 0; i < t.NumField(); i++ {
+		if f := t.Field(i); match(f.Name) {
 			return f, true
 		}
 	}
@@ -1415,8 +1432,24 @@ func deepValueEqual(x, y Value) bool {
 
 func (v Value) mustBe(k Kind, method string) {
 	if v.Kind() != k {
-		panic("reflect: " + method + " of " + v.Kind().String() + " value")
+		panic(&ValueError{Method: "reflect.Value." + method, Kind: v.Kind()})
 	}
+}
+
+// A ValueError occurs when a Value method is called on a Value that does not
+// support it, which is what every `mustBe` here reports. gc panics with one of
+// these rather than with a string, and a program may recover and read it:
+// `jmoiron/sqlx` names the type, and `encoding/json` has been known to.
+type ValueError struct {
+	Method string
+	Kind   Kind
+}
+
+func (e *ValueError) Error() string {
+	if e.Kind == 0 {
+		return "reflect: call of " + e.Method + " on zero Value"
+	}
+	return "reflect: call of " + e.Method + " on " + e.Kind.String() + " Value"
 }
 
 // sliceHeader is a slice's three words, which rustygo lays out as gc does.

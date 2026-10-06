@@ -307,6 +307,41 @@ var intrinsics = map[string]func(args []string) string{
 			a[0], a[1], a[2], a[3])
 	},
 
+	// `golang.org/x/sys/unix` is how Go programs outside the standard library
+	// reach the kernel, and on linux/amd64 its six entry points are assembly
+	// that jumps straight into `syscall`'s. They are the same calls with the
+	// same convention — a positive errno, zero for success — so they come here
+	// too. Nothing else in the package is assembly.
+	//
+	// It is not an obscure dependency: `sirupsen/logrus` asks it whether the
+	// terminal is a terminal, and `spf13/viper` watches a directory with it.
+	"golang.org/x/sys/unix.Syscall": func(a []string) string {
+		return fmt.Sprintf("rustygo::syscall::syscall6_go(%s, %s, %s, %s, 0, 0, 0)",
+			a[0], a[1], a[2], a[3])
+	},
+	"golang.org/x/sys/unix.Syscall6": func(a []string) string {
+		return fmt.Sprintf("rustygo::syscall::syscall6_go(%s, %s, %s, %s, %s, %s, %s)",
+			a[0], a[1], a[2], a[3], a[4], a[5], a[6])
+	},
+	// The raw forms may not be preempted, which only matters to a scheduler
+	// that preempts; here the difference is that they never park.
+	"golang.org/x/sys/unix.RawSyscall": func(a []string) string {
+		return fmt.Sprintf("rustygo::syscall::syscall6(%s, %s, %s, %s, 0, 0, 0)",
+			a[0], a[1], a[2], a[3])
+	},
+	"golang.org/x/sys/unix.RawSyscall6": func(a []string) string {
+		return fmt.Sprintf("rustygo::syscall::syscall6(%s, %s, %s, %s, %s, %s, %s)",
+			a[0], a[1], a[2], a[3], a[4], a[5], a[6])
+	},
+	"golang.org/x/sys/unix.SyscallNoError": func(a []string) string {
+		return fmt.Sprintf("{ let (r1, r2, _) = rustygo::syscall::syscall6_go(%s, %s, %s, %s, 0, 0, 0); (r1, r2) }",
+			a[0], a[1], a[2], a[3])
+	},
+	"golang.org/x/sys/unix.RawSyscallNoError": func(a []string) string {
+		return fmt.Sprintf("{ let (r1, r2, _) = rustygo::syscall::syscall6(%s, %s, %s, %s, 0, 0, 0); (r1, r2) }",
+			a[0], a[1], a[2], a[3])
+	},
+
 	// A func value's code address, which gc's compiler knows and rustygo does
 	// not: nothing is at address zero, and the profiler that asks is not
 	// sampling anything anyway.
