@@ -397,8 +397,15 @@ pub fn run_program(init: fn(), main: fn()) -> ! {
     worker(0)
 }
 
-/// `GOMAXPROCS` at startup: the number of CPUs, as Go's default is, unless
-/// `GOMAXPROCS` in the environment says otherwise.
+/// `GOMAXPROCS` at startup, which `GOMAXPROCS` in the environment sets.
+///
+/// **Two, and not the number of CPUs that Go's default is.** Everything above
+/// is written for more and `GOMAXPROCS` gets it, but with three workers or more
+/// a goroutine's saved context still ends up holding a stack pointer belonging
+/// to a worker's own stack — `pick` catches it and the program says so rather
+/// than jumping into it. One and two workers are correct, and two is enough for
+/// the differential suite to be running goroutines on two threads at once
+/// rather than pretending. The default goes to `NumCPU` when that is found.
 ///
 /// Read once, before any worker exists. `runtime.GOMAXPROCS` changes it
 /// afterwards, which is what Go's own tests do when they want to be
@@ -410,7 +417,7 @@ fn default_procs() -> usize {
     {
         return n;
     }
-    num_cpu() as usize
+    2
 }
 
 /// `runtime.NumCPU`: how many processors this program may use.

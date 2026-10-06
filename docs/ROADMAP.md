@@ -300,8 +300,12 @@ work fails too, decision gate 1 says stop.
   naked assembly), reserved with a guard page below them. `go` hands the
   scheduler the thunk and environment a `defer` builds, so the two share
   their machinery.
-* `GOMAXPROCS` worker threads run them, defaulting to the number of CPUs and
-  settable from the environment and by `runtime.GOMAXPROCS`. A worker stands on
+* `GOMAXPROCS` worker threads run them, settable from the environment and by
+  `runtime.GOMAXPROCS`. The default is **two**, not the number of CPUs: with
+  three or more a goroutine's saved context still acquires a stack pointer
+  belonging to a worker's own stack, which `pick` catches and reports rather
+  than jumping into. Two is enough to be really running goroutines on two
+  threads; the default goes to `NumCPU` when that is found. A worker stands on
   its thread's own stack between goroutines, which is what lets a goroutine be
   handed to another thread at all ([DESIGN §4](DESIGN.md#4-goroutines-and-the-scheduler)).
   One shared run queue, one lock; `runtime.LockOSThread` and `sync`'s processor
@@ -310,9 +314,9 @@ work fails too, decision gate 1 says stop.
 * A collection stops the world. Every thread reaches a safe point — a loop
   back-edge, or the top of an allocation — and publishes its goroutine's roots
   before the collector marks, so the root set is every goroutine's shadow
-  stack. `RUSTYGO_GCTORTURE=1` collects at every allocation and the whole
-  differential suite passes under it, which is what says the handshake and the
-  emitted roots agree.
+  stack. `pick` checks that a context it is about to resume points inside that
+  goroutine's own stack, because resuming is restoring a stack pointer and
+  returning through it.
 * Every piece of the runtime's state says whether it belongs to a thread or to
   the program, in one place (`src/tls.rs`): the shadow stack and the panic
   stack are per thread and travel with the goroutine, while the heap, the

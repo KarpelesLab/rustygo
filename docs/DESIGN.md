@@ -205,7 +205,9 @@ runtime's accessor API has to be sound for *any* code the emitter produces, so:
   blocking semantics, same random choice among ready cases.
 
 **As built (M2).** Goroutines run on worker threads, as many of them at a time
-as `GOMAXPROCS` allows. A goroutine is a stack (`src/stack.rs`: a reservation
+as `GOMAXPROCS` allows — which defaults to two rather than to the number of
+CPUs, because three or more still corrupt a goroutine's saved context and that
+is not yet understood. A goroutine is a stack (`src/stack.rs`: a reservation
 with a 64 KiB guard below it) and a saved context (`src/context.rs`: the
 callee-saved registers and the stack pointer, in naked assembly for x86-64
 and aarch64). `go` hands the scheduler the same thunk-and-environment a
