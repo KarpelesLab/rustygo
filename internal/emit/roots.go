@@ -124,6 +124,37 @@ func (f *fnEmitter) collectRoots() {
 			}
 		}
 	}
+	// `uintptr(unsafe.Pointer(p))` hides a reference from the collector. The
+	// result is an integer, so nothing refers to the object after the
+	// conversion, and liveness correctly says the pointer is dead — while the
+	// kernel is still about to read what it points at.
+	//
+	// Go's unsafe.Pointer rule 4 is exactly about this: in a call's argument
+	// list the compiler keeps the referenced object alive for the duration of
+	// the call. `syscall.Syscall(SYS_OPENAT, …, uintptr(unsafe.Pointer(&b[0])), …)`
+	// is the shape, and a collection inside the call freed the path buffer that
+	// `openat` was reading, which came out as a device that certainly existed
+	// reporting ENOENT.
+	//
+	// The operand is rooted for the rest of the frame rather than only across
+	// the call. That is stricter than Go's rule and much simpler than tracking
+	// an integer's live range back to a pointer: a root slot is written where
+	// its value is defined and never cleared, so being "needed" is already
+	// frame-wide.
+	for _, b := range f.fn.Blocks {
+		for _, instr := range b.Instrs {
+			c, ok := instr.(*ssa.Convert)
+			if !ok || !isUnsafePointer(c.X.Type()) {
+				continue
+			}
+			if to := basicInfo(c.Type()); to == nil || to.Kind() != types.Uintptr {
+				continue
+			}
+			if cand[c.X] {
+				need[c.X] = true
+			}
+		}
+	}
 	for _, b := range f.fn.Blocks {
 		live := liveOut(b)
 		for _, s := range b.Succs {
