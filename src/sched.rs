@@ -403,10 +403,10 @@ pub fn run_program(init: fn(), main: fn()) -> ! {
 /// written for more and setting the variable gets it, but more is not yet
 /// correct: a goroutine's saved context acquires a stack pointer belonging to a
 /// worker's own stack, which `pick` catches, and the program it belongs to ends
-/// up returning from `main` without having run it. Two workers get that wrong
-/// about one run in seven, so two is not a safer default than sixty-four; it is
-/// the same bug at a lower rate, which is worse, because a lower rate is how a
-/// bug reaches a user.
+/// up returning from `main` without having run it, or stops making progress at
+/// all. Two workers get that wrong about half the time, so two is no safer a
+/// default than sixty-four, and a default that were only rarely wrong would be
+/// worse than either, because rarely wrong is how a bug reaches a user.
 ///
 /// What is known about it, for whoever picks it up: one worker is correct;
 /// `testdata/programs/parallel` and sixty-four goroutines on one mutex reproduce

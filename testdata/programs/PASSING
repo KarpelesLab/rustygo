@@ -76,3 +76,4 @@ syscallptr linux
 yieldtimer
 structlayout linux
 reflectarrayof linux
+parallel linux

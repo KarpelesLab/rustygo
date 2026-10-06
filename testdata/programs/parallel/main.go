@@ -19,14 +19,18 @@ const workers = 64
 const each = 500
 
 func main() {
-	// GOMAXPROCS is a real limit, and reporting the previous one is how Go's
-	// own tests put it back afterwards.
-	old := runtime.GOMAXPROCS(4)
-	if old < 1 {
-		fmt.Println("GOMAXPROCS was", old)
+	// The program runs at whatever GOMAXPROCS the environment asked for rather
+	// than choosing a number itself, so that the same binary is the
+	// single-worker case and, with GOMAXPROCS=2 in front of it, the
+	// many-worker one. Setting the limit to what it already is must report that
+	// same number back; the number itself is never printed, because gc's
+	// default is the machine's CPU count and rustygo's is one.
+	procs := runtime.GOMAXPROCS(0)
+	if procs < 1 {
+		fmt.Println("GOMAXPROCS(0) =", procs, "want at least 1")
 	}
-	if n := runtime.GOMAXPROCS(0); n != 4 {
-		fmt.Println("GOMAXPROCS(0) =", n, "want 4")
+	if n := runtime.GOMAXPROCS(procs); n != procs {
+		fmt.Println("GOMAXPROCS(procs) =", n, "want", procs)
 	}
 	if runtime.NumCPU() < 1 {
 		fmt.Println("NumCPU =", runtime.NumCPU())
@@ -40,8 +44,8 @@ func main() {
 	fmt.Println("locked", pinnedToTheirThreads())
 	fmt.Println("selected", chosenAmongCases())
 
-	if n := runtime.GOMAXPROCS(old); n != 4 {
-		fmt.Println("GOMAXPROCS(old) =", n, "want 4")
+	if n := runtime.GOMAXPROCS(0); n != procs {
+		fmt.Println("GOMAXPROCS drifted to", n, "from", procs)
 	}
 	fmt.Println("goroutines", runtime.NumGoroutine() > 0)
 }

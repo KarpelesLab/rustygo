@@ -350,9 +350,11 @@ pointer belonging to a *worker's* own stack, so resuming it restores that pointe
 and returns through it. `pick` refuses to resume such a context and reports it
 rather than jumping into it, which is why the failure is a named one. To
 reproduce: `testdata/programs/parallel` — sixty-four goroutines on one mutex —
-with `GOMAXPROCS=2`, which gets the answer wrong about three runs in twenty.
-Compare *output*, not exit status: the program returns from `main` without
-reaching its last line, and that exits zero.
+with `GOMAXPROCS=2` in front of it, which fails about half the time: three runs
+in six, measured. It fails in two ways, and the first is the one to watch for,
+because it is the quiet one. Either the program returns from `main` without
+reaching its last line, which exits zero, so compare *output* and not exit
+status; or it stops making progress and has to be timed out.
 
 Three things were measured and they cannot all be true, which is the state to
 pick up from:
