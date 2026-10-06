@@ -70,6 +70,34 @@ func between(b []byte) bool {
 	return s >= "a" && s <= "m"
 }
 
+// A map lookup only reads its key, so the bytes answer for it. The two-result
+// form, the one-result form, and a key that is not there.
+var codes = map[string]int{"ok": 200, "moved": 301, "teapot": 418, "": -1}
+
+func code(b []byte) (int, bool) {
+	v, ok := codes[string(b)]
+	return v, ok
+}
+
+func code1(b []byte) int { return codes[string(b)] }
+
+// The same conversion feeding a lookup and a comparison.
+func both(b []byte) (int, bool) {
+	return codes[string(b)], string(b) == "ok"
+}
+
+// Storing has to keep the key, so this conversion is real.
+func remember(b []byte, v int) {
+	codes[string(b)] = v
+}
+
+// A named string type is still a string key.
+type name string
+
+var named = map[name]int{"x": 1}
+
+func byName(b []byte) int { return named[name(b)] }
+
 func main() {
 	cmp([]byte("abc"), []byte("abc"))
 	cmp([]byte("abc"), []byte("abd"))
@@ -94,6 +122,14 @@ func main() {
 	for _, s := range []string{"", "a", "m", "n", "A", "z"} {
 		println(s, between([]byte(s)))
 	}
+	for _, s := range []string{"ok", "moved", "teapot", "", "gone", "o"} {
+		v, found := code([]byte(s))
+		b1, b2 := both([]byte(s))
+		println(s, v, found, code1([]byte(s)), b1, b2)
+	}
+	remember([]byte("gone"), 410)
+	println(code1([]byte("gone")), len(codes))
+	println(byName([]byte("x")), byName([]byte("y")))
 
 	// The same value on both sides, which still needs one copy.
 	a := []byte("xy")

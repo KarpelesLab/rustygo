@@ -219,15 +219,57 @@ impl<K: GoKey, V: GoValue + Trace> GoMap<K, V> {
     }
 }
 
+/// Looking a string key up from bytes, for the one key type a Go string has:
+/// a named string type unfolds to `GoStr` like any other named non-struct type,
+/// so every `map[...]V` with a string key is a `GoMap<GoStr, V>`.
+impl<V: GoValue + Trace> GoMap<crate::string::GoStr, V> {
+    /// `m[string(b)]` over a byte slice's own array, without the string the
+    /// conversion would have made.
+    ///
+    /// gc elides the same copy and the standard library leans on it:
+    /// `net/textproto` looks up every header name this way. A lookup only reads
+    /// its key, so the bytes answer everything the string would; the emitter
+    /// decides when the shape applies (bytecmp.go).
+    ///
+    /// Nothing in here allocates, so the borrow into the slice's array crosses
+    /// no safe point.
+    pub fn get_bytes(self, b: crate::slice::Slice<crate::place::Slot<u8>>) -> V {
+        self.get_bytes_ok(b).0
+    }
+
+    /// `v, ok := m[string(b)]`, the same way.
+    pub fn get_bytes_ok(self, b: crate::slice::Slice<crate::place::Slot<u8>>) -> (V, bool) {
+        b.with_bytes(|bs| {
+            self.with(|t| match t.find_by(hash_bytes(bs), |k| k.bytes() == bs) {
+                Some(i) => match &t.slots[i] {
+                    Slot::Live(_, v) => (*v, true),
+                    _ => (V::zero(), false),
+                },
+                None => (V::zero(), false),
+            })
+            .unwrap_or((V::zero(), false))
+        })
+    }
+}
+
 impl<K: GoKey, V: GoValue> Table<K, V> {
     /// The slot holding `k`, if any.
     fn find(&self, k: &K) -> Option<usize> {
+        self.find_by(k.go_hash(), |key| key.go_eq(k))
+    }
+
+    /// The slot a key with this hash sits in, whatever stands for the key.
+    ///
+    /// Taking the hash and the comparison rather than the key itself is what
+    /// lets `m[string(b)]` be answered without making the string: the bytes
+    /// hash and compare the same way the string would (`get_bytes`).
+    fn find_by(&self, hash: u64, eq: impl Fn(&K) -> bool) -> Option<usize> {
         let mask = self.slots.len() - 1;
-        let mut i = (k.go_hash() as usize) & mask;
+        let mut i = (hash as usize) & mask;
         for _ in 0..self.slots.len() {
             match &self.slots[i] {
                 Slot::Empty => return None,
-                Slot::Live(key, _) if key.go_eq(k) => return Some(i),
+                Slot::Live(key, _) if eq(key) => return Some(i),
                 _ => i = (i + 1) & mask,
             }
         }
@@ -382,16 +424,24 @@ float_key!(f32, f64);
 impl GoKey for crate::string::GoStr {
     #[inline]
     fn go_hash(&self) -> u64 {
-        let mut h = 0u64;
-        for b in self.bytes() {
-            h = mix(h, *b as u64);
-        }
-        mix(h, self.bytes().len() as u64)
+        hash_bytes(self.bytes())
     }
     #[inline]
     fn go_eq(&self, other: &Self) -> bool {
         self == other
     }
+}
+
+/// A string key's hash, over the bytes alone, so that `m[string(b)]` can be
+/// answered from the slice's own array without a string ever existing. The one
+/// definition, used by both, because the two drifting apart would lose keys.
+#[inline]
+pub(crate) fn hash_bytes(bytes: &[u8]) -> u64 {
+    let mut h = 0u64;
+    for b in bytes {
+        h = mix(h, *b as u64);
+    }
+    mix(h, bytes.len() as u64)
 }
 
 impl GoKey for crate::unsafe_ptr::UPtr {

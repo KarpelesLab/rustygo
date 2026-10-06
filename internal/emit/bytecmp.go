@@ -25,12 +25,18 @@ import (
 // `net/textproto` and `net/http` read every header that way. There one
 // conversion serves several comparisons — go/ssa may even turn a long switch
 // into a binary search over `<` — so the question is asked of the conversion
-// rather than of each comparison: all of its uses have to be comparisons, and
-// then every one of them reads bytes.
+// rather than of each comparison: all of its uses have to read the string and
+// not keep it, and then none of them needs it to exist.
+//
+// `m[string(b)]` is the third shape. A lookup only reads its key, so the bytes
+// hash and compare exactly as the string would, and `net/textproto` looks up
+// every header name that way before it decides whether to canonicalize it.
+// Storing is different — `m[string(b)] = v` has to keep the key — so a map
+// update is a use that makes the string real.
 
-// findByteCompares records the string comparisons to emit over bytes instead
-// and the conversions they stand in for, and returns the latter as the
-// instructions the body leaves out.
+// findByteCompares records the string comparisons and map lookups to do over
+// bytes instead and the conversions they stand in for, and returns the latter
+// as the instructions the body leaves out.
 func (f *fnEmitter) findByteCompares() map[ssa.Instruction]bool {
 	var dead map[ssa.Instruction]bool
 	for _, b := range f.fn.Blocks {
@@ -39,7 +45,7 @@ func (f *fnEmitter) findByteCompares() map[ssa.Instruction]bool {
 			if !ok || !bytesToString(c) {
 				continue
 			}
-			users := comparisonUsers(c)
+			users := readOnlyUsers(c)
 			if len(users) == 0 {
 				continue
 			}
@@ -47,15 +53,30 @@ func (f *fnEmitter) findByteCompares() map[ssa.Instruction]bool {
 				dead = map[ssa.Instruction]bool{}
 				f.byteCmp = map[*ssa.BinOp]bool{}
 				f.byteConv = map[*ssa.Convert]bool{}
+				f.byteLookup = map[*ssa.Lookup]bool{}
 			}
 			dead[c] = true
 			f.byteConv[c] = true
-			for _, op := range users {
-				f.byteCmp[op] = true
+			for _, u := range users {
+				switch u := u.(type) {
+				case *ssa.BinOp:
+					f.byteCmp[u] = true
+				case *ssa.Lookup:
+					f.byteLookup[u] = true
+				}
 			}
 		}
 	}
 	return dead
+}
+
+// byteLookupExpr renders `m[string(b)]` over the slice's own bytes.
+func (f *fnEmitter) byteLookupExpr(v *ssa.Lookup) string {
+	get := "get_bytes"
+	if v.CommaOk {
+		get = "get_bytes_ok"
+	}
+	return fmt.Sprintf("(%s).%s(%s)", f.val(v.X), get, f.val(f.elidedBytes(v.Index)))
 }
 
 // byteCompare renders a string comparison over the bytes themselves. At least
@@ -112,23 +133,36 @@ func bytesToString(c *ssa.Convert) bool {
 	return b != nil && b.Kind() == types.Uint8
 }
 
-// comparisonUsers returns the comparisons that use c, or nil if anything else
-// does — in which case the string has to be made after all.
-func comparisonUsers(c *ssa.Convert) []*ssa.BinOp {
+// readOnlyUsers returns the instructions that use c and only read it — a
+// comparison, or a map lookup keyed on it — or nil if anything else does, in
+// which case the string has to be made after all.
+func readOnlyUsers(c *ssa.Convert) []ssa.Instruction {
 	refs := c.Referrers()
 	if refs == nil {
 		return nil
 	}
-	var users []*ssa.BinOp
+	var users []ssa.Instruction
 	for _, r := range *refs {
-		if _, isDebug := r.(*ssa.DebugRef); isDebug {
+		switch r := r.(type) {
+		case *ssa.DebugRef:
 			continue
-		}
-		op, ok := r.(*ssa.BinOp)
-		if !ok || orderings[op.Op] == "" {
+		case *ssa.BinOp:
+			if orderings[r.Op] == "" {
+				return nil
+			}
+		case *ssa.Lookup:
+			// The key, not the thing being indexed: `string(b)[i]` reads the
+			// string itself, and only a map's key is answerable from bytes.
+			if r.Index != c {
+				return nil
+			}
+			if _, isMap := r.X.Type().Underlying().(*types.Map); !isMap {
+				return nil
+			}
+		default:
 			return nil
 		}
-		users = append(users, op)
+		users = append(users, r)
 	}
 	return users
 }

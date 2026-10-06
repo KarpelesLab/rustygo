@@ -37,10 +37,12 @@ type fnEmitter struct {
 	// tables maps an allocation to the static holding its constant elements,
 	// and the stores that static replaces (tables.go).
 	tables map[*ssa.Alloc]string
-	// byteCmp holds the string comparisons to make over bytes instead, and
-	// byteConv the conversions to string that they stand in for (bytecmp.go).
-	byteCmp  map[*ssa.BinOp]bool
-	byteConv map[*ssa.Convert]bool
+	// byteCmp holds the string comparisons to make over bytes instead,
+	// byteLookup the map lookups, and byteConv the conversions to string that
+	// the two of them stand in for (bytecmp.go).
+	byteCmp    map[*ssa.BinOp]bool
+	byteLookup map[*ssa.Lookup]bool
+	byteConv   map[*ssa.Convert]bool
 }
 
 // markDead adds instructions to the set the body leaves out.
@@ -726,6 +728,9 @@ func (f *fnEmitter) expr(v ssa.Value) string {
 		return fmt.Sprintf("GoMap::<%s, %s>::make(%s)",
 			f.typ(mt.Key(), v.Pos()), f.typ(mt.Elem(), v.Pos()), size)
 	case *ssa.Lookup:
+		if f.byteLookup[v] {
+			return f.byteLookupExpr(v)
+		}
 		if _, ok := v.X.Type().Underlying().(*types.Map); ok {
 			if v.CommaOk {
 				return fmt.Sprintf("(%s).get_ok(%s)", f.val(v.X), f.val(v.Index))
