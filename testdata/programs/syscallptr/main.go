@@ -8,6 +8,11 @@
 // pointer the collector cannot see is a path the kernel reads out of freed
 // memory — which came out, before this was rooted, as `/dev/null` reporting
 // that it did not exist.
+//
+// It then caught a second bug, which is why the last line is what it is: a
+// program that never names `os.Stdout` had its standard descriptors closed by
+// their own finalizers, because dead-initialization elimination dropped the
+// stores into those variables while keeping the calls that made the files.
 package main
 
 import (
@@ -76,4 +81,16 @@ func main() {
 	} else {
 		println("missing file reports ENOENT")
 	}
+
+	// And the standard descriptors are still open, which this line arriving is
+	// the proof of.
+	//
+	// `os.Stdin`, `os.Stdout` and `os.Stderr` are made by `os`'s initializer
+	// and each carries a finalizer that closes its descriptor. Naming them
+	// anywhere above would hide what this program caught: dead-initialization
+	// elimination dropped the stores into those three variables, because
+	// nothing here reads them, while keeping the calls that made the files —
+	// so all three became garbage, and the first collection closed fds 2, 1
+	// and 0. Everything after that wrote into EBADF and the program exited 0.
+	println("standard descriptors still open")
 }

@@ -140,7 +140,29 @@ func analyzeInit(fn *ssa.Function, liveGlobals map[*ssa.Global]bool) (dead map[s
 			case *ssa.MapUpdate:
 				target = s.Map
 			}
-			if objectLive(target) {
+			keep := objectLive(target)
+			// And a store whose value a live instruction produced, even where
+			// nothing reads the variable. Dropping that store keeps the call
+			// and throws away the only reference to what it made — and a
+			// call's effects can include registering a finalizer, which then
+			// runs on an object the program is entitled to still own.
+			//
+			// `os`'s initializer is exactly that shape. `os.Stderr =
+			// NewFile(2, "/dev/stderr")` registers a finalizer that closes the
+			// descriptor, so a program that never names `os.Stderr` had all
+			// three standard descriptors closed the first time the collector
+			// ran — and then wrote its output into EBADF and exited 0. Under
+			// GC torture that took sixty-four allocations.
+			//
+			// It costs nothing in code: the call is kept either way, and the
+			// variable's storage is one static. What it buys is the invariant
+			// this pass claims, that no initializer's effects are lost.
+			if st, ok := s.(*ssa.Store); ok && !keep {
+				if def, isInstr := st.Val.(ssa.Instruction); isInstr && live[def] {
+					keep = true
+				}
+			}
+			if keep {
 				mark(s)
 				progress = true
 			}

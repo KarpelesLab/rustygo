@@ -72,3 +72,5 @@ recvalues linux
 reflectmakefunc linux
 http2tls linux
 mfrecover linux
+syscallptr linux
+yieldtimer
