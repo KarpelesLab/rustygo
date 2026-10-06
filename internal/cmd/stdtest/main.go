@@ -151,11 +151,9 @@ type result struct {
 	Pkg     string   `json:"pkg"`
 	Built   bool     `json:"built"`
 	Pass    int      `json:"pass"`
-	Fail    int      `json:"fail"`
 	Skip    int      `json:"skip"`
-	Failed  []string `json:"failed,omitempty"`  // failing test names, rustygo's own
+	Failed  []string `json:"failed,omitempty"`  // every failing test, in the order they ran
 	AlsoGc  []string `json:"alsoGc,omitempty"`  // of those, the ones gc fails here too
-	Allocs  []string `json:"allocs,omitempty"`  // of those, the ones that count allocations
 	Problem string   `json:"problem,omitempty"` // a build or run failure
 	Causes  []string `json:"causes,omitempty"`  // what the build or load failure was, one entry per distinct diagnostic
 	Says    []string `json:"says,omitempty"`    // what each failing test complained about, in Failed's order
@@ -165,8 +163,45 @@ type result struct {
 
 func (r result) elapsed() time.Duration { return time.Duration(r.Seconds * float64(time.Second)) }
 
+// ran is how many of the package's tests the binary got through, whatever their
+// verdict.
+func (r result) ran() int { return r.Pass + len(r.Failed) + r.Skip }
+
 // whole reports whether every test in the package passed.
-func (r result) whole() bool { return r.Fail == 0 && r.Problem == "" && r.Pass > 0 }
+func (r result) whole() bool { return len(r.ours()) == 0 && r.Problem == "" && r.Pass > 0 }
+
+// allocs is the failures that count allocations, which rustygo cannot satisfy
+// while it boxes a value on its way into an interface where gc does not. Nothing
+// about the compiler will change them, so they are counted apart.
+//
+// The judgement is made here rather than when the package was measured, so that
+// sharpening it does not mean building a hundred test binaries again.
+func (r result) allocs() []string {
+	var counting []string
+	for i, name := range r.Failed {
+		said := ""
+		if i < len(r.Says) {
+			said = r.Says[i]
+		}
+		if countsAllocations(name, said) && !slices.Contains(r.AlsoGc, name) {
+			counting = append(counting, name)
+		}
+	}
+	return counting
+}
+
+// ours is the failures that are rustygo's: all of them but the ones gc fails on
+// this machine as well and the ones that count allocations.
+func (r result) ours() []string {
+	apart := r.allocs()
+	var mine []string
+	for _, name := range r.Failed {
+		if !slices.Contains(r.AlsoGc, name) && !slices.Contains(apart, name) {
+			mine = append(mine, name)
+		}
+	}
+	return mine
+}
 
 func main() {
 	workers := flag.Int("n", 1, "packages to build at once (see the package comment before raising it)")
@@ -399,20 +434,16 @@ func runPkg(pkg string, o options) (res result) {
 		case strings.HasPrefix(line, "--- SKIP: "):
 			r.Skip++
 		case strings.HasPrefix(line, "--- FAIL: "):
-			r.Fail++
 			name, _, _ := strings.Cut(strings.TrimPrefix(line, "--- FAIL: "), " ")
 			r.Failed = append(r.Failed, name)
 			r.Says = append(r.Says, complaint(said.String()))
-			if countsAllocations(name, said.String()) {
-				r.Allocs = append(r.Allocs, name)
-			}
 		default:
 			said.WriteString(line)
 		}
 	}
 	if runCtx.Err() != nil {
 		r.Problem = fmt.Sprintf("timed out after %v", o.run)
-	} else if r.Pass+r.Fail+r.Skip == 0 {
+	} else if r.ran() == 0 {
 		r.Problem = "ran no tests: " + lastInterestingLine(string(raw))
 		if err != nil {
 			r.Problem += " (" + err.Error() + ")"
@@ -424,17 +455,18 @@ func runPkg(pkg string, o options) (res result) {
 		// tests after it never ran, which the counts would otherwise hide.
 		var exit *exec.ExitError
 		if errors.As(err, &exit) && exit.ExitCode() != 1 {
-			r.Problem = "stopped: " + lastInterestingLine(string(raw))
+			// Whatever it said last, or how it left if it said nothing.
+			why := lastInterestingLine(string(raw))
+			if why == "" {
+				why = err.Error()
+			}
+			r.Problem = "stopped: " + why
 		}
 	}
 
-	// Two kinds of failure are nobody's fault here, and both are counted
-	// apart: a test that fails under gc on this machine as well, and a test
-	// that counts allocations, which rustygo cannot satisfy while it boxes a
-	// value on its way into an interface where gc does not.
+	// A failure gc shares on this machine is the machine's news, and which of
+	// the rest are rustygo's is decided when the report is written.
 	r.AlsoGc = failsUnderGc(pkg, r.Failed, o)
-	r.Allocs = slices.DeleteFunc(r.Allocs, func(n string) bool { return slices.Contains(r.AlsoGc, n) })
-	r.Fail -= len(r.AlsoGc) + len(r.Allocs)
 	return r
 }
 
@@ -544,7 +576,7 @@ func pruneCache(cache string, budget int64) {
 // that talks about allocations is taken at its word.
 var (
 	allocCounting  = regexp.MustCompile(`Alloc|Malloc`)
-	allocComplaint = regexp.MustCompile(`(?i)allocs?\b|allocation|malloc`)
+	allocComplaint = regexp.MustCompile(`(?i)alloc`)
 )
 
 func countsAllocations(test, said string) bool {
@@ -683,7 +715,9 @@ var (
 func diagnose(out string) (problem string, causes []string) {
 	seen := map[string]bool{}
 	for line := range strings.Lines(out) {
-		line = strings.TrimSpace(line)
+		// `rustygo: ` is how the command prefixes the error it exits with, and
+		// the diagnostic a reader wants is what follows it.
+		line = strings.TrimPrefix(strings.TrimSpace(line), "rustygo: ")
 		if !position.MatchString(line) {
 			continue
 		}
@@ -742,7 +776,7 @@ func oneLine(r result) string {
 	if r.Problem != "" && r.Pass == 0 {
 		return fmt.Sprintf("%-22s %s", r.Pkg, r.Problem)
 	}
-	if r.Built && r.Pass+r.Fail+r.Skip == 0 {
+	if r.Built && r.ran() == 0 {
 		// A census, which stops at the Rust and runs nothing.
 		return fmt.Sprintf("%-22s emits, %v", r.Pkg, r.elapsed().Round(time.Second))
 	}
@@ -750,7 +784,7 @@ func oneLine(r result) string {
 	if n := len(r.AlsoGc); n > 0 {
 		extra += fmt.Sprintf(", %d gc fails too", n)
 	}
-	if n := len(r.Allocs); n > 0 {
+	if n := len(r.allocs()); n > 0 {
 		extra += fmt.Sprintf(", %d count allocations", n)
 	}
 	if r.Problem != "" {
@@ -760,7 +794,7 @@ func oneLine(r result) string {
 		extra += fmt.Sprintf(", of %d", r.Tests)
 	}
 	return fmt.Sprintf("%-22s %d/%d pass, %d skipped%s, %v",
-		r.Pkg, r.Pass, r.Pass+r.Fail, r.Skip, extra, r.elapsed().Round(time.Second))
+		r.Pkg, r.Pass, r.Pass+len(r.ours()), r.Skip, extra, r.elapsed().Round(time.Second))
 }
 
 func markdown(results []result, census bool, dir string) string {
@@ -772,8 +806,8 @@ func markdown(results []result, census bool, dir string) string {
 	var pass, total, whole, built, allocs, alsoGc int
 	for _, r := range results {
 		pass += r.Pass
-		total += r.Pass + r.Fail
-		allocs += len(r.Allocs)
+		total += r.Pass + len(r.ours())
+		allocs += len(r.allocs())
 		alsoGc += len(r.AlsoGc)
 		if r.Built {
 			built++
@@ -798,7 +832,7 @@ order to build at all is in [BLOCKERS.md](BLOCKERS.md).
 	sorted := slices.Clone(results)
 	sort.Slice(sorted, func(i, j int) bool { return sorted[i].Pkg < sorted[j].Pkg })
 	for _, r := range sorted {
-		fmt.Fprintf(&b, "| %s | %d | %d | %d | %s |\n", r.Pkg, r.Pass, r.Fail, r.Skip, truncate(note(r), 110))
+		fmt.Fprintf(&b, "| %s | %d | %d | %d | %s |\n", r.Pkg, r.Pass, len(r.ours()), r.Skip, truncate(note(r), 110))
 	}
 	b.WriteString(complaints(sorted))
 	b.WriteString(blockers(sorted))
@@ -813,8 +847,9 @@ order to build at all is in [BLOCKERS.md](BLOCKERS.md).
 func complaints(results []result) string {
 	var b strings.Builder
 	for _, r := range results {
+		mine := r.ours()
 		for i, name := range r.Failed {
-			if slices.Contains(r.AlsoGc, name) || slices.Contains(r.Allocs, name) {
+			if !slices.Contains(mine, name) {
 				continue
 			}
 			said := ""
@@ -958,7 +993,7 @@ func module(dir string) string {
 // and how many of its failures were put aside.
 func note(r result) string {
 	var parts []string
-	if mine := ours(r); len(mine) > 0 {
+	if mine := r.ours(); len(mine) > 0 {
 		if len(mine) > 6 {
 			mine = append(mine[:6:6], "…")
 		}
@@ -969,14 +1004,14 @@ func note(r result) string {
 	}
 	// A binary that ran fewer tests than the package has says so, whether or not
 	// it admitted to stopping: the tests it never reached are not passing.
-	if ran := r.Pass + r.Fail + r.Skip; ran > 0 && r.Tests > ran {
+	if ran := r.ran(); ran > 0 && r.Tests > ran {
 		parts = append(parts, fmt.Sprintf("reached %d of %d tests", ran, r.Tests))
 	}
 	if n := len(r.AlsoGc); n > 0 {
 		parts = append(parts, fmt.Sprintf("%d gc fails here too", n))
 	}
-	if len(r.Allocs) > 0 {
-		parts = append(parts, "counting allocations: "+strings.Join(r.Allocs, ", "))
+	if counting := r.allocs(); len(counting) > 0 {
+		parts = append(parts, "counting allocations: "+strings.Join(counting, ", "))
 	}
 	return strings.Join(parts, "; ")
 }
@@ -1127,18 +1162,6 @@ a set that only pays off whole.
 | frees | fix | packages |
 |---:|---|---|
 ` + b.String()
-}
-
-// ours is the failures that are rustygo's: all of them but the ones gc fails
-// on this machine as well and the ones that count allocations.
-func ours(r result) []string {
-	var mine []string
-	for _, name := range r.Failed {
-		if !slices.Contains(r.AlsoGc, name) && !slices.Contains(r.Allocs, name) {
-			mine = append(mine, name)
-		}
-	}
-	return mine
 }
 
 // readState reads the results a previous sweep recorded. A later entry for a
