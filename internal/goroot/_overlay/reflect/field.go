@@ -42,7 +42,7 @@ func (v Value) Slice(i, j int) Value {
 		out.data = unsafe.Add(h.data, uintptr(i)*uintptr(descSize(descElem(v.d))))
 		out.len = j - i
 		out.cap = h.cap - i
-		return Value{v.d, p, false}
+		return Value{d: v.d, p: p, sticky: v.ro()}
 	case String:
 		s := *(*string)(v.p)
 		if i < 0 || j < i || j > len(s) {
@@ -50,7 +50,7 @@ func (v Value) Slice(i, j int) Value {
 		}
 		p := descZero(v.d)
 		*(*string)(p) = s[i:j]
-		return Value{v.d, p, false}
+		return Value{d: v.d, p: p, sticky: v.ro()}
 	case Array:
 		// The result would be a []T, and the descriptor for that slice type is
 		// one the emitter only writes for types the program mentions
@@ -73,7 +73,7 @@ func (v Value) Slice3(i, j, k int) Value {
 	out.data = unsafe.Add(h.data, uintptr(i)*uintptr(descSize(descElem(v.d))))
 	out.len = j - i
 	out.cap = k - i
-	return Value{v.d, p, false}
+	return Value{d: v.d, p: p, sticky: v.ro()}
 }
 
 // MakeMapWithSize makes an empty map of a type the program mentions. The size
