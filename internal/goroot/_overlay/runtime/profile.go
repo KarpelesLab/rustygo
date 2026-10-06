@@ -5,17 +5,16 @@ import (
 	"unsafe"
 )
 
-// The hooks `runtime/pprof`, `os/signal` and `runtime/debug` expect the runtime
-// to provide.
+// The hooks `runtime/pprof`, `runtime/metrics` and `os/signal` expect the
+// runtime to provide.
 //
-// Profiling and signal delivery are not here (roadmap: profiling is a non-goal
-// for now, signals are M3's `os/signal`). These exist because a test binary
-// reaches every one of them: `testing` imports `runtime/pprof` for its
-// `-test.cpuprofile` flags and `os/signal` for its timeout, and a program that
-// asks for neither still has to link.
+// Profiling is a roadmap non-goal for now, and these exist because a test
+// binary reaches every one of them whether or not it asks: `testing` imports
+// `runtime/pprof` for its `-test.cpuprofile` flags, and a program that wants no
+// profile still has to link. Each answers what an empty profile would — no
+// samples, no frames — rather than refusing.
 //
-// Each one answers what an empty profile and a quiet process would: no samples,
-// no frames, no signals.
+// Signals are at the bottom of the file and are real.
 
 // Profiles, which the standard library pulls from here by name.
 
@@ -91,19 +90,17 @@ func pprof_getProfLabel() unsafe.Pointer { return profLabels }
 func blockevent(cycles int64, skip int) {}
 
 // Metrics. runtime/metrics asks the runtime to fill in a Value for each Sample
-// it is given, by name, and its own Read documents what happens to a name the
-// runtime does not implement: the Value comes back as KindBad. rustygo
-// implements none of them, so that is what every one of them gets.
+// it is given, by name; its own Read documents what a name the runtime does not
+// implement gets back, which is KindBad.
 //
-// The collector does know some of what the list asks about — live bytes and
-// objects, and how many collections have run, which ReadMemStats already
-// reports — so this could answer a handful of the hundred names in
-// metrics.All(). It does not, because a caller cannot tell a metric that is
-// missing from one that is zero except by the kind, and a partial answer is
-// the one shape that makes the distinction useless. The mirror of Sample below
-// is what a real implementation would write through.
+// rustygo answers the ones it can answer truthfully, which are the counters the
+// collector already keeps and the few whose honest value is a constant: there
+// is no soft memory limit, the heap doubles rather than following a percentage,
+// and no finalizer or cleanup is ever queued or run. Everything else in
+// metrics.All() — the CPU classes, the size histograms, the scavenger — is
+// KindBad, because there is no number behind it and a zero would read as one.
 //
-// That mirror is metrics.Sample's layout, because the runtime is handed a
+// metricsSample is metrics.Sample's layout, because the runtime is handed a
 // pointer to an array of them and nothing passes the size across for it to
 // check — unlike sync's notifyList, which does. It is pinned to a Go version
 // along with everything else here (DESIGN §8).
@@ -116,24 +113,64 @@ type metricsSample struct {
 	}
 }
 
+// The kinds, as metrics numbers them.
+const (
+	metricBad = iota
+	metricUint64
+)
+
 //go:linkname metrics_readMetrics runtime/metrics.runtime_readMetrics
 func metrics_readMetrics(p unsafe.Pointer, length, capacity int) {
 	if p == nil || length <= 0 {
 		return
 	}
+	objects, _, totalObjects, _, _ := heapStats()
 	samples := unsafe.Slice((*metricsSample)(p), length)
 	for i := range samples {
-		samples[i].value.kind = 0 // metrics.KindBad
-		samples[i].value.scalar = 0
+		v, ok := uint64(0), true
+		switch samples[i].name {
+		case "/gc/heap/allocs:objects":
+			v = totalObjects
+		case "/gc/heap/frees:objects":
+			v = totalObjects - objects
+		case "/gc/gogc:percent":
+			// The collector runs when the live set has doubled (src/heap.rs),
+			// which is what a hundred percent means.
+			v = 100
+		case "/gc/gomemlimit:bytes":
+			v = 1<<63 - 1 // no limit, reported as gc reports none
+		case "/gc/cleanups/executed:cleanups", "/gc/cleanups/queued:cleanups",
+			"/gc/finalizers/executed:finalizers", "/gc/finalizers/queued:finalizers":
+			v = 0 // none is ever queued, so none is ever run
+		default:
+			ok = false
+		}
 		samples[i].value.pointer = nil
+		if ok {
+			samples[i].value.kind, samples[i].value.scalar = metricUint64, v
+		} else {
+			samples[i].value.kind, samples[i].value.scalar = metricBad, 0
+		}
 	}
 }
 
 // The names the runtime implements, which metrics' own test holds against
-// metrics.All(). None, so far.
+// metrics.All(); it reports the difference, so the list being short is a
+// failure it can describe rather than one it falls over.
 
 //go:linkname metrics_readMetricNames runtime/metrics_test.runtime_readMetricNames
-func metrics_readMetricNames() []string { return nil }
+func metrics_readMetricNames() []string {
+	return []string{
+		"/gc/cleanups/executed:cleanups",
+		"/gc/cleanups/queued:cleanups",
+		"/gc/finalizers/executed:finalizers",
+		"/gc/finalizers/queued:finalizers",
+		"/gc/gogc:percent",
+		"/gc/gomemlimit:bytes",
+		"/gc/heap/allocs:objects",
+		"/gc/heap/frees:objects",
+	}
+}
 
 // Signals.
 //

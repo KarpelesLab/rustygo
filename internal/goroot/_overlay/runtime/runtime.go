@@ -263,8 +263,35 @@ func SetBlockProfileRate(rate int)         {}
 // (src/heap.rs) — and a fault is a fault: rustygo does not catch one and turn
 // it into a panic, so `SetPanicOnFault` cannot honestly say it did.
 
+// readGCStats fills in the buffer debug.ReadGCStats hands over: `n` pause
+// durations, then `n` moments those pauses ended, then the wall time of the
+// last collection, how many there have been, and the total pause.
+//
+// The collector counts its collections and does not time them, which is what
+// ReadMemStats already says — every entry of its PauseNs is zero. So the pauses
+// and their end times are reported as zero here as well, one per collection,
+// and the two answers agree. Leaving the buffer alone instead, as this used to,
+// left ReadGCStats reading whatever happened to be in it.
+//
 //go:linkname debug_readGCStats runtime/debug.readGCStats
-func debug_readGCStats(p *[]int64) {}
+func debug_readGCStats(p *[]int64) {
+	_, _, _, _, collections := heapStats()
+	n := int(collections)
+	if n > pauseRecords {
+		n = pauseRecords
+	}
+	b := (*p)[:2*n+3]
+	clear(b[:2*n])
+	b[2*n] = 0                    // no wall time kept for the last collection
+	b[2*n+1] = int64(collections) //
+	b[2*n+2] = 0                  // no pause measured, so none to total
+	*p = b
+}
+
+// pauseRecords is how many collections the pause history holds, which is
+// len(MemStats.PauseNs); debug.ReadGCStats sizes its buffer from the same
+// number and will not take more.
+const pauseRecords = 256
 
 //go:linkname debug_freeOSMemory runtime/debug.freeOSMemory
 func debug_freeOSMemory() { GC() }
