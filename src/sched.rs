@@ -401,21 +401,17 @@ pub fn run_program(init: fn(), main: fn()) -> ! {
 ///
 /// **One, and not the number of CPUs that Go's default is.** Everything above is
 /// written for more and setting the variable gets it, but more is not yet
-/// correct: a goroutine's saved context acquires a stack pointer belonging to a
-/// worker's own stack, which `pick` catches, and the program it belongs to ends
-/// up returning from `main` without having run it, or stops making progress at
-/// all. Two workers get that wrong about half the time, so two is no safer a
-/// default than sixty-four, and a default that were only rarely wrong would be
-/// worse than either, because rarely wrong is how a bug reaches a user.
+/// correct: something corrupts memory once a second worker exists. Two workers
+/// stall six runs in twenty and four crash eighteen, so two is no safer a default
+/// than sixty-four, and a default that were only rarely wrong would be worse than
+/// either, because rarely wrong is how a bug reaches a user.
 ///
-/// What is known about it, for whoever picks it up: one worker is correct;
-/// `testdata/programs/parallel` and sixty-four goroutines on one mutex reproduce
-/// it in seconds at two; the thread-local that names the running goroutine, the
-/// scheduler's own record of it, and the stack the thread is standing on all
-/// agree at the moment of failure, so it is not a stale thread-local and not one
-/// `Gid` handed to two threads; and the corruption is a worker's own stack
-/// pointer appearing in a goroutine's context, which only `leave` writes and
-/// only ever on the goroutine's own stack.
+/// What is known about it is in the roadmap's M2 note, which has the numbers and
+/// the suspects. The short of it: every failure happens before the reproducer
+/// prints anything, `RUSTYGO_TRACE=sched` turns the stall into a crash and once
+/// into glibc's own `double free or corruption`, and the worker stack pointer
+/// that `pick` catches inside a goroutine's context is therefore more likely a
+/// symptom of a `G` written by the wrong thread than the first thing to go wrong.
 ///
 /// Read once, before any worker exists. `runtime.GOMAXPROCS` changes it
 /// afterwards, which is what Go's own tests do when they want to be

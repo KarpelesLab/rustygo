@@ -345,32 +345,54 @@ every Go package-level variable was one copy per thread.
   also park until a moment on the clock, which is what `time.Sleep` and the
   timer list use. `time.NewTimer`, `After` and `Ticker` work, fired by a
   timer goroutine in the runtime overlay.
-**Next: more than one worker.** A goroutine's saved context acquires a stack
-pointer belonging to a *worker's* own stack, so resuming it restores that pointer
-and returns through it. `pick` refuses to resume such a context and reports it
-rather than jumping into it, which is why the failure is a named one. To
-reproduce: `testdata/programs/parallel` — sixty-four goroutines on one mutex —
-with `GOMAXPROCS=2` in front of it, which fails about half the time: three runs
-in six, measured. It fails in two ways, and the first is the one to watch for,
-because it is the quiet one. Either the program returns from `main` without
-reaching its last line, which exits zero, so compare *output* and not exit
-status; or it stops making progress and has to be timed out.
+**Next: more than one worker.** Something corrupts memory once a second worker
+exists. To reproduce, build `testdata/programs/parallel` — sixty-four goroutines
+on one mutex — and run the binary itself with `GOMAXPROCS` in front of it, twenty
+times at each setting. Measured on this tree:
 
-Three things were measured and they cannot all be true, which is the state to
-pick up from:
+| `GOMAXPROCS` | correct | stalls | segfaults | `pick` says so |
+|---|---|---|---|---|
+| 1 | 20 | 0 | 0 | 0 |
+| 2 | 14 | 6 | 0 | 0 |
+| 4 | 0 | 1 | 18 | 1 |
 
-* At the moment of failure the thread-local naming the running goroutine, the
-  scheduler's own `M::current`, and the goroutine whose stack the thread is
-  standing on all agree. So it is not a stale thread-local, and not one `Gid`
-  handed to two threads.
-* The only code that writes a goroutine's context is `leave`, and an assertion
-  that `leave` is standing on that goroutine's own stack never fired.
-* `pick` nevertheless finds worker stack pointers in goroutine contexts.
+Every one of those failures produces *no output at all*: the program dies or
+stops during the first of the seven checks, before the first `Println`. That is
+worth saying because an earlier note here claimed the opposite — that the usual
+failure was a quiet one, returning from `main` without reaching its last line and
+exiting zero, so that output had to be compared rather than exit status. That
+symptom has gone, and the explanation is almost certainly `110c7e9` rather than
+the scheduler: the standard descriptors were being collected and their finalizers
+were closing fds 0, 1 and 2, after which every write went to EBADF and the
+program exited zero. More workers meant more collections, which is why it looked
+like a scheduling bug and scaled like one.
 
-So one of those measurements is wrong, and the way to settle it is to attribute
-the bad write instead of inferring it: give `Context` an owner that
-`Context::prepare` sets and `switch` checks, and give `switch`'s two arguments
-distinct types so that `from` and `to` cannot be transposed.
+What is left is a memory bug, and the sharpest evidence for that is what happens
+under `RUSTYGO_TRACE=sched`. Tracing allocates and writes at scheduler points, so
+it perturbs both timing and the heap, and with it on at two workers the stall
+turns into a crash in roughly a third of runs — once with glibc itself reporting
+`double free or corruption (out)` after two `worker 0: nothing to run` lines. A
+corrupt allocator explains the rest: a goroutine's saved context holding a
+*worker's* stack pointer, which `pick` catches and names, is what a `G` record
+written by the wrong thread would look like, so it is likely a symptom and not
+the cause. Note that `MALLOC_CHECK_=3` does not catch it, and valgrind is no help
+as things stand, because memcheck cannot follow a naked-assembly stack switch
+without `VALGRIND_STACK_REGISTER` client requests the runtime does not make.
+
+So the thing to do is find the write, and the suspects are the places where this
+branch removed a check rather than added a lock:
+
+* `src/map.rs` holds its table in an `UnsafeCell` rather than a `RefCell`,
+  because concurrent map *reads* are legal Go and a borrow counter makes them a
+  race. That removed the one dynamic check that would have caught a concurrent
+  map write, and a corrupted hash table is exactly what produces a glibc double
+  free. Putting the `RefCell` back behind a debug-only feature and seeing whether
+  the failure becomes a named double borrow would settle it in one run.
+* `heap::Global<P>`'s double-checked initialization, and the `Lock<T>` in
+  `src/tls.rs` that guards it.
+* The older plan still stands as a second line: give `Context` an owner that
+  `Context::prepare` sets and `switch` checks, and give `switch`'s two arguments
+  distinct types so `from` and `to` cannot be transposed.
 
 * Also not yet: work stealing with a run queue per worker (one shared queue under
   one lock today), Go's `sysmon` taking a processor slot back from a goroutine

@@ -23,6 +23,14 @@
 //! reads are then plain loads, which is the position DESIGN §2 takes for every
 //! other word on the heap and §13 question 6 leaves open.
 //!
+//! What that costs is the one dynamic check that used to catch a concurrent
+//! *write*, and the roadmap's M2 note names this file as a suspect for the
+//! memory corruption that appears at more than one worker for exactly that
+//! reason: a half-rehashed table is what produces a double free. If that is
+//! where it is, putting the `RefCell` back behind a debug-only feature turns the
+//! corruption into a named double borrow in one run. It is not on by default
+//! because the counter would then race on every legal concurrent read.
+//!
 //! **M1 status:** one table, grown by rehashing, with no incremental growth
 //! and no per-size-class allocation.
 
