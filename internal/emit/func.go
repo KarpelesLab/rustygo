@@ -37,9 +37,10 @@ type fnEmitter struct {
 	// tables maps an allocation to the static holding its constant elements,
 	// and the stores that static replaces (tables.go).
 	tables map[*ssa.Alloc]string
-	// byteCmp holds the string comparisons to make over bytes instead, which
-	// is what lets the conversion on either side be skipped (bytecmp.go).
-	byteCmp map[*ssa.BinOp]bool
+	// byteCmp holds the string comparisons to make over bytes instead, and
+	// byteConv the conversions to string that they stand in for (bytecmp.go).
+	byteCmp  map[*ssa.BinOp]bool
+	byteConv map[*ssa.Convert]bool
 }
 
 // markDead adds instructions to the set the body leaves out.
@@ -106,9 +107,7 @@ func (e *emitter) function(fn *ssa.Function) {
 	f.markDead(fromTables)
 	// `string(a) == string(b)` compares the bytes where they lie, as gc does,
 	// rather than copying both sides into fresh strings first (bytecmp.go).
-	var fromCompares map[ssa.Instruction]bool
-	f.byteCmp, fromCompares = f.findByteCompares()
-	f.markDead(fromCompares)
+	f.markDead(f.findByteCompares())
 	f.collectRoots()
 	f.hasDefers = hasDefers(fn)
 	if len(fn.FreeVars) > 0 {

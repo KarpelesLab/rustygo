@@ -38,6 +38,38 @@ func which(b []byte) string {
 	return "other"
 }
 
+// One conversion, nine comparisons, and go/ssa is free to turn the switch into
+// a binary search over `<` rather than a chain of `==`.
+func method(b []byte) int {
+	switch string(b) {
+	case "GET":
+		return 1
+	case "HEAD":
+		return 2
+	case "POST":
+		return 3
+	case "PUT":
+		return 4
+	case "DELETE":
+		return 5
+	case "CONNECT":
+		return 6
+	case "OPTIONS":
+		return 7
+	case "TRACE":
+		return 8
+	case "PATCH":
+		return 9
+	}
+	return 0
+}
+
+// One conversion used by two comparisons of its own, written out.
+func between(b []byte) bool {
+	s := string(b)
+	return s >= "a" && s <= "m"
+}
+
 func main() {
 	cmp([]byte("abc"), []byte("abc"))
 	cmp([]byte("abc"), []byte("abd"))
@@ -56,6 +88,12 @@ func main() {
 
 	println(kept([]byte("keep")), kept([]byte("drop")))
 	println(which([]byte("GET")), which([]byte("POST")), which([]byte("PUT")))
+	for _, m := range []string{"GET", "HEAD", "POST", "PUT", "DELETE", "CONNECT", "OPTIONS", "TRACE", "PATCH", "BREW", ""} {
+		println(m, method([]byte(m)))
+	}
+	for _, s := range []string{"", "a", "m", "n", "A", "z"} {
+		println(s, between([]byte(s)))
+	}
 
 	// The same value on both sides, which still needs one copy.
 	a := []byte("xy")
