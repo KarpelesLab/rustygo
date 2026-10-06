@@ -25,7 +25,14 @@ import (
 )
 
 // Tags are the build tags every rustygo load sets.
-var Tags = []string{"rustygo", "purego"}
+//
+// `purego` is the standard library's own name for "no assembly here"; outside
+// it, the convention is `noasm`, which `github.com/klauspost/compress`,
+// `filippo.io/edwards25519`, `golang.org/x/exp` and a long tail of libraries
+// with hand-written amd64 use to select a generic Go sibling. Both are set,
+// because a package compiled here has no assembler: a function declared without
+// a body and implemented in a `.s` file has nothing the emitter can call.
+var Tags = []string{"rustygo", "purego", "noasm"}
 
 // Result is a fully built SSA program.
 type Result struct {
