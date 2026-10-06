@@ -725,8 +725,10 @@ func (f *fnEmitter) expr(v ssa.Value) string {
 		if v.Reserve != nil {
 			size = f.val(v.Reserve) + " as i64"
 		}
-		return fmt.Sprintf("GoMap::<%s, %s>::make(%s)",
-			f.typ(mt.Key(), v.Pos()), f.typ(mt.Elem(), v.Pos()), size)
+		// `make` speaks the underlying map type; a named map that contains
+		// itself has a Rust type of its own to put the result in.
+		return f.selfNamed(fmt.Sprintf("GoMap::<%s, %s>::make(%s)",
+			f.typ(mt.Key(), v.Pos()), f.typ(mt.Elem(), v.Pos()), size), nil, v.Type(), v.Pos())
 	case *ssa.Lookup:
 		if f.byteLookup[v] {
 			return f.byteLookupExpr(v)
@@ -747,8 +749,8 @@ func (f *fnEmitter) expr(v ssa.Value) string {
 		f.errorf(v.Pos(), "lookup in %s is not supported", v.X.Type())
 	case *ssa.MakeChan:
 		ct := v.Type().Underlying().(*types.Chan)
-		return fmt.Sprintf("Chan::<%s>::make(%s as i64)",
-			f.typ(ct.Elem(), v.Pos()), f.val(v.Size))
+		return f.selfNamed(fmt.Sprintf("Chan::<%s>::make(%s as i64)",
+			f.typ(ct.Elem(), v.Pos()), f.val(v.Size)), nil, v.Type(), v.Pos())
 	case *ssa.Select:
 		return f.selectStmt(v)
 	default:
@@ -1026,21 +1028,29 @@ func (f *fnEmitter) inReflect() bool {
 	return f.fn.Pkg != nil && f.fn.Pkg.Pkg.Path() == "reflect"
 }
 
-// changeType renders a conversion between two types that share an underlying
-// one. It costs nothing, and the two are usually the same Rust type — except
-// where one side is a named func type that contains itself, which has a Rust
-// type of its own wrapping the plain `Func` (types.go). go/ssa puts a
-// ChangeType at every crossing of that boundary, including the implicit one in
-// `return lexText`, so this is the only place that has to know about it.
-func (f *fnEmitter) changeType(v *ssa.ChangeType) string {
-	x := f.val(v.X)
-	if f.e.types.selfFunc(v.X.Type(), f.e, v.Pos()) != "" {
+// selfNamed renders `x`, a value of Go type `from`, as one of Go type `to`.
+//
+// It is the identity except where one of the two is a named func, map or
+// channel type that contains itself: those have a Rust type of their own
+// wrapping the plain `Func`, `GoMap` or `Chan` (types.go), and a value crossing
+// that boundary is wrapped into it or taken back out. `from` may be nil, for an
+// expression written in the inner type to begin with.
+func (f *fnEmitter) selfNamed(x string, from, to types.Type, pos token.Pos) string {
+	if from != nil && f.e.types.selfValue(from, f.e, pos) != "" {
 		x = "(" + x + ").0"
 	}
-	if n := f.e.types.selfFunc(v.Type(), f.e, v.Pos()); n != "" {
+	if n := f.e.types.selfValue(to, f.e, pos); n != "" {
 		x = n + "(" + x + ")"
 	}
 	return x
+}
+
+// changeType renders a conversion between two types that share an underlying
+// one. It costs nothing, and the two are usually the same Rust type — except
+// across a self-naming boundary, which go/ssa marks with a ChangeType wherever
+// it is crossed, including the implicit crossing in `return lexText`.
+func (f *fnEmitter) changeType(v *ssa.ChangeType) string {
+	return f.selfNamed(f.val(v.X), v.X.Type(), v.Type(), v.Pos())
 }
 
 // isNilConst reports the literal nil, whatever type it was given.

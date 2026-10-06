@@ -27,10 +27,10 @@ type typeReg struct {
 	// type that contains itself without a struct to break the cycle.
 	expanding map[*types.Named]bool
 	// selfPlaces holds the place types generated for named slice and pointer
-	// types that contain themselves (selfPlace), and selfFuncs the value types
-	// generated for named func types that do (selfFunc).
+	// types that contain themselves (selfPlace), and selfValues the value types
+	// generated for the named func, map and channel types that do (selfValue).
 	selfPlaces typeutil.Map // types.Type -> string
-	selfFuncs  typeutil.Map // types.Type -> string
+	selfValues typeutil.Map // types.Type -> string
 }
 
 type structInfo struct {
@@ -91,7 +91,7 @@ func (r *typeReg) rust(t types.Type, e *emitter, pos token.Pos) string {
 		if st, ok := t.Underlying().(*types.Struct); ok {
 			return r.structInfo(st, t.Obj().Name(), e, pos).path()
 		}
-		if p := r.selfFunc(t, e, pos); p != "" {
+		if p := r.selfValue(t, e, pos); p != "" {
 			return p
 		}
 		// A named type that is not a struct has no Rust type of its own, so
@@ -220,56 +220,80 @@ impl Trace for %s {
 	return path
 }
 
-// selfFunc gives a name of its own to the value form of a named func type that
-// contains itself, and returns it; "" for every other type.
+// selfValue gives a name of its own to the value form of a named func, map or
+// channel type that contains itself, and returns it; "" for every other type.
 //
-// `type stateFn func(*lexer) stateFn` is what `text/template/parse`'s lexer is
-// written around, and it is the one shape selfPlace cannot close. There the
-// cycle runs through the *value* form — the type is its own code pointer's
-// result — so naming the place form would leave the value form to unfold
-// anyway. What makes it closable instead is that a `Func<F>` is a code address
-// and an environment whatever `F` is, and Rust will recur through a function
-// pointer, whose size is known however large what it returns. So the value form
-// becomes a one-field struct over that `Func`, and the struct's name is what
-// the code pointer's result says.
+// These are the shapes selfPlace cannot close, because the cycle runs through
+// the *value* form rather than through storage: `type stateFn func(*lexer)
+// stateFn`, which `text/template/parse`'s lexer is written around, is its own
+// code pointer's result, and `type recursiveMap map[string]recursiveMap`, which
+// `encoding/gob` tests the decoder's depth limit with, is its own element type.
+// Naming the place form would leave the value form to unfold anyway.
 //
-// The named type carries the whole of what generated code asks of a func value
-// — `code`, `env`, `is_nil`, `addr`, a zero, a trace and a root word — so
-// nothing inside a function body changes. The boundary does:
-// `func(*lexer) stateFn` and
-// `stateFn` are two Rust types now, and go/ssa marks every crossing between
-// them with a ChangeType, which is where func.go wraps and unwraps.
-func (r *typeReg) selfFunc(t types.Type, e *emitter, pos token.Pos) string {
+// What makes all three closable is that none of `Func<F>`, `GoMap<K, V>` and
+// `Chan<T>` has a layout that depends on its parameters: a func value is a code
+// address and an environment, and a map or a channel is one pointer to its
+// object. So a one-field struct over the inner type is a name Rust accepts
+// without knowing the size of anything inside, and that name is what the
+// parameter then says.
+//
+// `Deref` is what keeps generated code from having to know: the named type is
+// the inner type with a name on it, so every method a func value, a map or a
+// channel has reaches through. What does not reach through is the rest of the
+// contract — a zero, a trace, a root word, and equality where Go has it — and
+// the places a value of one of these types is *made*. go/ssa marks a crossing
+// between `stateFn` and `func(*lexer) stateFn` with a ChangeType, including the
+// implicit one in `return lexText`, and it gives MakeMap and MakeChan the named
+// type directly. func.go wraps at those three.
+func (r *typeReg) selfValue(t types.Type, e *emitter, pos token.Pos) string {
 	n, ok := types.Unalias(t).(*types.Named)
 	if !ok {
 		return ""
 	}
-	sig, ok := n.Underlying().(*types.Signature)
-	if !ok {
+	switch n.Underlying().(type) {
+	case *types.Signature, *types.Map, *types.Chan:
+	default:
 		return ""
 	}
 	// Both answers are remembered, as in selfPlace: walking a type to see
 	// whether it reaches itself is not something to redo at every mention.
-	if p, ok := r.selfFuncs.At(n).(string); ok {
+	if p, ok := r.selfValues.At(n).(string); ok {
 		return p
 	}
 	if !selfReferential(n) {
-		r.selfFuncs.Set(n, "")
+		r.selfValues.Set(n, "")
 		return ""
 	}
 	band := r.bands.typ(n)
-	name := r.ns.claim(plain(mangle(n.Obj().Name()))) + "_F"
+	name := r.ns.claim(plain(mangle(n.Obj().Name()))) + "_V"
 	path := crateName(band) + "::ty::" + name
-	// Registered before the body is written: spelling the code pointer's type
-	// asks for this one again, which is the whole point of it having a name.
-	r.selfFuncs.Set(n, path)
-	code := r.fnPtr(sig, e, pos)
+	// Registered before the body is written: spelling the inner type asks for
+	// this one again, which is the whole point of it having a name.
+	r.selfValues.Set(n, path)
+	inner := r.rust(n.Underlying(), e, pos)
+	// Only a channel of the three is comparable, and `==` and hashing on the
+	// named type have to mean what they mean on the inner one: a channel is a
+	// map key as readily as any pointer is.
+	derive, key := "#[derive(Clone, Copy)]", ""
+	if types.Comparable(n) {
+		derive = "#[derive(Clone, Copy, PartialEq)]"
+		key = fmt.Sprintf(`
+impl GoKey for %s {
+    fn go_hash(&self) -> u64 {
+        GoKey::go_hash(&self.0)
+    }
+    fn go_eq(&self, other: &Self) -> bool {
+        GoKey::go_eq(&self.0, &other.0)
+    }
+}
+`, name)
+	}
 	fmt.Fprintf(r.at(band), `
-// Go: %s, a func type that contains itself: its value form carries the name
-// that closes the cycle (types.go).
-#[derive(Clone, Copy, PartialEq)]
+// Go: %s, a type that contains itself: its value form carries the name that
+// closes the cycle (types.go).
+%s
 #[repr(transparent)]
-pub struct %s(pub Func<%s>);
+pub struct %s(pub %s);
 
 impl GoValue for %s {
     fn zero() -> Self {
@@ -289,21 +313,13 @@ impl rustygo::gc::Root for %s {
     }
 }
 
-impl %s {
-    pub fn is_nil(self) -> bool {
-        self.0.is_nil()
-    }
-    pub fn code(self) -> %s {
-        self.0.code()
-    }
-    pub fn env(self) -> Env {
-        self.0.env()
-    }
-    pub fn addr(self) -> u64 {
-        self.0.addr()
+impl core::ops::Deref for %s {
+    type Target = %s;
+    fn deref(&self) -> &Self::Target {
+        &self.0
     }
 }
-`, types.TypeString(n, nil), name, code, name, name, name, name, name, code)
+%s`, types.TypeString(n, nil), derive, name, inner, name, name, name, name, name, inner, key)
 	return path
 }
 
