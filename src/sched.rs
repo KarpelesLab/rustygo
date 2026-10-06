@@ -357,8 +357,25 @@ fn schedule(how: Switch) {
             // Nothing to switch to, and nothing to wait for either.
             Some(None) => return,
             None => match how {
-                // Nothing else wants the processor, so carry on.
-                Switch::Yield => return,
+                // Nothing else wants the processor — but a deadline may have
+                // passed while this goroutine spun, and only the path below
+                // used to look. A loop around `runtime.Gosched` waiting for a
+                // `select` case to become ready is a real Go idiom, and
+                // `crypto/tls`'s own `TestWeakCertCache` is written that way:
+                // it spins until a `time.After` fires. Under gc it fires after
+                // about a million turns; here it never fired at all, because a
+                // yield with an empty run queue returned without ever asking
+                // the clock.
+                //
+                // Reaching this arm already means something is being waited
+                // for, so the only cost on an idle yield is reading the clock
+                // and a glance at the sleepers.
+                Switch::Yield => {
+                    if wake_expired() || crate::netpoll::expire() {
+                        continue;
+                    }
+                    return;
+                }
                 _ => {
                     // Nothing can run, but the program is not necessarily
                     // stuck: a descriptor may move, or a deadline may pass —
