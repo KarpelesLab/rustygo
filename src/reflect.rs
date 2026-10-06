@@ -402,6 +402,26 @@ pub fn make_func(d: UPtr, f: UPtr) -> UPtr {
     }
 }
 
+/// `reflect.ArrayOf`: the type `[n]T`, or nil when the program does not contain
+/// it.
+///
+/// Unlike a pointer, an array cannot be derived: its descriptor depends on its
+/// element everywhere, the collector's knowledge of where the pointers inside one
+/// are included. So the element's descriptor lists the arrays of it the program
+/// wrote, and this is a lookup among them — which also means the answer is the
+/// program's own descriptor, so the type it hands back is the same type as the
+/// one the program already has.
+pub fn array_of(elem: UPtr, n: i64) -> UPtr {
+    if n < 0 {
+        return UPtr::from_addr(0);
+    }
+    let arrays = desc(elem).arrays;
+    match arrays.binary_search_by_key(&(n as usize), |&(len, _)| len) {
+        Ok(i) => UPtr::from_addr(arrays[i].1 as *const TypeDesc as usize as u64),
+        Err(_) => UPtr::from_addr(0),
+    }
+}
+
 /// A slice of this type with this length and capacity, boxed:
 /// `reflect.MakeSlice`.
 pub fn make_slice(d: UPtr, len: i64, cap: i64) -> UPtr {

@@ -1325,9 +1325,34 @@ func NewAt(typ Type, p unsafe.Pointer) Value {
 // still compile and still pass every test that does not reach it: nothing in
 // the standard library calls these on a path it takes, and `testify` and
 // `encoding/gob` each reach one in a single test.
+//
+// ArrayOf does better than the others, by not building anything: the element's
+// descriptor lists the arrays of it the program contains, so asking for one that
+// exists hands back the program's own type. That is every array asked for in
+// practice, `testify`'s included, because the length comes from a value the
+// caller is already holding.
 
 // ArrayOf returns the array type with the given length and element type.
-func ArrayOf(length int, elem Type) Type { panic(unsupported("ArrayOf")) }
+//
+// Only for a `[length]elem` the program contains. An array's descriptor depends
+// on its element everywhere — how to box, zero, compare and hash one, and where
+// the pointers inside one are — so unlike a pointer's there is nothing to derive
+// it from.
+func ArrayOf(length int, elem Type) Type {
+	rt, ok := elem.(rtype)
+	if !ok {
+		panic("reflect: ArrayOf of a nil Type")
+	}
+	if length < 0 {
+		panic("reflect: negative length passed to ArrayOf")
+	}
+	d := descArrayOf(rt.d, length)
+	if d == nil {
+		panic("reflect.ArrayOf: [" + itoa(length) + "]" + elem.String() +
+			" is not a type this program contains, and rustygo cannot build one (DESIGN §6)")
+	}
+	return rtype{d}
+}
 
 // SliceOf returns the slice type with element type t.
 func SliceOf(t Type) Type { panic(unsupported("SliceOf")) }
@@ -1514,6 +1539,7 @@ func descImplements(d, iface unsafe.Pointer) bool
 func descZero(d unsafe.Pointer) unsafe.Pointer
 func descMakeSlice(d unsafe.Pointer, len, cap int) unsafe.Pointer
 func descMakeFunc(d, fn unsafe.Pointer) unsafe.Pointer
+func descArrayOf(d unsafe.Pointer, n int) unsafe.Pointer
 func registerMakeFunc(f func(fnBox, d unsafe.Pointer, args []unsafe.Pointer) []unsafe.Pointer)
 func markTransparent()
 func descPtrTo(d unsafe.Pointer) unsafe.Pointer

@@ -54,7 +54,7 @@ type Options struct {
 // variables anything outside initialization reads, so the second can skip
 // building the rest (deadinit.go).
 func Crate(res *load.Result, opt Options) error {
-	first, err := run(res, nil, nil, nil, false, false, false, false, nil)
+	first, err := run(res, nil, nil, nil, prior{})
 	if err != nil {
 		return err
 	}
@@ -64,20 +64,45 @@ func Crate(res *load.Result, opt Options) error {
 	live := liveInitGlobals(first.inits, first.readGlobals)
 	// The first pass also collects the program's functions, which is what
 	// says who must link a shadow-stack frame for `recover` (recover.go).
-	e, err := run(res, live, framesForRecover(first.emitted), first.bands,
-		first.usesReflectMethods, first.usesReflectCall,
-		first.usesReflectPointer, first.usesReflectMakeFunc, &first.ptrSeen)
+	e, err := run(res, live, framesForRecover(first.emitted), first.bands, prior{
+		reflectMethods:  first.usesReflectMethods,
+		reflectCall:     first.usesReflectCall,
+		reflectPointer:  first.usesReflectPointer,
+		reflectMakeFunc: first.usesReflectMakeFunc,
+		reflectArrayOf:  first.usesReflectArrayOf,
+		ptrDescs:        &first.ptrSeen,
+		arrayDescs:      &first.arraySeen,
+	})
 	if err != nil {
 		return err
 	}
 	return e.write(opt, e.initPath, e.mainPath)
 }
 
+// prior is what the first pass found out and the second needs before it places
+// anything.
+//
+// Each of the flags turns on generated code — a table per type, a closure or a
+// function per signature — that a program which never asks for it does not pay
+// for. The two maps are the types the first pass wrote descriptors for, which is
+// what says whether reflection can be handed one that already exists rather than
+// needing one built (iface.go).
+type prior struct {
+	reflectMethods  bool
+	reflectCall     bool
+	reflectPointer  bool
+	reflectMakeFunc bool
+	reflectArrayOf  bool
+	// ptrDescs holds the pointer types seen; arrayDescs maps an element type to
+	// the lengths of the arrays of it that were seen.
+	ptrDescs   *typeutil.Map
+	arrayDescs *typeutil.Map
+}
+
 // run emits the whole program into memory. liveGlobals, when set, lets
 // package initializers skip variables nothing else reads; needsFrame, when
-// set, names the functions that link a frame whatever their roots; ptrDescs,
-// when set, names the pointer types the previous pass wrote descriptors for.
-func run(res *load.Result, liveGlobals map[*ssa.Global]bool, needsFrame map[*ssa.Function]bool, placed *bands, reflectMethods, reflectCall, reflectPointer, reflectMakeFunc bool, ptrDescs *typeutil.Map) (*emitter, error) {
+// set, names the functions that link a frame whatever their roots.
+func run(res *load.Result, liveGlobals map[*ssa.Global]bool, needsFrame map[*ssa.Function]bool, placed *bands, p prior) (*emitter, error) {
 	var mainPkg *ssa.Package
 	for _, p := range res.Pkgs {
 		if p != nil && p.Pkg.Name() == "main" {
@@ -104,11 +129,13 @@ func run(res *load.Result, liveGlobals map[*ssa.Global]bool, needsFrame map[*ssa
 
 		liveGlobals:          liveGlobals,
 		needsFrame:           needsFrame,
-		needsReflectMethods:  reflectMethods,
-		needsReflectCall:     reflectCall,
-		needsReflectPointer:  reflectPointer,
-		needsReflectMakeFunc: reflectMakeFunc,
-		ptrDescs:             ptrDescs,
+		needsReflectMethods:  p.reflectMethods,
+		needsReflectCall:     p.reflectCall,
+		needsReflectPointer:  p.reflectPointer,
+		needsReflectMakeFunc: p.reflectMakeFunc,
+		needsReflectArrayOf:  p.reflectArrayOf,
+		ptrDescs:             p.ptrDescs,
+		arrayDescs:           p.arrayDescs,
 		readGlobals:          map[*ssa.Global]bool{},
 		calledFrom:           map[*ssa.Function]*ssa.Function{},
 		sizes:                newRustSizes(types.SizesFor("gc", build.Default.GOARCH)),
@@ -207,10 +234,17 @@ type emitter struct {
 	// type: the mirror of the call closure above (iface.go).
 	needsReflectMakeFunc bool
 	usesReflectMakeFunc  bool
-	ptrSeen              typeutil.Map
-	queue                []*ssa.Function
-	types                *typeReg
-	errs                 []diag
+	// And for `reflect.ArrayOf`, which an element type answers with the arrays
+	// of it the program contains. arrayDescs is the previous pass's; arraySeen
+	// is this pass collecting the same.
+	needsReflectArrayOf bool
+	usesReflectArrayOf  bool
+	arrayDescs          *typeutil.Map
+	arraySeen           typeutil.Map
+	ptrSeen             typeutil.Map
+	queue               []*ssa.Function
+	types               *typeReg
+	errs                []diag
 }
 
 // diag is one unsupported construct.

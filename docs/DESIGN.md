@@ -326,7 +326,18 @@ preemption, `runtime.Goexit`, and `testing/synctest`.
   signature.
 * **Known gap:** `reflect.StructOf` / `MapOf` and other runtime type
   construction need heap-allocated descriptors; possible, but deferred.
-  `PointerTo` is the exception that turned out to be easy — see below.
+  `PointerTo` is the exception that turned out to be easy — see below — and
+  `ArrayOf` is answered without building anything: the element's descriptor lists
+  the arrays of it the program contains, so asking for one that exists hands back
+  the program's own type. An array's descriptor depends on its element at every
+  point, the collector's knowledge of where the pointers inside one are included,
+  so there is nothing to derive it from; deriving one would mean giving every
+  descriptor's `equal`, `hash`, `print`, `box_value` and `zero` the descriptor
+  itself as an argument, so they could loop over elements, and giving the element a
+  typed-run allocator so the collector stays precise. Worth doing when something
+  needs it: the only caller in reach, `testify`, asks for `[n]T` of a value it is
+  already holding, so the type exists, and `encoding/gob`'s one caller goes on to
+  call `StructOf` and would still stop there.
 
 **As built (M3).** `reflect` is rustygo's own package, swapped in through the
 overlay (§8), and it is ordinary Go: a `Type` is a descriptor address, a

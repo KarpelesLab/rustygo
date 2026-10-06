@@ -319,6 +319,12 @@ func (e *emitter) typeDesc(t types.Type, pos token.Pos) string {
 		// descriptor of its own (pointerDesc).
 		e.ptrSeen.Set(t, true)
 	}
+	if at, isArray := types.Unalias(t).(*types.Array); isArray {
+		// And the same for `reflect.ArrayOf`, which an element type answers
+		// from the arrays of it that exist (arrayDescs).
+		lens, _ := e.arraySeen.At(at.Elem()).([]int64)
+		e.arraySeen.Set(at.Elem(), append(lens, at.Len()))
+	}
 
 	place := e.types.place(t, e, pos)
 	methods := e.methodTable(t, pos)
@@ -386,6 +392,9 @@ func (e *emitter) typeDesc(t types.Type, pos token.Pos) string {
 	if p := e.pointerDesc(t, pos); p != "" {
 		fmt.Fprintf(&b, "    ptr: Some(&%s),\n", p)
 	}
+	if a := e.arraysOf(t, pos); a != "" {
+		fmt.Fprintf(&b, "    arrays: &[%s],\n", a)
+	}
 	if ifaceMethods != "" {
 		fmt.Fprintf(&b, "    iface_methods: &[%s],\n", ifaceMethods)
 	}
@@ -437,6 +446,39 @@ func (e *emitter) pointerDesc(t types.Type, pos token.Pos) string {
 		return ""
 	}
 	return e.typeDesc(pt, pos)
+}
+
+// arraysOf renders the arrays of t the program contains, by length and
+// sorted, which is what `reflect.ArrayOf` hands back; "" when the program never
+// calls ArrayOf or there are none.
+//
+// An array cannot be derived the way a pointer can. Its descriptor depends on
+// its element at every point — how to box, zero, compare and hash one, and where
+// the pointers inside one are for the collector — and none of that follows from
+// the element's own descriptor. So this lists the ones that exist, which is also
+// what makes the answer the program's own type rather than a second type equal to
+// it. In practice it is every array ArrayOf is asked for: `testify` asks for
+// `[n]T` of a value it is already holding, so `[n]T` is a type the program has.
+func (e *emitter) arraysOf(t types.Type, pos token.Pos) string {
+	if !e.needsReflectArrayOf || e.arrayDescs == nil {
+		return ""
+	}
+	lens, _ := e.arrayDescs.At(t).([]int64)
+	if len(lens) == 0 {
+		return ""
+	}
+	sorted := append([]int64(nil), lens...)
+	sort.Slice(sorted, func(i, j int) bool { return sorted[i] < sorted[j] })
+	parts := make([]string, 0, len(sorted))
+	var last int64 = -1
+	for _, n := range sorted {
+		if n == last {
+			continue
+		}
+		last = n
+		parts = append(parts, fmt.Sprintf("(%d, &%s)", n, e.typeDesc(types.NewArray(t, n), pos)))
+	}
+	return strings.Join(parts, ", ")
 }
 
 // descList renders a tuple as a list of descriptor references.

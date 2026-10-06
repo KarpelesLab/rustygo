@@ -991,6 +991,12 @@ func (f *fnEmitter) noteReflectUse(obj types.Object) {
 		f.e.usesReflectCall = true
 		return
 	}
+	// `ArrayOf` is answered from a table on the element type, which is a table
+	// per type and so is not written unasked.
+	if obj.Name() == "ArrayOf" && obj.Pkg() != nil && obj.Pkg().Path() == "reflect" {
+		f.e.usesReflectArrayOf = true
+		return
+	}
 	// `MakeFunc` needs a trampoline per func type, which is a function to
 	// generate and so is not generated unasked.
 	if obj.Name() == "MakeFunc" && obj.Pkg() != nil && obj.Pkg().Path() == "reflect" {

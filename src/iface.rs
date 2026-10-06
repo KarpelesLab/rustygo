@@ -109,6 +109,17 @@ pub struct TypeDesc {
     /// wherever a program already contains `*T`, or `*T` has methods, the
     /// emitted descriptor is named here and wins.
     pub ptr: Option<&'static TypeDesc>,
+    /// The array types *of* this type the program contains, by length and
+    /// sorted: what `reflect.ArrayOf` hands back.
+    ///
+    /// It is a list on the element rather than something derived, because an
+    /// array's descriptor depends on its element at every point — how to box,
+    /// zero, compare and hash one, and where the pointers in it are — and none
+    /// of that can be built from the element's own descriptor. `PointerTo` can
+    /// be derived; this cannot. So the emitter writes the ones the program
+    /// already has, which is every array `ArrayOf` is asked for in practice:
+    /// `testify` asks for `[n]T` of a value it is already holding.
+    pub arrays: &'static [(usize, &'static TypeDesc)],
     /// A map's key type.
     pub key: Option<&'static TypeDesc>,
     /// An array's length.
@@ -262,6 +273,7 @@ impl TypeDesc {
         make_slice: None,
         elem: None,
         ptr: None,
+        arrays: &[],
         key: None,
         len: 0,
         chan_dir: 0,

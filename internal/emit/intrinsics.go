@@ -124,6 +124,9 @@ var intrinsics = map[string]func(args []string) string{
 	"reflect.descMakeSlice": func(a []string) string {
 		return fmt.Sprintf("rustygo::reflect::make_slice(%s, %s, %s)", a[0], a[1], a[2])
 	},
+	"reflect.descArrayOf": func(a []string) string {
+		return fmt.Sprintf("rustygo::reflect::array_of(%s, %s)", a[0], a[1])
+	},
 	"reflect.descMakeFunc": func(a []string) string {
 		return fmt.Sprintf("rustygo::reflect::make_func(%s, %s)", a[0], a[1])
 	},
