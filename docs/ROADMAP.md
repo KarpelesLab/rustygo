@@ -483,8 +483,15 @@ their own tests.**
     through reflection and compares the clone with `reflect.DeepEqual`.
     `DeepEqual` itself is sound over copied slices, arrays and structs; what is
     not is reflecting over `tls.Config`'s fields — in a program that does
-    nothing else with them, `Value.Field` dereferences nil on all but one,
-    which is what a field whose type has no emitted descriptor would do.
+    nothing else with them, `Value.Field` dereferences nil on all but one.
+
+    A missing descriptor was the first guess and it is wrong: the emitted
+    `TD_crypto_1tls_1Config` has all thirty-five `FieldDesc`s with a `typ` each,
+    `io.Reader`'s and the func types' included. So the fault is on the reading
+    side — `Value.Field`, or what the test does with the field it gets, which is
+    `Set` through an addressable `reflect.New(typ).Elem()`. Whoever picks this up
+    should start by printing `Kind()` for all thirty-five in a program of ten
+    lines rather than inside `crypto/tls`'s suite.
 * The rest of the `crypto` tree, by its own tests. Every failure is one of two
   kinds and neither is arithmetic: a `testdata` file this Go installation does
   not ship (gc fails those three identically), or an `AllocsPerRun` check that
