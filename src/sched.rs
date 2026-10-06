@@ -1136,7 +1136,20 @@ pub fn stop_the_world() -> Stopped {
     // A thread with no goroutine was never counted among the ones running Go
     // code, so it has nothing to step out of. That is how the runtime's own
     // unit tests collect.
-    let running = current() != NONE;
+    let me = current();
+    let running = me != NONE;
+    // The roots go on the goroutine's own record *before* this thread says it
+    // has stopped, exactly as a safe point does it, and for a reason that took
+    // a while to find: two threads can reach a collection at the same moment,
+    // and the one that loses the race waits below having already said it is not
+    // running Go code. If its roots were still only on its own thread's shadow
+    // stack, the winner would mark without them and free what the loser was
+    // holding — which showed up as a stack pointer appearing inside a scheduler
+    // record, a collected object's memory handed back out as something else.
+    if running {
+        let state = take_thread_state();
+        with_sched(|s| s.g(me).saved = state);
+    }
     let (lock, cv) = world();
     let mut guard = lock.lock().unwrap_or_else(|e| e.into_inner());
     // This thread is one of the ones that would have to stop, and it is the one
@@ -1179,6 +1192,13 @@ impl Drop for Stopped {
         if !self.restart {
             return;
         }
+        // Back on the thread before it runs Go code again, which is the mirror
+        // of `stop_the_world` putting them on the record.
+        if self.running {
+            let me = current();
+            let state = with_sched(|s| core::mem::replace(&mut s.g(me).saved, Saved::new()));
+            put_thread_state(state);
+        }
         STOPPING.store(false, core::sync::atomic::Ordering::Release);
         let running = self.running;
         with_world(|w, cv| {
@@ -1210,32 +1230,31 @@ fn put_thread_state(s: Saved) {
     crate::panic::put_boundary(s.boundary);
 }
 
-/// Traces the roots of every goroutine this thread is not running.
+/// Traces the roots of every goroutine there is.
 ///
-/// The running one's roots are on the thread's shadow stack, which the
-/// collector walks directly; every other goroutine's are on the chain saved
-/// when it switched away, and its stack is untouched until it resumes.
+/// Every one of them, with no exception for the goroutine the collector is
+/// itself running: a collection stops the world first, and stopping means every
+/// thread has put its goroutine's roots on that goroutine's own record —
+/// including the collector, in `stop_the_world`. Skipping the collector's own
+/// used to be right when its roots were still on its thread and nowhere else,
+/// and wrong the moment a second thread could be the one marking.
 pub(crate) fn trace_parked_roots(t: &mut crate::trace::Tracer<'_>) {
     // Taken while the heap's own lock is held, which is the one place the two
     // are nested and therefore fixes their order: heap, then scheduler. It is
     // safe to wait for because nothing on the other side allocates — the
     // scheduler's critical sections move words and queue ids, and the Go heap
     // is never touched under them.
-    let mine = current();
     SCHED.with(|sched| {
-        for (id, g) in sched.gs.iter().enumerate() {
-            let Some(g) = g else { continue };
+        for g in sched.gs.iter().flatten() {
             // A goroutine that has not started yet holds its arguments in the
             // environment the `go` statement built, and nothing else refers to
             // it: the frame that built it has moved on.
             if let Some(Entry::Go(_, env)) = &g.entry {
                 t.edge(env.addr() as usize);
             }
-            if id == mine {
-                continue;
-            }
-            // SAFETY: the chain belongs to a stack that is not running, so
-            // every frame on it is alive and unchanged.
+            // SAFETY: the chain belongs to a stack nothing is running on — every
+            // thread is stopped and has handed its chain over — so every frame
+            // on it is alive and unchanged.
             unsafe { crate::gc::trace_chain(g.saved.roots, t) };
             for p in &g.saved.panics {
                 crate::trace::Trace::trace(&p.value(), t);

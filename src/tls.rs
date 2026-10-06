@@ -197,10 +197,13 @@ impl Drop for Release<'_> {
 /// This thread's number: 1 for the first thread to ask, one more for each
 /// thread after it.
 ///
-/// Only for telling one thread from another — which of them holds a lock,
-/// which of them is running a goroutine. It is not an index into anything, so
-/// the number of a thread that has exited is simply never reused.
+/// Only for telling one thread from another, which at present only the
+/// reentrancy check above wants — so in a release build nothing calls it, and
+/// saying so is cheaper than making the check pay for itself. It is not an
+/// index into anything, so the number of a thread that has exited is simply
+/// never reused.
 #[cfg(feature = "std")]
+#[cfg_attr(not(debug_assertions), allow(dead_code))]
 pub fn thread_id() -> usize {
     use core::sync::atomic::{AtomicUsize, Ordering};
     static NEXT: AtomicUsize = AtomicUsize::new(1);
