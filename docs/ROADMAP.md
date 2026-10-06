@@ -615,6 +615,28 @@ practical — in the affirmative.
   choke point, if pause times turn out to matter more to services than
   throughput.
 
+**Where the allocation gap is, measured 2026-10-06.** A program that counts its
+own allocations, run under gc and under rustygo, says what escape analysis would
+have to earn. Three sources, in order of what they cost:
+
+* a local variable whose address is taken is one heap object: go/ssa hands the
+  emitter an `Alloc` and every one of them is allocated, `Heap` or not. `var p
+  point; p.bump()` allocates once; so does `var a [8]byte`. gc allocates for
+  neither. This is the whole of the gap in `strconv.AppendInt` and in every
+  `Buffer` used as a local.
+* `string(b)` handed to a call that does not keep it — `utf8.RuneCount` does
+  exactly this on its non-ASCII path — copies the bytes. gc does not, when the
+  string does not escape.
+* `string(a) == string(b)` copied both sides. That one is fixed: the comparison
+  reads the bytes where they lie (bytecmp.go), which took `bytes.Index` from
+  eight allocations per search to none and is why `bytes`' own tests now stand
+  at 155 of 157.
+
+The first two need the same thing: a summary, per function, of which of its
+parameters let a pointer outlive the call, iterated to a fixed point over the
+call graph. A mistake in it is a use-after-return rather than a wrong answer, so
+it wants the GC-torture suite and a flag to turn it off.
+
 **Exit criteria:**
 
 * Within 2× of gc Go on a published benchmark set, measured natively, and no
