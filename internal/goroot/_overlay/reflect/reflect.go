@@ -1280,11 +1280,51 @@ func New(typ Type) Value {
 	return Value{d: d, p: descNew(rt.d)}
 }
 
-// StructOf would need a descriptor assembled field by field at run time: a
-// layout, a way for the collector to find the pointers among those fields, and
-// comparison, boxing and zeroing over bytes whose shape is only known then.
-// Pointer types do without all of that because every pointer has one shape
-// (src/reflect.rs); a struct does not.
+// NewAt returns a Value representing a pointer to a value of the given type,
+// using p as that pointer.
+//
+// Nothing is allocated and nothing is checked: the caller is asserting that
+// there is a value of that type at that address, which is what the
+// `unsafe.Pointer` in the signature means.
+func NewAt(typ Type, p unsafe.Pointer) Value {
+	rt, ok := typ.(rtype)
+	if !ok {
+		panic("reflect: NewAt(nil)")
+	}
+	return Value{d: descPtrTo(rt.d), p: boxPointer(p)}
+}
+
+// The type constructors, which mint a type the program may never have written.
+//
+// A descriptor is a Rust static the emitter writes for the types a program
+// mentions (DESIGN §6), and most of one cannot be assembled from the outside:
+// it carries the functions that box, zero, compare and hash a value of the
+// type, and — the part nothing here can supply — the knowledge the collector
+// needs to find the pointers inside one. `PointerTo` is the exception, and only
+// because every pointer has the same shape, so there is nothing in its
+// descriptor that depends on what it points at (src/reflect.rs).
+//
+// They are declared because a package that merely mentions one of them should
+// still compile and still pass every test that does not reach it: nothing in
+// the standard library calls these on a path it takes, and `testify` and
+// `encoding/gob` each reach one in a single test.
+
+// ArrayOf returns the array type with the given length and element type.
+func ArrayOf(length int, elem Type) Type { panic(unsupported("ArrayOf")) }
+
+// SliceOf returns the slice type with element type t.
+func SliceOf(t Type) Type { panic(unsupported("SliceOf")) }
+
+// MapOf returns the map type with the given key and element types.
+func MapOf(key, elem Type) Type { panic(unsupported("MapOf")) }
+
+// ChanOf returns the channel type with the given direction and element type.
+func ChanOf(dir ChanDir, t Type) Type { panic(unsupported("ChanOf")) }
+
+// FuncOf returns the function type with the given argument and result types.
+func FuncOf(in, out []Type, variadic bool) Type { panic(unsupported("FuncOf")) }
+
+// StructOf returns the struct type containing fields.
 func StructOf(fields []StructField) Type { panic(unsupported("StructOf")) }
 
 // Zero returns the zero value of a type: all-zero bytes, in an object of the
