@@ -292,10 +292,14 @@ impl Drop for Boundary {
 /// running the call. Anything that deferred function calls has a frame of
 /// its own in between and recovers nothing; nor does `defer recover()`,
 /// whose `recover` runs with no Go frame of its own at all.
+///
+/// "Just outside" looks through the frames that stand in for the deferred call
+/// rather than being it — the pair `reflect.MakeFunc` interposes — which is gc
+/// not counting a wrapper ([`crate::gc::deferred_frame`]).
 #[cfg(feature = "std")]
 pub fn recover() -> Iface {
     let (frame, depth) = BOUNDARY.with(|b| b.get());
-    if frame == 0 || crate::gc::caller_frame() != frame {
+    if frame == 0 || crate::gc::deferred_frame() != frame {
         return Iface::nil();
     }
     let p = CURRENT.with(|c| {

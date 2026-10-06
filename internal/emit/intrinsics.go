@@ -127,6 +127,9 @@ var intrinsics = map[string]func(args []string) string{
 	"reflect.descMakeFunc": func(a []string) string {
 		return fmt.Sprintf("rustygo::reflect::make_func(%s, %s)", a[0], a[1])
 	},
+	"reflect.markTransparent": func([]string) string {
+		return "rustygo::gc::mark_transparent()"
+	},
 	"reflect.registerMakeFunc": func(a []string) string {
 		return fmt.Sprintf("rustygo::reflect::set_make_func(%s)", a[0])
 	},

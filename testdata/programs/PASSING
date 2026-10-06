@@ -71,3 +71,4 @@ bytecmp
 recvalues linux
 reflectmakefunc linux
 http2tls linux
+mfrecover linux

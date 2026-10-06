@@ -1515,6 +1515,7 @@ func descZero(d unsafe.Pointer) unsafe.Pointer
 func descMakeSlice(d unsafe.Pointer, len, cap int) unsafe.Pointer
 func descMakeFunc(d, fn unsafe.Pointer) unsafe.Pointer
 func registerMakeFunc(f func(fnBox, d unsafe.Pointer, args []unsafe.Pointer) []unsafe.Pointer)
+func markTransparent()
 func descPtrTo(d unsafe.Pointer) unsafe.Pointer
 func descNew(d unsafe.Pointer) unsafe.Pointer
 func boxPointer(p unsafe.Pointer) unsafe.Pointer
@@ -1678,13 +1679,12 @@ func (t rtype) ConvertibleTo(u Type) bool {
 // and reads the results back (src/reflect.rs). A signature the program never
 // wrote has no trampoline, which is the one case this cannot do.
 //
-// One thing gc does that this does not: `recover` called inside fn, when the
-// made function is itself running as a deferred call, recovers the caller's
-// panic. gc arranges for recover to see through its own reflect call; here fn
-// is several frames below the deferred one — the trampoline, the runtime, this
-// package — and rustygo's recover compares shadow-stack frames, so it finds
-// nothing (DESIGN §5). A panic raised inside fn does unwind out through the
-// trampoline to a recover above it, which is the common direction.
+// `recover` inside fn works the way gc's does, including when the made function
+// is itself the deferred call: the trampoline and makeFuncDispatch stand in for
+// that call rather than being it, so both mark their frames transparent and
+// `recover` looks straight through them (src/gc.rs). One call deeper inside fn,
+// or one closure between the defer and the made function, recovers nothing —
+// also as gc has it.
 func MakeFunc(typ Type, fn func(args []Value) (results []Value)) Value {
 	rt, ok := typ.(rtype)
 	if !ok || rt.Kind() != Func {
@@ -1710,6 +1710,9 @@ func MakeFunc(typ Type, fn func(args []Value) (results []Value)) Value {
 // trampoline is emitted with its func type and that crate need not be one
 // `reflect`'s crate can be seen from. init registers it, once.
 func makeFuncDispatch(fnBox, d unsafe.Pointer, args []unsafe.Pointer) []unsafe.Pointer {
+	// This frame stands in for the deferred call too, so `recover` inside fn has
+	// to see past it as well as past the trampoline (src/gc.rs).
+	markTransparent()
 	fn := *(*func(args []Value) []Value)(fnBox)
 	in := make([]Value, len(args))
 	for i := range args {

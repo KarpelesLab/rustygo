@@ -11,6 +11,11 @@
 //
 // Tests that gc itself cannot build here are skipped, not counted.
 //
+// A `go.work` anywhere above the directory being measured makes every test fail
+// to load with `go.mod: no such file or directory`, because the tests are not
+// modules the workspace knows about. Run with `GOWORK=off` if `-dir` points
+// outside this repository.
+//
 // `-n` builds that many tests at once, and defaults to one on purpose. cargo
 // decides how many `rustc` processes a build runs with its own `jobs` setting,
 // which a machine's `~/.cargo/config.toml` may set deliberately low; building

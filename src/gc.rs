@@ -99,6 +99,11 @@ impl Root for GoStr {
 struct Header {
     prev: Cell<*const Header>,
     linked: Cell<bool>,
+    /// Whether `recover` looks straight through this frame, which is what gc
+    /// calls a wrapper: see [`deferred_frame`]. It costs nothing in size, the
+    /// padding beside `linked` having been there anyway, and it goes away with
+    /// the frame, so marking one needs no undoing.
+    transparent: Cell<bool>,
     slots: Cell<*const Slot>,
     len: usize,
 }
@@ -136,6 +141,7 @@ impl<const N: usize> Frame<N> {
             header: Header {
                 prev: Cell::new(core::ptr::null()),
                 linked: Cell::new(false),
+                transparent: Cell::new(false),
                 slots: Cell::new(core::ptr::null()),
                 len: N,
             },
@@ -218,6 +224,45 @@ pub fn caller_frame() -> usize {
     // SAFETY: a linked frame is alive for as long as it is linked, and its
     // `prev` is either another such frame or null.
     unsafe { (*p).prev.get() as usize }
+}
+
+/// Marks the innermost linked frame as one `recover` looks through.
+///
+/// What stands in for a deferred call marks itself: the trampoline
+/// `reflect.MakeFunc` hands back, and the dispatcher in `reflect` that turns its
+/// boxed arguments into `[]reflect.Value`. Between them they are the frames gc
+/// does not count, and the mark lasts exactly as long as the frame does.
+#[inline]
+pub fn mark_transparent() {
+    let p = TOP.with(|top| top.get());
+    if !p.is_null() {
+        // SAFETY: a linked frame is alive for as long as it is linked.
+        unsafe { (*p).transparent.set(true) };
+    }
+}
+
+/// The frame `recover`'s caller stands in: its own, unless what lies between it
+/// and the deferred call only stands in for that call.
+///
+/// gc's rule is that there must be exactly one *non-wrapper* frame between the
+/// panic and the `recover`, and a wrapper does not count
+/// (`runtime.gorecover`). A transparent frame here is such a wrapper, so the
+/// walk looks straight through it and lands on the frame that does count. One
+/// closure too many on the way, or one call too deep inside the deferred
+/// function, lands somewhere else and recovers nothing, which is gc's answer
+/// too.
+#[inline]
+pub fn deferred_frame() -> usize {
+    let mut f = caller_frame();
+    while f != 0 {
+        // SAFETY: every frame reached along the chain is linked, so it is
+        // alive, and `parent_of` has the same contract.
+        if !unsafe { (*(f as *const Header)).transparent.get() } {
+            break;
+        }
+        f = unsafe { parent_of(f) }.unwrap_or(0);
+    }
+    f
 }
 
 /// The frame `frame` was linked onto, or `None` if it was the outermost.

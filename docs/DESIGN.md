@@ -293,6 +293,17 @@ preemption, `runtime.Goexit`, and `testing/synctest`.
   the frame resumes and runs the rest of its defer list on its normal path,
   which is what makes `defer recover()` recover in one order and do nothing
   in the other.
+* **Frames that stand in for a deferred call do not count.** gc's rule is more
+  precisely that there must be exactly one *non-wrapper* frame between the panic
+  and the `recover` (`runtime.gorecover`), and the pair `reflect.MakeFunc`
+  interposes — the trampoline and the dispatcher that turns boxed arguments into
+  `[]reflect.Value` — are wrappers in that sense. Each marks its frame
+  transparent, and the walk outward from `recover`'s caller looks straight
+  through them (`src/gc.rs`). The mark lives in the frame header, so it goes away
+  with the frame and costs nothing in size. One closure too many between the
+  defer and the made function, or one call too deep inside it, lands on a frame
+  that does count and recovers nothing — which is gc's answer too, and is what
+  `testdata/programs/mfrecover` measures case by case.
 * `goto` and labeled `break`/`continue` come out of `go/ssa` as ordinary CFG
   edges and are reconstructed by the structuring pass (§1).
 

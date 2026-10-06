@@ -963,6 +963,10 @@ func (e *emitter) makeFuncShim(t types.Type, sig *types.Signature, desc string, 
 		fmt.Fprintf(&b, "    __roots.set_local(%d, &a%d);\n", k, i)
 	}
 	b.WriteString("    __roots.scope(|| {\n")
+	// The trampoline stands in for the deferred call rather than being it, so
+	// `recover` in what the program handed MakeFunc has to see past this frame
+	// (src/gc.rs). gc calls such a frame a wrapper and does not count it.
+	b.WriteString("        rustygo::gc::mark_transparent();\n")
 	fmt.Fprintf(&b, "        __roots.set(%d, &__env);\n", len(rooted))
 	fmt.Fprintf(&b, "        let __args = Slice::<Slot<UPtr>>::make(%d, %d);\n", params.Len(), params.Len())
 	fmt.Fprintf(&b, "        __roots.set(%d, &__args);\n", len(rooted)+1)
