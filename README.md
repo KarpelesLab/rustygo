@@ -13,11 +13,15 @@ cgo needed to get there.
 > **Status: M0 and M1 are done; M2 (goroutines) and M3 (the standard library)
 > are in progress.** Go programs compile to Rust and run under a precise
 > mark-sweep collector, and their output, panics and exit codes are identical to
-> gc's — 55 differential programs check that on every commit, every one of them
+> gc's — 66 differential programs check that on every commit, every one of them
 > also under GC torture, which collects at every allocation. Go's own `test/`
-> directory is at [123 of 141](docs/GOTEST.md), and every failure is listed
+> directory is at [125 of 141](docs/GOTEST.md), and every failure is listed
 > there with the reason. Standard-library packages are measured by the tests Go
-> ships for them, which is [docs/STDTEST.md](docs/STDTEST.md).
+> ships for them, run with `rustygo test`
+> ([docs/STDTEST.md](docs/STDTEST.md)), and by what the compiler can turn into
+> Rust at all, which can be measured for the whole library at once
+> ([docs/BLOCKERS.md](docs/BLOCKERS.md), [docs/THIRDPARTY.md](docs/THIRDPARTY.md)
+> for the packages outside it).
 >
 > Working: the language, near enough — slices with aliasing, `append` and the
 > string/`[]byte`/`[]rune` conversions, maps, closures and func values,
@@ -26,16 +30,22 @@ cgo needed to get there.
 > and `runtime.SetFinalizer`. Goroutines are real stacks with a context switch
 > written for the purpose, with channels, `select`, `sync`, timers and a
 > netpoller under them. The standard library is the Go distribution's own
-> source, compiled: `fmt`, `strings`, `sort`, `os`, `reflect`, `time`, `net`,
-> `os/exec`, and `net/http` as a server *and* a client in one process, over TLS
-> as well as plain HTTP — `crypto/tls` handshakes with the standard library's
-> own ML-KEM, X25519, ECDSA, SHA-2, SHA-3 and AEAD code, compiled.
+> source, compiled: `fmt`, `strings`, `sort`, `os`, `reflect`, `encoding/json`,
+> `time`, `net`, `os/exec`, and `net/http` as a server *and* a client in one
+> process, over TLS as well as plain HTTP — `crypto/tls` handshakes with the
+> standard library's own ML-KEM, X25519, ECDSA, SHA-2, SHA-3 and AEAD code,
+> compiled. Code from outside the standard library compiles too, measured over
+> the most-used packages there are: `gorilla/mux` and `gorilla/websocket`,
+> `go-chi`, `testify`, `zap`, `logrus`, `viper`, `pflag`, `lib/pq`,
+> `go-sql-driver/mysql`, `sqlx`, `yaml.v2` and `v3`, `uuid`,
+> `protobuf/proto`, `x/net/html`, `x/text`, `x/crypto`, `golang-jwt`.
 >
 > Not yet: threads — the scheduler runs every goroutine on one of them — and a
 > file and socket layer for anything but Linux, so macOS and Windows compile the
-> language but not the packages that reach the kernel. Nor `encoding/json`,
-> `rustygo test`, or making a certificate, which marshals through
-> `encoding/asn1` and so wants the half of `reflect` that writes. The plan is
+> language but not the packages that reach the kernel. Nor runtime type
+> construction: `reflect.MakeFunc`, `StructOf` and the rest say so rather than
+> guessing, because a type descriptor is a Rust static the compiler writes for
+> the types a program mentions. The plan is
 > [docs/DESIGN.md](docs/DESIGN.md) for the architecture,
 > [docs/RATIONALE.md](docs/RATIONALE.md) for why this shape and not another,
 > and [docs/ROADMAP.md](docs/ROADMAP.md) for the milestones.
