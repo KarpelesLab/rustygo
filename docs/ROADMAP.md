@@ -453,6 +453,59 @@ practical — in the affirmative.
   `type R []R`, which `encoding/json`'s tests declare — now has a Rust spelling:
   its place form gets a name of its own, which is what closes the cycle.
 
+**Status (2026-10-06): HTTP/2 over TLS, and the crypto packages measured by
+their own tests.**
+
+* `testdata/programs/http2tls` is the HTTP/2 scenario, and it worked the first
+  time it was built. ALPN agrees `h2`, and above it HPACK, the frame layer, four
+  streams multiplexed on one connection at once, and a hundred-kilobyte body in
+  each direction — longer than a frame and longer than a stream's initial
+  flow-control window, so it takes continuation frames and a window update to
+  carry. The bodies are reported by length and SHA-256 rather than printed, and
+  both match gc's.
+* **`crypto/tls` passes its own test suite**, which is the BoGo suite plus Go's
+  own tests, and it agrees with gc almost exactly: of the 3,525 BoGo cases,
+  1,318 pass and 2,207 are on BoGo's own disabled list, **under gc and under
+  rustygo alike — the same numbers, and no failure on either side**. Of the 199
+  other tests, 197 reach the same verdict under both; 60 of those are a shared
+  failure, because this Go installation ships no `crypto/tls/testdata` and the
+  recorded-transcript tests cannot read it.
+* The two that differ are worth naming, because neither is crypto:
+  * `TestWeakCertCache` **hangs**, and the reason is the scheduler rather than
+    the cache. It waits for a `time.After` inside a `select` with a `default`,
+    spinning on `runtime.Gosched()` — and a timer never fires in such a loop,
+    because `schedule` only calls `wake_expired` on the path where a goroutine
+    parks. A `Gosched` with an empty run queue returns at once with "nothing
+    else wants the processor", so an expired deadline is never noticed and the
+    loop runs for ever. Twenty lines of Go reproduce it: gc fires the timer
+    after about a million spins, rustygo not after fifty million.
+  * `TestCloneNonFuncFields` fails. It sets every field of a `tls.Config`
+    through reflection and compares the clone with `reflect.DeepEqual`.
+    `DeepEqual` itself is sound over copied slices, arrays and structs; what is
+    not is reflecting over `tls.Config`'s fields — in a program that does
+    nothing else with them, `Value.Field` dereferences nil on all but one,
+    which is what a field whose type has no emitted descriptor would do.
+* The rest of the `crypto` tree, by its own tests. Every failure is one of two
+  kinds and neither is arithmetic: a `testdata` file this Go installation does
+  not ship (gc fails those three identically), or an `AllocsPerRun` check that
+  wants escape analysis (M6).
+
+  | package | pass | fail | what fails |
+  |---|---:|---:|---|
+  | `crypto/cipher` | 35 | 0 | (2 skipped) |
+  | `crypto/aes` | 4 | 0 | |
+  | `crypto/hmac` | 6 | 0 | |
+  | `crypto/ecdsa` | 16 | 1 | `TestVectors`: no `testdata` here |
+  | `crypto/rsa` | 35 | 2 | `TestPSSGolden`: no `testdata` here; `TestAllocations` |
+  | `crypto/ed25519` | 8 | 2 | `TestGolden`: no `testdata` here; `TestAllocations` |
+  | `crypto/sha256` | 13 | 2 | `TestAllocations`, `TestAllocatonsWithTypeAsserts` |
+  | `crypto/rand` | 16 | 1 | `TestAllocations` |
+
+* What remains of the service tests is keep-alive under load, client timeouts
+  and context cancellation, and graceful shutdown on `SIGTERM`, plus the gc×rustygo
+  and rustygo×gc pairings of all of them, which need a harness rather than a
+  differential program.
+
 **Status (2026-10-04): HTTPS works, both ends, in one process.**
 
 * `testdata/programs/httpstls` is the service tests' HTTPS scenario in its
@@ -472,13 +525,11 @@ practical — in the affirmative.
   overlay; constant tables as static data, P-256's 88 KB of precomputed
   multiples among them; and `unsafe.Pointer` reinterpretation, which SHA-3 and
   P-256 both use to read a byte array as words.
-* The one thing the program cannot do is make its own certificate.
+* The program could not make its own certificate when it was written:
   `x509.CreateCertificate` marshals through `encoding/asn1`, which reaches
-  `reflect.New` for a field with a `default:` tag — reflection's write half,
-  which is landing with `encoding/json`. So the certificate and its key are
-  fixed literals for now, and parsing them is the real thing:
-  `crypto/x509`'s parser is written on `cryptobyte` and needs no reflection at
-  all.
+  `reflect.New` for a field with a `default:` tag. Reflection's write half
+  landed with `encoding/json` days later, and the program now generates a key,
+  signs a certificate with it and reads both back through `tls.X509KeyPair`.
 * **The cipher suite rustygo picks is not gc's**, and that is correct rather
   than wrong: `internal/cpu` reports no processor features, so `crypto/tls`
   sees no AES hardware and prefers ChaCha20-Poly1305 where gc prefers
