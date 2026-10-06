@@ -70,3 +70,4 @@ gopanic linux
 bytecmp
 recvalues linux
 reflectmakefunc linux
+http2tls linux
