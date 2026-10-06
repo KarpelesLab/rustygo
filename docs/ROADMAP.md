@@ -301,11 +301,12 @@ work fails too, decision gate 1 says stop.
   scheduler the thunk and environment a `defer` builds, so the two share
   their machinery.
 * `GOMAXPROCS` worker threads run them, settable from the environment and by
-  `runtime.GOMAXPROCS`. The default is **two**, not the number of CPUs: with
-  three or more a goroutine's saved context still acquires a stack pointer
-  belonging to a worker's own stack, which `pick` catches and reports rather
-  than jumping into. Two is enough to be really running goroutines on two
-  threads; the default goes to `NumCPU` when that is found. A worker stands on
+  `runtime.GOMAXPROCS`. The default is **one**, not the number of CPUs, because
+  more than one is not yet correct: a goroutine's saved context acquires a stack
+  pointer belonging to a worker's own stack, and the program returns from `main`
+  without running it about one run in seven at two workers. So the scheduler is
+  the M:N one and the threads are real, and the default does not use them until
+  that is found. A worker stands on
   its thread's own stack between goroutines, which is what lets a goroutine be
   handed to another thread at all ([DESIGN §4](DESIGN.md#4-goroutines-and-the-scheduler)).
   One shared run queue, one lock; `runtime.LockOSThread` and `sync`'s processor

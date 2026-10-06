@@ -399,13 +399,23 @@ pub fn run_program(init: fn(), main: fn()) -> ! {
 
 /// `GOMAXPROCS` at startup, which `GOMAXPROCS` in the environment sets.
 ///
-/// **Two, and not the number of CPUs that Go's default is.** Everything above
-/// is written for more and `GOMAXPROCS` gets it, but with three workers or more
-/// a goroutine's saved context still ends up holding a stack pointer belonging
-/// to a worker's own stack — `pick` catches it and the program says so rather
-/// than jumping into it. One and two workers are correct, and two is enough for
-/// the differential suite to be running goroutines on two threads at once
-/// rather than pretending. The default goes to `NumCPU` when that is found.
+/// **One, and not the number of CPUs that Go's default is.** Everything above is
+/// written for more and setting the variable gets it, but more is not yet
+/// correct: a goroutine's saved context acquires a stack pointer belonging to a
+/// worker's own stack, which `pick` catches, and the program it belongs to ends
+/// up returning from `main` without having run it. Two workers get that wrong
+/// about one run in seven, so two is not a safer default than sixty-four; it is
+/// the same bug at a lower rate, which is worse, because a lower rate is how a
+/// bug reaches a user.
+///
+/// What is known about it, for whoever picks it up: one worker is correct;
+/// `testdata/programs/parallel` and sixty-four goroutines on one mutex reproduce
+/// it in seconds at two; the thread-local that names the running goroutine, the
+/// scheduler's own record of it, and the stack the thread is standing on all
+/// agree at the moment of failure, so it is not a stale thread-local and not one
+/// `Gid` handed to two threads; and the corruption is a worker's own stack
+/// pointer appearing in a goroutine's context, which only `leave` writes and
+/// only ever on the goroutine's own stack.
 ///
 /// Read once, before any worker exists. `runtime.GOMAXPROCS` changes it
 /// afterwards, which is what Go's own tests do when they want to be
@@ -417,7 +427,7 @@ fn default_procs() -> usize {
     {
         return n;
     }
-    2
+    1
 }
 
 /// `runtime.NumCPU`: how many processors this program may use.
@@ -486,10 +496,20 @@ fn worker(me: usize) -> ! {
     loop {
         let picked = with_sched(|s| {
             s.finish_leaving(me);
-            s.pick(me)
+            match s.pick(me) {
+                Some(next) => Picked::Run(next),
+                // Read with the scheduler still locked, which is the whole
+                // point of it: anything that becomes runnable after this moment
+                // raises the count past what `wait_for_work` was told, and so
+                // cannot be waited through. Reading it after the lock is
+                // released leaves a window in which another thread readies a
+                // goroutine, raises the count, and the worker then compares
+                // against the *raised* value and waits anyway.
+                None => Picked::Idle(READY_GEN.load(Ordering::SeqCst)),
+            }
         });
         match picked {
-            Some(next) => {
+            Picked::Run(next) => {
                 CUR_G.with(|g| g.set(next));
                 // From here until the switch comes back, this thread is running
                 // Go code and a collection has to wait for it. `attach` is also
@@ -519,9 +539,16 @@ fn worker(me: usize) -> ! {
                 detach();
                 CUR_G.with(|g| g.set(NONE));
             }
-            None => wait_for_work(me),
+            Picked::Idle(seen) => wait_for_work(me, seen),
         }
     }
+}
+
+/// What a worker found when it looked for something to run: a goroutine, or
+/// nothing and the count of wakes it had seen by then.
+enum Picked {
+    Run(Gid),
+    Idle(u64),
 }
 
 /// Leaves the running goroutine, telling its worker what it owes it.
@@ -901,10 +928,7 @@ fn wake_idle() {
 /// With nothing runnable the program is not necessarily stuck: it may be
 /// waiting on a descriptor, or on the clock. Only when there is nothing to wait
 /// for either is it Go's deadlock.
-fn wait_for_work(me: usize) {
-    // Read before anything is released, so that whatever becomes runnable from
-    // here on raises the count past this value.
-    let seen = READY_GEN.load(Ordering::SeqCst);
+fn wait_for_work(me: usize, seen: u64) {
     // A sleeper whose moment has passed is work, and the worker should not
     // wait at all.
     if wake_expired() || crate::netpoll::expire() {
