@@ -261,6 +261,10 @@ var intrinsics = map[string]func(args []string) string{
 	"runtime.walltime": func([]string) string { return "rustygo::rt::walltime()" },
 	"runtime.envs":     func([]string) string { return "rustygo::rt::envs()" },
 	"runtime.sigpipe":  func([]string) string { return "rustygo::rt::sigpipe()" },
+	// Where a fatal report goes besides standard error (debug.SetCrashOutput).
+	"runtime.crashFD": func(a []string) string {
+		return fmt.Sprintf("rustygo::rt::set_crash_fd(%s as usize) as u64", a[0])
+	},
 
 	// Signals: the handler and the queue are the runtime's, and os/signal
 	// reaches them through the overlay's runtime (src/rt.rs).

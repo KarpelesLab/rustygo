@@ -109,7 +109,14 @@ func time_Sleep(ns int64) {
 	// on Sleep(Nanosecond) to let a ticker through is asking for, and time's
 	// own stress tests do exactly that.
 	yieldIfReady()
-	sleepUntil(nanotime() + ns)
+	when := nanotime() + ns
+	if when < 0 {
+		// The sum overflowed, which Sleep(1<<63 - 1) does: the moment to wake
+		// at comes out in the past and the sleep returns at once. time's own
+		// TestOverflowSleep panics when that happens, and is right to.
+		when = 1<<63 - 1
+	}
+	sleepUntil(when)
 }
 
 // haveHighResSleep says whether a sleep of about a millisecond is honoured,

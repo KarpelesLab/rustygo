@@ -148,6 +148,20 @@ type Cleanup struct{}
 func AddCleanup[T, S any](ptr *T, cleanup func(S), arg S) Cleanup { return Cleanup{} }
 func (c Cleanup) Stop()                                           {}
 
+// Which makes waiting for the cleanup queue to empty a wait for nothing: the
+// queue a cleanup would be put on is always empty, because none is ever
+// queued. `sync` and `unique` both wait for it in their tests, before checking
+// that what a cleanup should have released has been.
+//
+// It will therefore go on to find the object still there. That is the honest
+// answer to give it — the queue really is empty — and it is better than a wait
+// that times out, which would say the queue was busy when nothing has ever
+// been in it. (gc answers `unique`'s copy of the same question too; rustygo's
+// `unique` is its own package and does not ask.)
+
+//go:linkname sync_test_blockUntilEmptyCleanupQueue sync_test.runtime_blockUntilEmptyCleanupQueue
+func sync_test_blockUntilEmptyCleanupQueue(timeout int64) bool { return true }
+
 // MemStats has gc's fields, so programs that read it compile; the collector
 // fills in what it tracks, and the rest stay zero.
 type MemStats struct {
@@ -269,6 +283,31 @@ func debug_setMaxThreads(n int) int { return 10000 }
 
 //go:linkname debug_setMemoryLimit runtime/debug.setMemoryLimit
 func debug_setMemoryLimit(n int64) int64 { return 1<<63 - 1 }
+
+// debug.SetCrashOutput asks for the report a fatal panic writes to go to a
+// second descriptor as well as to standard error, which is how a program keeps
+// its own crash log. The runtime holds the descriptor and writes there too
+// (src/rt.rs); ^uintptr(0) back means there was none before, which is what
+// tells the caller not to close anything.
+
+func crashFD(fd uintptr) uintptr
+
+// setCrashFD is the name runtime/debug reaches for.
+func setCrashFD(fd uintptr) uintptr { return crashFD(fd) }
+
+// debug.WriteHeapDump writes every object in the heap to a descriptor, in the
+// format `viewcore` reads: gc walks its spans and emits a record per object,
+// per type and per goroutine stack frame.
+//
+// rustygo's collector could walk the heap — that is what tracing does — but
+// none of the rest is there: an object knows how to trace itself and not how
+// to describe itself, there are no span boundaries to report, and a goroutine
+// stack is a Rust stack with a shadow list of roots beside it. So nothing is
+// written, which leaves the caller an empty file rather than a dump in a
+// format nothing could read.
+
+//go:linkname debug_WriteHeapDump runtime/debug.WriteHeapDump
+func debug_WriteHeapDump(fd uintptr) {}
 
 // PanicNilError is what recover returns after panic(nil).
 type PanicNilError struct{ _ [0]*PanicNilError }

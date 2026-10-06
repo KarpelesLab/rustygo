@@ -45,6 +45,22 @@ func sysrand_fatal(s string) { fatal(s) }
 //go:linkname rand_fatal crypto/rand.fatal
 func rand_fatal(s string) { fatal(s) }
 
+// Data-independent timing, which crypto/subtle asks the runtime to switch on
+// around a constant-time routine. It is one arm64 processor feature: DIT makes
+// the instruction timings independent of the data, and gc sets the bit in
+// DIT_EL0 on the thread the goroutine is running on.
+//
+// rustygo's internal/cpu reports no such feature, so sys.DITSupported is false
+// and WithDataIndependentTiming calls its function without ever coming here.
+// These exist because the call graph reaches them anyway, and they answer what
+// is true: nothing was switched on.
+
+//go:linkname subtle_setDITEnabled crypto/subtle.setDITEnabled
+func subtle_setDITEnabled() bool { return false }
+
+//go:linkname subtle_setDITDisabled crypto/subtle.setDITDisabled
+func subtle_setDITDisabled() {}
+
 // StandardCrypto is a marker: the linker looks for it to tell which crypto
 // implementation was built in. Standard Go crypto is the only one rustygo
 // has, so saying so is all there is to do.

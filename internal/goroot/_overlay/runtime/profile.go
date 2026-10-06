@@ -67,6 +67,74 @@ func pprof_expandFinalInlineFrame(stk []uintptr) []uintptr { return stk }
 //go:linkname pprof_goroutineleakcount runtime/pprof.runtime_goroutineleakcount
 func pprof_goroutineleakcount() int { return 0 }
 
+// Profile labels, which `pprof.Do` attaches to the goroutine so that the CPU
+// profiler can tag the samples it takes there. gc keeps the set on the g; this
+// keeps it in one place, which is the same thing for as long as the labels are
+// set and read between two points where the goroutine does not change — which
+// is how pprof.Do uses them, saving the old set and putting it back. Two
+// goroutines labelling themselves at once would see each other's; nothing
+// reads the labels at all, because no profile is taken.
+
+var profLabels unsafe.Pointer
+
+//go:linkname pprof_setProfLabel runtime/pprof.runtime_setProfLabel
+func pprof_setProfLabel(labels unsafe.Pointer) { profLabels = labels }
+
+//go:linkname pprof_getProfLabel runtime/pprof.runtime_getProfLabel
+func pprof_getProfLabel() unsafe.Pointer { return profLabels }
+
+// blockevent is how the runtime records that a goroutine was blocked for a
+// while, which is the block profile's only source. There is no profile to
+// record into; pprof's own test reaches it by name to bias the profile it then
+// reads back, and reads back nothing.
+
+func blockevent(cycles int64, skip int) {}
+
+// Metrics. runtime/metrics asks the runtime to fill in a Value for each Sample
+// it is given, by name, and its own Read documents what happens to a name the
+// runtime does not implement: the Value comes back as KindBad. rustygo
+// implements none of them, so that is what every one of them gets.
+//
+// The collector does know some of what the list asks about — live bytes and
+// objects, and how many collections have run, which ReadMemStats already
+// reports — so this could answer a handful of the hundred names in
+// metrics.All(). It does not, because a caller cannot tell a metric that is
+// missing from one that is zero except by the kind, and a partial answer is
+// the one shape that makes the distinction useless. The mirror of Sample below
+// is what a real implementation would write through.
+//
+// That mirror is metrics.Sample's layout, because the runtime is handed a
+// pointer to an array of them and nothing passes the size across for it to
+// check — unlike sync's notifyList, which does. It is pinned to a Go version
+// along with everything else here (DESIGN §8).
+type metricsSample struct {
+	name  string
+	value struct {
+		kind    int
+		scalar  uint64
+		pointer unsafe.Pointer
+	}
+}
+
+//go:linkname metrics_readMetrics runtime/metrics.runtime_readMetrics
+func metrics_readMetrics(p unsafe.Pointer, length, capacity int) {
+	if p == nil || length <= 0 {
+		return
+	}
+	samples := unsafe.Slice((*metricsSample)(p), length)
+	for i := range samples {
+		samples[i].value.kind = 0 // metrics.KindBad
+		samples[i].value.scalar = 0
+		samples[i].value.pointer = nil
+	}
+}
+
+// The names the runtime implements, which metrics' own test holds against
+// metrics.All(). None, so far.
+
+//go:linkname metrics_readMetricNames runtime/metrics_test.runtime_readMetricNames
+func metrics_readMetricNames() []string { return nil }
+
 // Signals.
 //
 // `os/signal` asks the runtime to start and stop delivering each signal it is

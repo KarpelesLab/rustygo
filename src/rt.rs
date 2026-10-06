@@ -11,6 +11,9 @@ pub fn fatal(msg: &[u8]) -> ! {
     let _ = err.write_all(b"fatal error: ");
     let _ = err.write_all(msg);
     let _ = err.write_all(b"\n");
+    crash_copy(b"fatal error: ");
+    crash_copy(msg);
+    crash_copy(b"\n");
     // gc prints every goroutine's stack here. rustygo cannot yet render a Go
     // stack, but the Rust one says which runtime path gave up, which is what
     // a deadlock or a failed self-test needs to be diagnosed at all.
@@ -19,6 +22,51 @@ pub fn fatal(msg: &[u8]) -> ! {
         let _ = err.write_all(alloc::format!("{trace}\n").as_bytes());
     }
     std::process::exit(2)
+}
+
+/// Where a fatal report goes besides standard error, as `debug.SetCrashOutput`
+/// asks: a descriptor, or all ones for none.
+///
+/// A program keeps its own crash log this way, and the point of it is that the
+/// log survives when stderr does not — so the descriptor is held here rather
+/// than wrapped in anything, and written to with the raw system call, because
+/// by the time it is used the program is already past saving.
+static CRASH_FD: core::sync::atomic::AtomicUsize = core::sync::atomic::AtomicUsize::new(usize::MAX);
+
+/// Sets that descriptor and reports the one it replaces, which the caller
+/// closes; all ones means there was none.
+pub fn set_crash_fd(fd: usize) -> usize {
+    CRASH_FD.swap(fd, core::sync::atomic::Ordering::AcqRel)
+}
+
+/// Writes a piece of the report to the crash descriptor, if there is one.
+fn crash_copy(bytes: &[u8]) {
+    let fd = CRASH_FD.load(core::sync::atomic::Ordering::Acquire);
+    if fd == usize::MAX || bytes.is_empty() {
+        return;
+    }
+    #[cfg(all(target_os = "linux", target_arch = "x86_64"))]
+    const SYS_WRITE: u64 = 1;
+    #[cfg(all(target_os = "linux", target_arch = "aarch64"))]
+    const SYS_WRITE: u64 = 64;
+    #[cfg(not(target_os = "linux"))]
+    const SYS_WRITE: u64 = 0;
+    let mut done = 0;
+    while done < bytes.len() {
+        let (n, _, errno) = crate::syscall::syscall6(
+            SYS_WRITE,
+            fd as u64,
+            bytes[done..].as_ptr() as u64,
+            (bytes.len() - done) as u64,
+            0,
+            0,
+            0,
+        );
+        if errno != 0 || n == 0 {
+            return;
+        }
+        done += n as usize;
+    }
 }
 
 /// Writes `n` bytes at `p` to standard error, for the runtime's own
@@ -90,6 +138,9 @@ pub fn report_unrecovered(payload: alloc::boxed::Box<dyn core::any::Any + Send>)
             let _ = err.write_all(b"panic: ");
             let _ = err.write_all(p.text());
             let _ = err.write_all(b"\n\ngoroutine 1 [running]:\n");
+            crash_copy(b"panic: ");
+            crash_copy(p.text());
+            crash_copy(b"\n\ngoroutine 1 [running]:\n");
         }
         // A Rust panic that is not a Go panic is a runtime or emitter bug;
         // Rust's hook has already printed the message.
