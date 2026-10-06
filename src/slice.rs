@@ -299,19 +299,31 @@ impl Slice<crate::place::Slot<u8>> {
     }
 
     /// `[]byte(s)`: a fresh array holding the string's bytes.
+    ///
+    /// One `memcpy`, not a `store` per byte: a `Slot<u8>` is a byte, and the
+    /// array was allocated for exactly these. The allocation comes first, so
+    /// the borrow of the string's bytes is taken past the last safe point.
     pub fn of_str(s: crate::string::GoStr) -> Self {
         let out: Self = Slice::make(s.len(), s.len());
-        for (i, b) in s.bytes().iter().enumerate() {
-            // SAFETY: `i` is inside the array just allocated for them.
-            unsafe { (*out.ptr.add(i)).store(*b) };
+        if out.len > 0 {
+            let src = s.bytes();
+            // SAFETY: the array holds `out.len` bytes, which is the string's
+            // own length, and the two objects are distinct.
+            unsafe { core::ptr::copy_nonoverlapping(src.as_ptr(), out.ptr as *mut u8, out.len) };
         }
         out
     }
 
     /// `string(b)`: a fresh string holding the slice's bytes.
+    ///
+    /// The bytes go straight into the new object: `build` collects before it
+    /// allocates and calls back after, so the borrow into this slice's own
+    /// array is taken past the last safe point — where a temporary vector of
+    /// every byte, loaded one at a time, used to stand.
     pub fn to_str(self) -> crate::string::GoStr {
-        let bytes = self.load_all();
-        crate::string::GoStr::from_bytes(&bytes)
+        crate::string::GoStr::build(self.len, |out| {
+            self.with_bytes(|src| out.copy_from_slice(src))
+        })
     }
 
     /// `string(b)` compared with a string, without the copy the conversion
@@ -337,9 +349,13 @@ impl Slice<crate::place::Slot<u8>> {
         if out.cap - out.len < n {
             out = out.grow(n);
         }
-        for (i, b) in s.bytes().iter().enumerate() {
-            // SAFETY: room was just made for `n` more elements.
-            unsafe { (*out.ptr.add(out.len + i)).store(*b) };
+        if n > 0 {
+            let src = s.bytes();
+            // SAFETY: room was just made for `n` more bytes past `out.len`.
+            // `copy` rather than `copy_nonoverlapping` because the string may
+            // be the same memory: `unsafe.String` can make one over a byte
+            // slice's own array, and gc's append moves bytes there too.
+            unsafe { core::ptr::copy(src.as_ptr(), (out.ptr as *mut u8).add(out.len), n) };
         }
         Slice {
             ptr: out.ptr,

@@ -113,7 +113,11 @@ impl GoStr {
 
     /// A string of `len` bytes, written by `fill`. A safe point: it may
     /// collect before it allocates.
-    fn build(len: usize, fill: impl FnOnce(&mut [u8])) -> GoStr {
+    ///
+    /// The collection happens first and `fill` is called after it, so a caller
+    /// that copies out of the Go heap can take its borrow inside the closure
+    /// and know that nothing moves or frees underneath it.
+    pub(crate) fn build(len: usize, fill: impl FnOnce(&mut [u8])) -> GoStr {
         if len == 0 {
             return GoStr::lit(b"");
         }
