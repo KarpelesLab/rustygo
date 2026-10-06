@@ -324,6 +324,50 @@ work fails too, decision gate 1 says stop.
   descriptor, and `runtime.Goexit`, have since landed — see the M1 and M3
   status notes.
 
+**The threaded half, measured 2026-10-06.** Written on a branch and not yet
+merged. What it found first is worth recording whatever becomes of the rest,
+because none of it mattered at one thread and all of it would have mattered at
+two:
+
+* `sync/atomic` was plain Go loads and stores, so `sync.Mutex` would have
+  unlocked itself the moment two threads existed.
+* Package-level Go variables went into Rust `thread_local!`, one copy per
+  thread, with a comment saying M2 would fix it. They are one shared place now.
+* Which runtime state belongs to a thread and which to the program was decided
+  case by case across the runtime. It is declared in one file now
+  (`src/tls.rs`), which is what makes the question answerable at all.
+
+Beside those: goroutines run on worker threads with the worker, rather than the
+goroutine, settling what it is owed; blocking registers as a waiter under the
+lock that guards the condition, so a park cannot lose a wake; a collection stops
+the world with a safe point at every loop back-edge; and `GOMAXPROCS`,
+`NumCPU`, `LockOSThread` and `sync`'s processor pinning are real.
+
+**And one bug, not yet found.** Above one worker, a goroutine's saved context
+acquires a stack pointer belonging to a worker's own native stack, so resuming
+it returns through that pointer into nowhere. `testdata/programs/parallel` —
+sixty-four goroutines on one mutex — gets the wrong *output* 3 times in 20 with
+two workers, and 0 in 20 with one. Measuring by exit status alone hides it,
+because the failure is `main` returning early, which exits 0.
+
+Three measurements narrow it and then contradict each other, which is the
+honest state of it. At the moment of failure the thread-local naming the running
+goroutine, the scheduler's own record, and the goroutine whose stack the thread
+stands on all agree — so it is neither a stale thread-local nor one goroutine
+handed to two threads. The only code that writes a context is `leave`, and an
+assertion that `leave` stands on that goroutine's own stack never fired. Yet the
+scheduler finds worker stack pointers in goroutine contexts. One of those three
+is lying. The next step is to attribute the bad write rather than infer it: an
+owner tag that context preparation sets and the switch checks, and distinct
+types for the switch's two arguments so that `from` and `to` cannot be
+transposed.
+
+So the plan is to merge the branch with the worker count at one, where it
+changes no behaviour and carries the fixes above, and to treat the context
+corruption as an isolated bug on master with a one-line reproduction. A branch
+that keeps rebasing against code generation changing underneath it spends its
+time on rebases.
+
 ## M3 — Standard library bring-up
 
 * Compile the real stdlib with the `purego` tag, completing the inventory of
