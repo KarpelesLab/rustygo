@@ -607,7 +607,7 @@ func (f *fnEmitter) expr(v ssa.Value) string {
 	case *ssa.Call:
 		return f.call(v)
 	case *ssa.ChangeType:
-		return f.val(v.X)
+		return f.changeType(v)
 	case *ssa.Convert:
 		return f.convert(v)
 	case *ssa.Extract:
@@ -1019,6 +1019,23 @@ func (f *fnEmitter) noteReflectUse(obj types.Object) {
 // whose calls into itself say nothing about what the program asks for.
 func (f *fnEmitter) inReflect() bool {
 	return f.fn.Pkg != nil && f.fn.Pkg.Pkg.Path() == "reflect"
+}
+
+// changeType renders a conversion between two types that share an underlying
+// one. It costs nothing, and the two are usually the same Rust type — except
+// where one side is a named func type that contains itself, which has a Rust
+// type of its own wrapping the plain `Func` (types.go). go/ssa puts a
+// ChangeType at every crossing of that boundary, including the implicit one in
+// `return lexText`, so this is the only place that has to know about it.
+func (f *fnEmitter) changeType(v *ssa.ChangeType) string {
+	x := f.val(v.X)
+	if f.e.types.selfFunc(v.X.Type(), f.e, v.Pos()) != "" {
+		x = "(" + x + ").0"
+	}
+	if n := f.e.types.selfFunc(v.Type(), f.e, v.Pos()); n != "" {
+		x = n + "(" + x + ")"
+	}
+	return x
 }
 
 // isNilConst reports the literal nil, whatever type it was given.

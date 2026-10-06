@@ -68,3 +68,4 @@ filesys linux
 reflectchan linux
 gopanic linux
 bytecmp
+recfunc linux

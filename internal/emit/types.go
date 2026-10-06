@@ -27,8 +27,10 @@ type typeReg struct {
 	// type that contains itself without a struct to break the cycle.
 	expanding map[*types.Named]bool
 	// selfPlaces holds the place types generated for named slice and pointer
-	// types that contain themselves (selfPlace).
+	// types that contain themselves (selfPlace), and selfFuncs the value types
+	// generated for named func types that do (selfFunc).
 	selfPlaces typeutil.Map // types.Type -> string
+	selfFuncs  typeutil.Map // types.Type -> string
 }
 
 type structInfo struct {
@@ -88,6 +90,9 @@ func (r *typeReg) rust(t types.Type, e *emitter, pos token.Pos) string {
 	case *types.Named:
 		if st, ok := t.Underlying().(*types.Struct); ok {
 			return r.structInfo(st, t.Obj().Name(), e, pos).path()
+		}
+		if p := r.selfFunc(t, e, pos); p != "" {
+			return p
 		}
 		// A named type that is not a struct has no Rust type of its own, so
 		// one containing itself (`type T *T`, `type L []L`) would expand
@@ -212,6 +217,93 @@ impl Trace for %s {
     }
 }
 `, types.TypeString(n, nil), name, value, name, value, value, name, value, value, name)
+	return path
+}
+
+// selfFunc gives a name of its own to the value form of a named func type that
+// contains itself, and returns it; "" for every other type.
+//
+// `type stateFn func(*lexer) stateFn` is what `text/template/parse`'s lexer is
+// written around, and it is the one shape selfPlace cannot close. There the
+// cycle runs through the *value* form — the type is its own code pointer's
+// result — so naming the place form would leave the value form to unfold
+// anyway. What makes it closable instead is that a `Func<F>` is a code address
+// and an environment whatever `F` is, and Rust will recur through a function
+// pointer, whose size is known however large what it returns. So the value form
+// becomes a one-field struct over that `Func`, and the struct's name is what
+// the code pointer's result says.
+//
+// The named type carries the whole of what generated code asks of a func value
+// — `code`, `env`, `is_nil`, `addr`, a zero, a trace and a root word — so
+// nothing inside a function body changes. The boundary does:
+// `func(*lexer) stateFn` and
+// `stateFn` are two Rust types now, and go/ssa marks every crossing between
+// them with a ChangeType, which is where func.go wraps and unwraps.
+func (r *typeReg) selfFunc(t types.Type, e *emitter, pos token.Pos) string {
+	n, ok := types.Unalias(t).(*types.Named)
+	if !ok {
+		return ""
+	}
+	sig, ok := n.Underlying().(*types.Signature)
+	if !ok {
+		return ""
+	}
+	// Both answers are remembered, as in selfPlace: walking a type to see
+	// whether it reaches itself is not something to redo at every mention.
+	if p, ok := r.selfFuncs.At(n).(string); ok {
+		return p
+	}
+	if !selfReferential(n) {
+		r.selfFuncs.Set(n, "")
+		return ""
+	}
+	band := r.bands.typ(n)
+	name := r.ns.claim(plain(mangle(n.Obj().Name()))) + "_F"
+	path := crateName(band) + "::ty::" + name
+	// Registered before the body is written: spelling the code pointer's type
+	// asks for this one again, which is the whole point of it having a name.
+	r.selfFuncs.Set(n, path)
+	code := r.fnPtr(sig, e, pos)
+	fmt.Fprintf(r.at(band), `
+// Go: %s, a func type that contains itself: its value form carries the name
+// that closes the cycle (types.go).
+#[derive(Clone, Copy, PartialEq)]
+#[repr(transparent)]
+pub struct %s(pub Func<%s>);
+
+impl GoValue for %s {
+    fn zero() -> Self {
+        %s(GoValue::zero())
+    }
+}
+
+impl Trace for %s {
+    fn trace(&self, t: &mut Tracer<'_>) {
+        self.0.trace(t);
+    }
+}
+
+impl rustygo::gc::Root for %s {
+    fn root_word(&self) -> usize {
+        rustygo::gc::Root::root_word(&self.0)
+    }
+}
+
+impl %s {
+    pub fn is_nil(self) -> bool {
+        self.0.is_nil()
+    }
+    pub fn code(self) -> %s {
+        self.0.code()
+    }
+    pub fn env(self) -> Env {
+        self.0.env()
+    }
+    pub fn addr(self) -> u64 {
+        self.0.addr()
+    }
+}
+`, types.TypeString(n, nil), name, code, name, name, name, name, name, code)
 	return path
 }
 
