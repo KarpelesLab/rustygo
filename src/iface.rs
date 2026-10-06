@@ -135,6 +135,13 @@ pub struct TypeDesc {
     /// Calls a func value of this type: `reflect.Value.Call`. Generated only
     /// for a program that asks, since it is a function per func type.
     pub call: Option<CallFn>,
+    /// Makes a func value of this type out of a boxed
+    /// `func([]reflect.Value) []reflect.Value`: `reflect.MakeFunc`. The
+    /// emitter writes a trampoline with this signature, whose environment is
+    /// that boxed function, and this hands back the trampoline boxed as a func
+    /// value. `None` for a signature the program never wrote, which is the
+    /// honest answer: there is no trampoline to point at.
+    pub make_func: Option<fn(Data) -> Data>,
     /// How many exported methods the type has, which
     /// `reflect.Type.NumMethod` reports. Always known, even when the table
     /// below is not generated: a program can ask how many methods a type has
@@ -265,6 +272,7 @@ impl TypeDesc {
         results: &[],
         variadic: false,
         call: None,
+        make_func: None,
         num_methods: 0,
         reflect_methods: &[],
     };

@@ -379,6 +379,9 @@ func (e *emitter) typeDesc(t types.Type, pos token.Pos) string {
 		if shim := e.callShim(u, pos); shim != "" {
 			fmt.Fprintf(&b, "    call: Some(%s),\n", shim)
 		}
+		if shim := e.makeFuncShim(t, u, name, pos); shim != "" {
+			fmt.Fprintf(&b, "    make_func: Some(%s),\n", shim)
+		}
 	}
 	if p := e.pointerDesc(t, pos); p != "" {
 		fmt.Fprintf(&b, "    ptr: Some(&%s),\n", p)
@@ -907,6 +910,99 @@ func (e *emitter) callShim(sig *types.Signature, pos token.Pos) string {
 	}
 	b.WriteString("        })\n    }")
 	return b.String()
+}
+
+// makeFuncShim writes the trampoline `reflect.MakeFunc` hands back for this
+// func type and returns the closure the descriptor's `make_func` holds, or ""
+// when the program never asks for MakeFunc.
+//
+// It is `callShim` run backwards. The trampoline has the signature the program
+// wrote, so it can be called as an ordinary func value; its *environment* is the
+// boxed `func([]Value) []Value` the program gave MakeFunc. It boxes each
+// argument the way an interface conversion does, hands the boxes to reflect's
+// own dispatcher — through the runtime, because a trampoline sits with its func
+// type and that crate need not be able to name `reflect` (src/reflect.rs) — and
+// reads the results back out of the boxes that come back.
+//
+// Every boxing is a safe point, so an argument that holds references is rooted
+// before any of them, and each box is stored into the rooted argument slice
+// before the next one is made. That is the whole of the GC rule here.
+func (e *emitter) makeFuncShim(t types.Type, sig *types.Signature, desc string, pos token.Pos) string {
+	if !e.needsReflectMakeFunc {
+		return ""
+	}
+	band := e.bands.typ(t)
+	name := e.types.ns.claim("MF_" + mangle(goName(t)))
+	params, res := sig.Params(), sig.Results()
+	// One slot for each argument that holds a reference, one for the boxed
+	// function and one for the slice the boxes go into.
+	rooted := make([]int, 0, params.Len())
+	for i := 0; i < params.Len(); i++ {
+		if containsRef(params.At(i).Type()) {
+			rooted = append(rooted, i)
+		}
+	}
+	var b strings.Builder
+	decl := make([]string, 0, params.Len()+1)
+	decl = append(decl, "__env: Env")
+	for i := 0; i < params.Len(); i++ {
+		decl = append(decl, fmt.Sprintf("a%d: %s", i, e.types.rust(params.At(i).Type(), e, pos)))
+	}
+	ret := ""
+	switch res.Len() {
+	case 0:
+	case 1:
+		ret = " -> " + e.types.rust(res.At(0).Type(), e, pos)
+	default:
+		ret = " -> " + e.types.rust(res, e, pos)
+	}
+	fmt.Fprintf(&b, "\n// %s, as reflect.MakeFunc hands it back: its environment is the\n// boxed func([]reflect.Value) []reflect.Value the program gave MakeFunc.\npub fn %s(%s)%s {\n",
+		goName(t), name, strings.Join(decl, ", "), ret)
+	fmt.Fprintf(&b, "    let __roots = rustygo::gc::Frame::<%d>::new();\n", len(rooted)+2)
+	for k, i := range rooted {
+		fmt.Fprintf(&b, "    __roots.set_local(%d, &a%d);\n", k, i)
+	}
+	b.WriteString("    __roots.scope(|| {\n")
+	fmt.Fprintf(&b, "        __roots.set(%d, &__env);\n", len(rooted))
+	fmt.Fprintf(&b, "        let __args = Slice::<Slot<UPtr>>::make(%d, %d);\n", params.Len(), params.Len())
+	fmt.Fprintf(&b, "        __roots.set(%d, &__args);\n", len(rooted)+1)
+	for i := 0; i < params.Len(); i++ {
+		fmt.Fprintf(&b, "        __args.at(%d).store(UPtr::from_ptr(Ptr::<%s>::alloc(a%d)));\n",
+			i, e.types.place(params.At(i).Type(), e, pos), i)
+	}
+	fmt.Fprintf(&b, "        let __out = rustygo::reflect::make_func_call(UPtr::from_addr(__env.addr()), UPtr::from_addr(&%s as *const TypeDesc as usize as u64), __args);\n", desc)
+	load := func(i int) string {
+		return fmt.Sprintf("unsafe { __out.at(%d).load().to_ptr::<%s>() }.load()",
+			i, e.types.place(res.At(i).Type(), e, pos))
+	}
+	switch res.Len() {
+	case 0:
+		b.WriteString("        let _ = __out;\n")
+	case 1:
+		fmt.Fprintf(&b, "        %s\n", load(0))
+	default:
+		parts := make([]string, res.Len())
+		for i := range parts {
+			parts[i] = load(i)
+		}
+		fmt.Fprintf(&b, "        (%s)\n", strings.Join(parts, ", "))
+	}
+	b.WriteString("    })\n}\n")
+	e.types.at(band).WriteString(b.String())
+	// The descriptor's side: a func value over the trampoline, closing over the
+	// boxed function, boxed in its turn. The func value is rooted across that
+	// second allocation, which nothing else refers to it through yet.
+	place := e.types.place(t, e, pos)
+	// A func type that contains itself has a Rust type of its own, and the func
+	// value has to be put into it (types.go).
+	value := "__f"
+	if n := e.types.selfValue(t, e, pos); n != "" {
+		value = n + "(__f)"
+	}
+	return fmt.Sprintf("|__u| {\n        let __f = Func::new(%s as %s, Env::of(__u.cast::<Slot<u8>>()));\n"+
+		"        let __roots = rustygo::gc::Frame::<1>::new();\n        __roots.scope(|| {\n"+
+		"            __roots.set(0, &__f);\n            Data::of(Ptr::<%s>::alloc(%s))\n        })\n    }",
+		name, e.types.fnPtr(sig, e, pos), place, value)
 }
 
 // ifaceMethodIDs renders an interface type's own method ids, sorted, which is

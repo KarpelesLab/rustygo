@@ -1513,6 +1513,8 @@ func descCall(d, f unsafe.Pointer, args []unsafe.Pointer) []unsafe.Pointer
 func descImplements(d, iface unsafe.Pointer) bool
 func descZero(d unsafe.Pointer) unsafe.Pointer
 func descMakeSlice(d unsafe.Pointer, len, cap int) unsafe.Pointer
+func descMakeFunc(d, fn unsafe.Pointer) unsafe.Pointer
+func registerMakeFunc(f func(fnBox, d unsafe.Pointer, args []unsafe.Pointer) []unsafe.Pointer)
 func descPtrTo(d unsafe.Pointer) unsafe.Pointer
 func descNew(d unsafe.Pointer) unsafe.Pointer
 func boxPointer(p unsafe.Pointer) unsafe.Pointer
@@ -1641,9 +1643,7 @@ func (v Value) OverflowFloat(x float64) bool {
 //     original's array whenever there is room in it, as `append` does, which
 //     means boxing a slice header the runtime did not just allocate;
 //   - Convert and ConvertibleTo need every conversion Go's rules allow,
-//     between types the program may never have converted itself;
-//   - MakeFunc needs a trampoline for a signature the program may not
-//     contain (DESIGN §6).
+//     between types the program may never have converted itself.
 
 // Append appends the values x to a slice s and returns the resulting slice.
 func Append(s Value, x ...Value) Value {
@@ -1670,10 +1670,82 @@ func (t rtype) ConvertibleTo(u Type) bool {
 	panic(unsupported("Type.ConvertibleTo"))
 }
 
-// MakeFunc returns a new function of the given Type that wraps the function
-// fn.
+// MakeFunc returns a new function of the given Type that calls fn with the
+// arguments it is given and returns what fn returns.
+//
+// The func value is a trampoline the emitter wrote for this signature, closing
+// over fn: calling it boxes the arguments, hands them to makeFuncDispatch below,
+// and reads the results back (src/reflect.rs). A signature the program never
+// wrote has no trampoline, which is the one case this cannot do.
+//
+// One thing gc does that this does not: `recover` called inside fn, when the
+// made function is itself running as a deferred call, recovers the caller's
+// panic. gc arranges for recover to see through its own reflect call; here fn
+// is several frames below the deferred one — the trampoline, the runtime, this
+// package — and rustygo's recover compares shadow-stack frames, so it finds
+// nothing (DESIGN §5). A panic raised inside fn does unwind out through the
+// trampoline to a recover above it, which is the common direction.
 func MakeFunc(typ Type, fn func(args []Value) (results []Value)) Value {
-	panic(unsupported("MakeFunc"))
+	rt, ok := typ.(rtype)
+	if !ok || rt.Kind() != Func {
+		panic("reflect: MakeFunc of non-func type " + typ.String())
+	}
+	if fn == nil {
+		panic("reflect: MakeFunc of nil func")
+	}
+	// The trampoline's environment is fn boxed, and the type of fn is what
+	// knows how to box one.
+	box := descBox(ifaceType(any(fn)), unsafe.Pointer(&fn))
+	p := descMakeFunc(rt.d, box)
+	if p == nil {
+		panic(unsupported("MakeFunc"))
+	}
+	return Value{d: rt.d, p: p}
+}
+
+// makeFuncDispatch is the Go half of every trampoline: boxed arguments in,
+// boxed results out, with the Values in between.
+//
+// The runtime calls it rather than the trampoline calling it directly, because a
+// trampoline is emitted with its func type and that crate need not be one
+// `reflect`'s crate can be seen from. init registers it, once.
+func makeFuncDispatch(fnBox, d unsafe.Pointer, args []unsafe.Pointer) []unsafe.Pointer {
+	fn := *(*func(args []Value) []Value)(fnBox)
+	in := make([]Value, len(args))
+	for i := range args {
+		in[i] = Value{d: descIn(d, i), p: args[i]}
+	}
+	out := fn(in)
+	n := int(descNumOut(d))
+	if len(out) != n {
+		panic("reflect: wrong number of results from the function passed to MakeFunc")
+	}
+	res := make([]unsafe.Pointer, n)
+	for i := range res {
+		want := descOut(d, i)
+		v := out[i]
+		switch {
+		case !v.IsValid():
+			// gc takes the zero Value as the result type's own zero value.
+			res[i] = descZero(want)
+		case v.d == want:
+			res[i] = v.p
+		case descKind(want) == uint8(Interface):
+			// The one assignment Go allows here that is not identity: a
+			// concrete value going into an interface result, which is boxing it.
+			box := descZero(want)
+			*(*any)(box) = v.Interface()
+			res[i] = box
+		default:
+			panic("reflect: function created by MakeFunc using " + v.Type().String() +
+				" as type " + typeAt(want).String())
+		}
+	}
+	return res
+}
+
+func init() {
+	registerMakeFunc(makeFuncDispatch)
 }
 
 // StringHeader is the runtime representation of a string.

@@ -991,6 +991,12 @@ func (f *fnEmitter) noteReflectUse(obj types.Object) {
 		f.e.usesReflectCall = true
 		return
 	}
+	// `MakeFunc` needs a trampoline per func type, which is a function to
+	// generate and so is not generated unasked.
+	if obj.Name() == "MakeFunc" && obj.Pkg() != nil && obj.Pkg().Path() == "reflect" {
+		f.e.usesReflectMakeFunc = true
+		return
+	}
 	// `New`, `PointerTo` and `Value.Addr` all hand back a `*T`, and a
 	// descriptor for `*T` has to exist and has to be the one the rest of the
 	// program uses. All three are reflect's own, called statically, so the

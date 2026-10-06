@@ -54,7 +54,7 @@ type Options struct {
 // variables anything outside initialization reads, so the second can skip
 // building the rest (deadinit.go).
 func Crate(res *load.Result, opt Options) error {
-	first, err := run(res, nil, nil, nil, false, false, false, nil)
+	first, err := run(res, nil, nil, nil, false, false, false, false, nil)
 	if err != nil {
 		return err
 	}
@@ -66,7 +66,7 @@ func Crate(res *load.Result, opt Options) error {
 	// says who must link a shadow-stack frame for `recover` (recover.go).
 	e, err := run(res, live, framesForRecover(first.emitted), first.bands,
 		first.usesReflectMethods, first.usesReflectCall,
-		first.usesReflectPointer, &first.ptrSeen)
+		first.usesReflectPointer, first.usesReflectMakeFunc, &first.ptrSeen)
 	if err != nil {
 		return err
 	}
@@ -77,7 +77,7 @@ func Crate(res *load.Result, opt Options) error {
 // package initializers skip variables nothing else reads; needsFrame, when
 // set, names the functions that link a frame whatever their roots; ptrDescs,
 // when set, names the pointer types the previous pass wrote descriptors for.
-func run(res *load.Result, liveGlobals map[*ssa.Global]bool, needsFrame map[*ssa.Function]bool, placed *bands, reflectMethods, reflectCall, reflectPointer bool, ptrDescs *typeutil.Map) (*emitter, error) {
+func run(res *load.Result, liveGlobals map[*ssa.Global]bool, needsFrame map[*ssa.Function]bool, placed *bands, reflectMethods, reflectCall, reflectPointer, reflectMakeFunc bool, ptrDescs *typeutil.Map) (*emitter, error) {
 	var mainPkg *ssa.Package
 	for _, p := range res.Pkgs {
 		if p != nil && p.Pkg.Name() == "main" {
@@ -102,15 +102,16 @@ func run(res *load.Result, liveGlobals map[*ssa.Global]bool, needsFrame map[*ssa
 		types:   newTypeReg(),
 		bands:   placed,
 
-		liveGlobals:         liveGlobals,
-		needsFrame:          needsFrame,
-		needsReflectMethods: reflectMethods,
-		needsReflectCall:    reflectCall,
-		needsReflectPointer: reflectPointer,
-		ptrDescs:            ptrDescs,
-		readGlobals:         map[*ssa.Global]bool{},
-		calledFrom:          map[*ssa.Function]*ssa.Function{},
-		sizes:               types.SizesFor("gc", build.Default.GOARCH),
+		liveGlobals:          liveGlobals,
+		needsFrame:           needsFrame,
+		needsReflectMethods:  reflectMethods,
+		needsReflectCall:     reflectCall,
+		needsReflectPointer:  reflectPointer,
+		needsReflectMakeFunc: reflectMakeFunc,
+		ptrDescs:             ptrDescs,
+		readGlobals:          map[*ssa.Global]bool{},
+		calledFrom:           map[*ssa.Function]*ssa.Function{},
+		sizes:                types.SizesFor("gc", build.Default.GOARCH),
 	}
 	if e.bands == nil {
 		e.bands = newBands()
@@ -202,10 +203,14 @@ type emitter struct {
 	needsReflectPointer bool
 	usesReflectPointer  bool
 	ptrDescs            *typeutil.Map
-	ptrSeen             typeutil.Map
-	queue               []*ssa.Function
-	types               *typeReg
-	errs                []diag
+	// And for `reflect.MakeFunc`, whose trampoline is a function per func
+	// type: the mirror of the call closure above (iface.go).
+	needsReflectMakeFunc bool
+	usesReflectMakeFunc  bool
+	ptrSeen              typeutil.Map
+	queue                []*ssa.Function
+	types                *typeReg
+	errs                 []diag
 }
 
 // diag is one unsupported construct.

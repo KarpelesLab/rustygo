@@ -342,6 +342,66 @@ pub fn zero_value(d: UPtr) -> UPtr {
     UPtr::from_addr((desc(d).zero)().addr())
 }
 
+// `reflect.MakeFunc`, which is `reflect.Value.Call` run backwards.
+//
+// `Call` hands boxed arguments to generated code that knows the signature;
+// MakeFunc has generated code hand boxed arguments *out*, to one Go function in
+// `reflect` that turns them into `[]reflect.Value`, calls what the program gave
+// MakeFunc, and gives the results back boxed. The emitter writes that generated
+// code — a trampoline per func type, whose environment is the boxed function —
+// because only it knows a signature.
+//
+// The trampoline cannot call reflect's dispatcher by name. A trampoline sits
+// with its func type, which may be in a crate far below the one `reflect` is in,
+// and a crate can only name what it depends on (bands.go). So the dispatcher is
+// registered here instead, by `reflect`'s own `init`, and every trampoline
+// reaches it through the runtime, which every crate depends on.
+
+/// Reflect's dispatcher: the boxed function, the func type's descriptor, and
+/// the boxed arguments, giving back the boxed results. All of it is spelled in
+/// runtime types, so this crate can name it without knowing what a
+/// `reflect.Value` looks like.
+type Dispatch = fn(
+    crate::func::Env,
+    UPtr,
+    UPtr,
+    crate::slice::Slice<Slot<UPtr>>,
+) -> crate::slice::Slice<Slot<UPtr>>;
+
+/// The dispatcher's code address, or 0 before `reflect`'s `init` has run.
+static DISPATCH: core::sync::atomic::AtomicUsize = core::sync::atomic::AtomicUsize::new(0);
+
+/// Registers reflect's dispatcher, which its own `init` does once, before
+/// anything can reach a trampoline.
+pub fn set_make_func(f: crate::func::Func<Dispatch>) {
+    DISPATCH.store(f.code() as usize, Ordering::Release);
+}
+
+/// What a trampoline calls: reflect's dispatcher, as registered.
+pub fn make_func_call(
+    f: UPtr,
+    d: UPtr,
+    args: crate::slice::Slice<Slot<UPtr>>,
+) -> crate::slice::Slice<Slot<UPtr>> {
+    let code = DISPATCH.load(Ordering::Acquire);
+    assert!(code != 0, "reflect's MakeFunc dispatcher is not registered");
+    // SAFETY: the only address ever stored is the one `set_make_func` took from
+    // a `Func<Dispatch>`, which is reflect's own function with that signature.
+    // A plain Go function has no environment, so there is nothing else to pass.
+    let dispatch: Dispatch = unsafe { core::mem::transmute(code) };
+    dispatch(crate::func::Env::NONE, f, d, args)
+}
+
+/// A func value of this type over the boxed function, boxed: the whole of
+/// `reflect.MakeFunc` once the trampoline exists. Nil when it does not, which
+/// is what lets the Go side say so in its own words.
+pub fn make_func(d: UPtr, f: UPtr) -> UPtr {
+    match desc(d).make_func {
+        Some(make) => UPtr::from_addr(make(data(f)).addr()),
+        None => UPtr::from_addr(0),
+    }
+}
+
 /// A slice of this type with this length and capacity, boxed:
 /// `reflect.MakeSlice`.
 pub fn make_slice(d: UPtr, len: i64, cap: i64) -> UPtr {

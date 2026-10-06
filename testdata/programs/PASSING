@@ -69,3 +69,4 @@ reflectchan linux
 gopanic linux
 bytecmp
 recvalues linux
+reflectmakefunc linux
