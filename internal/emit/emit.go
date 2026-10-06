@@ -111,7 +111,7 @@ func run(res *load.Result, liveGlobals map[*ssa.Global]bool, needsFrame map[*ssa
 		ptrDescs:             ptrDescs,
 		readGlobals:          map[*ssa.Global]bool{},
 		calledFrom:           map[*ssa.Function]*ssa.Function{},
-		sizes:                types.SizesFor("gc", build.Default.GOARCH),
+		sizes:                newRustSizes(types.SizesFor("gc", build.Default.GOARCH)),
 	}
 	if e.bands == nil {
 		e.bands = newBands()

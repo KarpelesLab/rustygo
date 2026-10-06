@@ -387,12 +387,30 @@ pass, `TestSynctestMarshal` aside, which needs `testing/synctest`.
 Supported, as gc supports it (revised in M1; the first draft rejected
 reinterpretation):
 
-* **Places have gc's bytes.** Generated structs are `#[repr(C)]` — Go's struct
-  layout — in both their value and place forms, and a `Slot` is transparent
-  over its value. So a place has exactly the layout gc would give the same
-  variable, and `unsafe.Sizeof`/`Alignof`/`Offsetof`, which go/types computes
-  with gc's rules, describe it truthfully. Pointers, strings, slices, maps and
-  interfaces have gc's sizes too; only func values differ (two words, not one).
+* **Places have gc's bytes, with one exception.** Generated structs are
+  `#[repr(C)]` — Go's struct layout — in both their value and place forms, and a
+  `Slot` is transparent over its value. Pointers, strings, slices, maps and
+  interfaces have gc's sizes. A **func value does not**: it is a code address and
+  an environment, two words where gc's is one pointer to a funcval. So a struct
+  holding a func value is wider than gc's, and everything after that field sits
+  eight bytes further along.
+* **What that costs, and who pays it.** `unsafe.Sizeof`/`Alignof`/`Offsetof` are
+  constants go/types folds with gc's rules while type-checking, so for such a
+  struct they describe a layout that does not exist. Reflection must not: a
+  descriptor's field offsets are what `Value.Field` reads a field *at*, so they
+  are computed with rustygo's own arithmetic — gc's, corrected for the width of a
+  func value (`internal/emit/sizes.go`). A type with no func value inside it is
+  handed straight to gc and its numbers cannot drift.
+
+  So `unsafe.Sizeof` and `reflect.Type.Size` disagree for a struct holding a func
+  value. That is the one divergence left, and it is narrower than the alternative:
+  before, both reported gc's number and *neither* described the memory, so
+  reflecting over `crypto/tls.Config` — thirty-five fields, eleven of them funcs —
+  read and wrote bytes belonging to other fields. Making the two agree again means
+  making a func value one word as gc has it, with the code address in the
+  closure's environment struct so a closure still allocates once; that changes
+  every call site, how a func value is rooted and traced, and what a closure
+  costs, so it is written down rather than done.
 * **`unsafe.Pointer` is an address** (`UPtr`). Converting it back to a typed
   pointer reinterprets memory as gc does — `math.Float64bits` is
   `*(*uint64)(unsafe.Pointer(&f))` — and pointer arithmetic through `uintptr`

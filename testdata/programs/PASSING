@@ -74,3 +74,4 @@ http2tls linux
 mfrecover linux
 syscallptr linux
 yieldtimer
+structlayout

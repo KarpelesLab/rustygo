@@ -479,19 +479,19 @@ their own tests.**
     else wants the processor", so an expired deadline is never noticed and the
     loop runs for ever. Twenty lines of Go reproduce it: gc fires the timer
     after about a million spins, rustygo not after fifty million.
-  * `TestCloneNonFuncFields` fails. It sets every field of a `tls.Config`
-    through reflection and compares the clone with `reflect.DeepEqual`.
-    `DeepEqual` itself is sound over copied slices, arrays and structs; what is
-    not is reflecting over `tls.Config`'s fields — in a program that does
-    nothing else with them, `Value.Field` dereferences nil on all but one.
-
-    A missing descriptor was the first guess and it is wrong: the emitted
-    `TD_crypto_1tls_1Config` has all thirty-five `FieldDesc`s with a `typ` each,
-    `io.Reader`'s and the func types' included. So the fault is on the reading
-    side — `Value.Field`, or what the test does with the field it gets, which is
-    `Set` through an addressable `reflect.New(typ).Elem()`. Whoever picks this up
-    should start by printing `Kind()` for all thirty-five in a program of ten
-    lines rather than inside `crypto/tls`'s suite.
+  * `TestCloneNonFuncFields` was failing because a struct holding a func value
+    does not have gc's layout, and a descriptor was giving reflection gc's field
+    offsets anyway. A func value is two words in rustygo and one in gc, so every
+    field after one sits eight bytes further along; `tls.Config` has eleven of
+    them among thirty-five fields. Reflection was reading and writing other
+    fields' bytes, and past the end of the object once the drift exceeded what
+    was left — a write through `Value.Field` turned a neighbouring string into a
+    wild pointer. Descriptors now carry rustygo's own arithmetic
+    (`internal/emit/sizes.go`), which leaves `unsafe.Sizeof` and
+    `reflect.Type.Size` disagreeing for such a struct and nothing else wrong;
+    [DESIGN §7](DESIGN.md#7-unsafepointer-and-package-unsafe) says what making
+    them agree would take. All thirty-five fields of a `tls.Config` now read as
+    gc reads them.
 * The rest of the `crypto` tree, by its own tests. Every failure is one of two
   kinds and neither is arithmetic: a `testdata` file this Go installation does
   not ship (gc fails those three identically), or an `AllocsPerRun` check that
