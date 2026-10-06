@@ -37,6 +37,23 @@ type fnEmitter struct {
 	// tables maps an allocation to the static holding its constant elements,
 	// and the stores that static replaces (tables.go).
 	tables map[*ssa.Alloc]string
+	// byteCmp holds the string comparisons to make over bytes instead, which
+	// is what lets the conversion on either side be skipped (bytecmp.go).
+	byteCmp map[*ssa.BinOp]bool
+}
+
+// markDead adds instructions to the set the body leaves out.
+func (f *fnEmitter) markDead(instrs map[ssa.Instruction]bool) {
+	if len(instrs) == 0 {
+		return
+	}
+	if f.dead == nil {
+		f.dead = instrs
+		return
+	}
+	for instr := range instrs {
+		f.dead[instr] = true
+	}
 }
 
 func (e *emitter) function(fn *ssa.Function) {
@@ -86,15 +103,12 @@ func (e *emitter) function(fn *ssa.Function) {
 	// thousand lines of Rust (tables.go).
 	var fromTables map[ssa.Instruction]bool
 	f.tables, fromTables = f.findTables()
-	if len(fromTables) > 0 {
-		if f.dead == nil {
-			f.dead = fromTables
-		} else {
-			for instr := range fromTables {
-				f.dead[instr] = true
-			}
-		}
-	}
+	f.markDead(fromTables)
+	// `string(a) == string(b)` compares the bytes where they lie, as gc does,
+	// rather than copying both sides into fresh strings first (bytecmp.go).
+	var fromCompares map[ssa.Instruction]bool
+	f.byteCmp, fromCompares = f.findByteCompares()
+	f.markDead(fromCompares)
 	f.collectRoots()
 	f.hasDefers = hasDefers(fn)
 	if len(fn.FreeVars) > 0 {
@@ -755,6 +769,11 @@ func (f *fnEmitter) binop(v *ssa.BinOp) string {
 		if s, ok := f.nilComparison(v); ok {
 			return s
 		}
+	}
+	// A comparison whose operands were `string(b)` reads the bytes rather than
+	// the copy, so neither operand is rendered as a string at all.
+	if f.byteCmp[v] {
+		return f.byteCompare(v)
 	}
 	x, y := f.val(v.X), f.val(v.Y)
 	b := basicInfo(v.X.Type())

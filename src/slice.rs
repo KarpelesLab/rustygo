@@ -314,6 +314,22 @@ impl Slice<crate::place::Slot<u8>> {
         crate::string::GoStr::from_bytes(&bytes)
     }
 
+    /// `string(b)` compared with a string, without the copy the conversion
+    /// would make. Go orders strings by their bytes, and so does Rust.
+    ///
+    /// `bytes.Equal` is written `string(a) == string(b)`, and gc compares the
+    /// bytes where they lie rather than copying either side; without that,
+    /// every `bytes.Index` over a long needle allocates twice per candidate
+    /// position. The emitter spots the shape (func.go, findByteCompares).
+    pub fn cmp_str(self, s: crate::string::GoStr) -> core::cmp::Ordering {
+        self.with_bytes(|b| b.cmp(s.bytes()))
+    }
+
+    /// `string(a)` compared with `string(b)`, neither one copied.
+    pub fn cmp_bytes(self, other: Self) -> core::cmp::Ordering {
+        self.with_bytes(|a| other.with_bytes(|b| a.cmp(b)))
+    }
+
     /// `append(b, s...)`: appends a string's bytes.
     pub fn append_str(self, s: crate::string::GoStr) -> Self {
         let mut out = self;

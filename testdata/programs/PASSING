@@ -67,3 +67,4 @@ httpstls linux
 filesys linux
 reflectchan linux
 gopanic linux
+bytecmp
