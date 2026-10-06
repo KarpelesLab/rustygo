@@ -13,8 +13,9 @@ cgo needed to get there.
 > **Status: M0 and M1 are done; M2 (goroutines) and M3 (the standard library)
 > are in progress.** Go programs compile to Rust and run under a precise
 > mark-sweep collector, and their output, panics and exit codes are identical to
-> gc's — 66 differential programs check that on every commit, every one of them
-> also under GC torture, which collects at every allocation. Go's own `test/`
+> gc's — 74 differential programs check that on every commit, every one of them
+> also under GC torture, which collects at every allocation, and the whole set
+> passes both ways. Go's own `test/`
 > directory is at [125 of 141](docs/GOTEST.md), and every failure is listed
 > there with the reason. Standard-library packages are measured by the tests Go
 > ships for them, run with `rustygo test`
