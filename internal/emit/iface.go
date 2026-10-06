@@ -691,27 +691,30 @@ pub static %s: ChanOps = ChanOps {
         })
     },
     try_recv: |d| {
+        // One attempt under the channel's own lock. Asking whether a receive
+        // would block and then receiving leaves room for another goroutine to
+        // take the value in between, and the receive would then block — which
+        // is the one thing TryRecv may not do.
         let ch = d.cast::<Slot<%s>>().load();
-        if !ch.can_recv() {
-            return (Data::NONE, false);
-        }
         let __b = Ptr::<%s>::alloc(GoValue::zero());
         let __roots = rustygo::gc::Frame::<1>::new();
         __roots.scope(|| {
             __roots.set(0, &__b);
-            let (v, ok) = ch.recv();
-            __b.store(v);
-            (Data::of(__b), ok)
+            match ch.try_recv() {
+                Some((v, ok)) => {
+                    __b.store(v);
+                    (Data::of(__b), ok)
+                }
+                None => (Data::NONE, false),
+            }
         })
     },
     send: |d, v| d.cast::<Slot<%s>>().load().send(v.cast::<%s>().load()),
     try_send: |d, v| {
+        // As the receive above: one attempt, decided and committed under the
+        // channel's own lock.
         let ch = d.cast::<Slot<%s>>().load();
-        if !ch.can_send() {
-            return false;
-        }
-        ch.send(v.cast::<%s>().load());
-        true
+        ch.try_send(v.cast::<%s>().load())
     },
     len: |d| d.cast::<Slot<%s>>().load().len(),
     cap: |d| d.cast::<Slot<%s>>().load().cap(),
