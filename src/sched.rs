@@ -132,16 +132,20 @@ impl Saved {
 /// None of it may be done by the goroutine itself. Until the switch has
 /// finished saving its registers its stack is still in use, and a run-queue
 /// entry is an invitation to another thread to start running on that stack.
+///
+/// Which goroutine it is about is deliberately *not* here. The worker already
+/// knows — it is what `pick` put in `M::current` — and a second copy carried up
+/// from the caller is a copy that can disagree with it.
 #[derive(Clone, Copy)]
 enum Leaving {
     /// The worker was not running a goroutine.
     Nothing,
     /// Still runnable: back on the queue, at the end of it.
-    Yield(Gid),
+    Yield,
     /// Waiting, unless a wake arrived while it was on its way out.
-    Park(Gid),
+    Park,
     /// Over: free its stack and forget it.
-    Exit(Gid),
+    Exit,
 }
 
 /// One worker thread, as the scheduler sees it.
@@ -231,6 +235,22 @@ impl Sched {
             .local
             .pop_front()
             .or_else(|| self.run.pop_front())?;
+        // A goroutine is about to be resumed by restoring a stack pointer and
+        // returning through it, so a context that does not point into its own
+        // stack is a jump to nowhere. Two comparisons on words that are being
+        // read anyway buy the difference between a scheduler bug that says so
+        // and one that corrupts whatever it lands in.
+        {
+            let g = self.g(next);
+            let sp = g.ctx.sp();
+            let (lo, hi) = (g.stack.limit() as usize, g.stack.top() as usize);
+            if sp < lo || sp > hi {
+                crate::rt::trace(&alloc::format!(
+                    "goroutine {next} was saved at {sp:#x}, outside its own stack [{lo:#x},{hi:#x}]"
+                ));
+                crate::rt::fatal(b"a goroutine's saved context is not on its own stack");
+            }
+        }
         self.slots[slot] = true;
         self.g(next).state = State::Running;
         self.ms[me].current = Some(next);
@@ -241,21 +261,23 @@ impl Sched {
     /// Settles the goroutine this worker has just left.
     fn finish_leaving(&mut self, me: usize) {
         let leaving = core::mem::replace(&mut self.ms[me].leaving, Leaving::Nothing);
-        let id = match leaving {
-            Leaving::Nothing => return,
-            Leaving::Yield(id) | Leaving::Park(id) | Leaving::Exit(id) => id,
-        };
-        self.ms[me].current = None;
+        if let Leaving::Nothing = leaving {
+            return;
+        }
+        let id = self.ms[me]
+            .current
+            .take()
+            .expect("a worker owes the goroutine it ran");
         if let Some(slot) = self.ms[me].slot.take() {
             self.slots[slot] = false;
         }
         match leaving {
             Leaving::Nothing => {}
-            Leaving::Yield(_) => {
+            Leaving::Yield => {
                 self.g(id).state = State::Runnable;
                 self.enqueue_runnable(id);
             }
-            Leaving::Park(_) => {
+            Leaving::Park => {
                 // The wake may have arrived while the switch was still in
                 // progress, in which case the goroutine is runnable and never
                 // waits at all.
@@ -266,7 +288,7 @@ impl Sched {
                     self.g(id).state = State::Waiting;
                 }
             }
-            Leaving::Exit(_) => {
+            Leaving::Exit => {
                 // Nothing runs on that stack any more: the switch that brought
                 // this worker here was the last thing the goroutine did. The
                 // slot stays, empty: a goroutine's id may be in a waiter queue
@@ -502,16 +524,21 @@ fn worker(me: usize) -> ! {
 fn leave(how: Leaving) {
     let from = with_sched(|s| {
         let me = ME.with(|m| m.get());
+        // Which goroutine is leaving is the scheduler's to say. Asking the
+        // thread-local instead would be asking a second copy of the same fact,
+        // and a copy carried up from the caller through `Leaving` was exactly
+        // the bug: a goroutine that had been handed from one worker to another
+        // saved its registers into whichever goroutine the *caller's* copy
+        // named, which put two identities on one stack.
+        let id = s.ms[me]
+            .current
+            .expect("a worker leaves the goroutine it is running");
         s.ms[me].leaving = how;
         // The thread's state belongs to the goroutine that is leaving, so it
         // travels with it. One that is over has nowhere to put it and nothing
         // left that needs it.
         let state = take_thread_state();
-        let id = match how {
-            Leaving::Nothing => unreachable!("a worker does not leave itself"),
-            Leaving::Yield(id) | Leaving::Park(id) | Leaving::Exit(id) => id,
-        };
-        if let Leaving::Exit(_) = how {
+        if let Leaving::Exit = how {
             drop(state);
         } else {
             s.g(id).saved = state;
@@ -607,15 +634,9 @@ fn run_main_goroutine(init: fn(), main: fn()) -> ! {
 
 /// Ends the running goroutine and gives its worker back. Never returns.
 fn exit() -> ! {
-    let me = current();
     // A goroutine that pinned itself to a thread releases it by ending, as
-    // Go's does.
-    with_sched(|s| {
-        let g = s.g(me);
-        g.pins = 0;
-        g.locked_to = None;
-    });
-    leave(Leaving::Exit(me));
+    // Go's does, and the worker does that by forgetting the goroutine whole.
+    leave(Leaving::Exit);
     unreachable!("a goroutine that ended was resumed")
 }
 
@@ -672,7 +693,7 @@ pub fn gosched() {
         wake_expired();
         crate::netpoll::expire();
     }
-    leave(Leaving::Yield(current()));
+    leave(Leaving::Yield);
 }
 
 /// Gives the processor to another goroutine if one is ready to run, and says
@@ -684,7 +705,7 @@ pub fn yield_now() -> bool {
     if with_sched(|s| s.run.is_empty()) {
         return false;
     }
-    leave(Leaving::Yield(current()));
+    leave(Leaving::Yield);
     true
 }
 
@@ -696,7 +717,7 @@ pub fn yield_now() -> bool {
 /// return with nothing having happened, and every caller re-tests what it was
 /// waiting for.
 pub fn park() {
-    leave(Leaving::Park(current()));
+    leave(Leaving::Park);
 }
 
 /// Makes a parked goroutine runnable again.
