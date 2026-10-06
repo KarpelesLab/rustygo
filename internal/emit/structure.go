@@ -141,6 +141,7 @@ func (s *structurer) branch(src, dst *ssa.BasicBlock, ctx []ctxEntry, ind string
 	s.f.out.WriteString(s.f.phiMoves(src, dst, ind))
 	switch {
 	case s.rpo[dst] <= s.rpo[src]:
+		s.f.out.WriteString(preempt(ind))
 		fmt.Fprintf(&s.f.out, "%scontinue 'l%d;\n", ind, dst.Index)
 	case s.isMerge(dst):
 		fmt.Fprintf(&s.f.out, "%sbreak 'b%d;\n", ind, dst.Index)

@@ -294,12 +294,30 @@ work fails too, decision gate 1 says stop.
   factor published instead of hidden.
 * 100k parked goroutines fit in a stated memory budget.
 
-**Status (2026-09-22): the single-threaded half of M2 is in.**
+**Status (2026-10-04): M2's scheduler runs goroutines on several threads.**
 
 * Goroutines are real stacks with a real context switch (x86-64 and aarch64,
   naked assembly), reserved with a guard page below them. `go` hands the
   scheduler the thunk and environment a `defer` builds, so the two share
   their machinery.
+* `GOMAXPROCS` worker threads run them, defaulting to the number of CPUs and
+  settable from the environment and by `runtime.GOMAXPROCS`. A worker stands on
+  its thread's own stack between goroutines, which is what lets a goroutine be
+  handed to another thread at all ([DESIGN §4](DESIGN.md#4-goroutines-and-the-scheduler)).
+  One shared run queue, one lock; `runtime.LockOSThread` and `sync`'s processor
+  pinning keep a goroutine where it is and give it a processor number below
+  `GOMAXPROCS`, which is what makes `sync.Pool`'s per-processor shards safe.
+* A collection stops the world. Every thread reaches a safe point — a loop
+  back-edge, or the top of an allocation — and publishes its goroutine's roots
+  before the collector marks, so the root set is every goroutine's shadow
+  stack. `RUSTYGO_GCTORTURE=1` collects at every allocation and the whole
+  differential suite passes under it, which is what says the handshake and the
+  emitted roots agree.
+* Every piece of the runtime's state says whether it belongs to a thread or to
+  the program, in one place (`src/tls.rs`): the shadow stack and the panic
+  stack are per thread and travel with the goroutine, while the heap, the
+  goroutine table, the waiter table, the netpoller and the finalizer table are
+  shared behind a lock each, in a fixed order.
 * Channels: buffered and synchronous, `close`, `range`, `len`/`cap`,
   receiving from a closed channel, and `select` with and without a default,
   choosing among ready cases at random. `sync.Mutex` and `sync.WaitGroup`
@@ -319,10 +337,12 @@ work fails too, decision gate 1 says stop.
   also park until a moment on the clock, which is what `time.Sleep` and the
   timer list use. `time.NewTimer`, `After` and `Ticker` work, fired by a
   timer goroutine in the runtime overlay.
-* Not yet: the M:N scheduler over threads, work stealing, preemption,
-  `GOMAXPROCS` above 1, and `testing/synctest`. Read and write deadlines on a
-  descriptor, and `runtime.Goexit`, have since landed — see the M1 and M3
-  status notes.
+* Not yet: work stealing with a run queue per worker (one shared queue under
+  one lock today), Go's `sysmon` taking a processor slot back from a goroutine
+  that blocks in a system call without announcing it, time-sliced preemption at
+  the safe points that now exist, pooling the stacks of exited goroutines, and
+  `testing/synctest`. Read and write deadlines on a descriptor, and
+  `runtime.Goexit`, landed earlier — see the M1 and M3 status notes.
 
 **The threaded half, measured 2026-10-06.** Written on a branch and not yet
 merged. What it found first is worth recording whatever becomes of the rest,

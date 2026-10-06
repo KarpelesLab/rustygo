@@ -353,6 +353,20 @@ unsafe fn walk(head: *const Header, t: &mut Tracer<'_>) {
     }
 }
 
+/// A safe point: a place where a collection may run, and where a thread that
+/// has been asked to stop does.
+///
+/// Generated code calls this at every loop back-edge
+/// (`internal/emit/roots.go`), which is what keeps a loop that neither calls
+/// nor allocates from holding up a collection for as long as it runs. Every
+/// allocation is one too, from the inside. On a target with no scheduler there
+/// is only ever one thread, so there is nothing to stop and this is nothing.
+#[inline]
+pub fn safepoint() {
+    #[cfg(feature = "std")]
+    crate::sched::safepoint();
+}
+
 /// Number of frames currently linked on this thread (for tests and the
 /// collector's own sanity checks).
 pub fn depth() -> usize {

@@ -126,6 +126,10 @@ pub fn allocate<T: Trace>(value: T) -> NonNull<T> {
         // nothing to write and nothing to collect.
         return zerobase().cast();
     }
+    // Before the heap's lock, not after: a collector that has asked the world
+    // to stop is waiting for this thread, and it cannot be waiting for it to
+    // give back a lock the collector itself is about to want.
+    crate::gc::safepoint();
     let should_collect = with_heap(|h| h.live_bytes + layout.size() > h.threshold);
     if should_collect || cfg!(feature = "gc-torture") {
         collect();
@@ -166,6 +170,7 @@ pub fn allocate<T: Trace>(value: T) -> NonNull<T> {
 pub fn allocate_bytes(len: usize, fill: impl FnOnce(&mut [u8])) -> NonNull<u8> {
     assert!(len > 0, "zero-length allocations use a static empty");
     let layout = Layout::array::<u8>(len).expect("fits in memory");
+    crate::gc::safepoint();
     let should_collect = with_heap(|h| h.live_bytes + len > h.threshold);
     if should_collect || cfg!(feature = "gc-torture") {
         collect();
@@ -199,6 +204,7 @@ pub fn allocate_bytes(len: usize, fill: impl FnOnce(&mut [u8])) -> NonNull<u8> {
 /// value, and returns a pointer to the first. A safe point.
 pub fn allocate_array<P: crate::place::Place + Trace>(n: usize) -> NonNull<P> {
     let layout = Layout::array::<P>(n).expect("slice fits in memory");
+    crate::gc::safepoint();
     let should_collect = with_heap(|h| h.live_bytes + layout.size() > h.threshold);
     if should_collect || cfg!(feature = "gc-torture") {
         collect();
@@ -345,8 +351,15 @@ pub fn register_global<T: Trace>(place: &'static T) {
     });
 }
 
-/// Collects now: mark from the roots, then sweep.
+/// Collects now: stop the world, mark from the roots, then sweep.
+///
+/// The world is stopped *before* the heap is locked, and that order is not
+/// negotiable. A thread that has not reached a safe point yet may be inside a
+/// heap critical section of its own, and waiting for it with the heap's lock
+/// held would be waiting for a lock this thread is holding.
 pub fn collect() {
+    #[cfg(feature = "std")]
+    let stopped = crate::sched::stop_the_world();
     with_heap(|h| {
         h.collections += 1;
         for o in &mut h.objs {
@@ -406,8 +419,12 @@ pub fn collect() {
         h.live_bytes = live;
         h.threshold = (live * 2).max(MIN_THRESHOLD);
     });
-    // Outside the heap's borrow: this starts a goroutine, and the finalizers
-    // it runs allocate.
+    // The other threads may run again from here, which they must before a
+    // finalizer goroutine can be of any use.
+    #[cfg(feature = "std")]
+    drop(stopped);
+    // Outside the heap's lock: this starts a goroutine, and the finalizers it
+    // runs allocate.
     #[cfg(feature = "std")]
     crate::finalizer::kick();
 }

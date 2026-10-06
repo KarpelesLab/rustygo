@@ -147,7 +147,10 @@ runtime's accessor API has to be sound for *any* code the emitter produces, so:
 * **Phase 1 (M1, implemented):** stop-the-world mark-sweep, one heap, one
   allocation per object through the system allocator. Correct and boring, and
   measurably so: the table costs a per-object entry and a sort per
-  collection ([§11](#11-performance-expectations)).
+  collection ([§11](#11-performance-expectations)). From M2 every thread
+  allocates from that one heap under one lock, which is the simplest thing
+  that is correct; per-thread allocation caches over size classes are M6's
+  job, and what this costs is the number to measure before writing them.
 * **What the collector reports.** `runtime.ReadMemStats` gives the numbers the
   collector actually keeps — live objects and bytes, everything ever
   allocated, and the collection count — and leaves the rest zero. There is no
@@ -201,31 +204,83 @@ runtime's accessor API has to be sound for *any* code the emitter produces, so:
 * **Channels and `select`** live in the runtime: same FIFO fairness, same
   blocking semantics, same random choice among ready cases.
 
-**As built (M2, first half).** One OS thread runs every goroutine,
-cooperatively. A goroutine is a stack (`src/stack.rs`: a reservation with a
-64 KiB guard below it) and a saved context (`src/context.rs`: the
+**As built (M2).** Goroutines run on worker threads, as many of them at a time
+as `GOMAXPROCS` allows. A goroutine is a stack (`src/stack.rs`: a reservation
+with a 64 KiB guard below it) and a saved context (`src/context.rs`: the
 callee-saved registers and the stack pointer, in naked assembly for x86-64
 and aarch64). `go` hands the scheduler the same thunk-and-environment a
 `defer` builds, so the two share their machinery.
 
+A worker stands on its thread's own stack between goroutines, and a goroutine
+that blocks switches back to that stack rather than straight into the next
+goroutine. That is not a detail: a goroutine may be offered to another thread
+only once nothing is running on its stack, and the only place from which that
+is true is the stack it has just left. So the worker, not the goroutine, is
+what puts a yielding goroutine back on the run queue, marks a blocking one as
+waiting, and frees a finished one's stack — and for the same reason the program
+itself runs on a goroutine with a stack of its own, because the first worker
+needs its native stack to stand on.
+
+One run queue, shared, under one lock. `GOMAXPROCS` is a count of processor
+slots a running goroutine holds one of, so a worker that cannot get one idles
+rather than exits and lowering the limit and raising it again costs nothing —
+which is the shape Go's own tests use. `runtime.LockOSThread` and the
+processor pinning `sync.Pool` and `sync/atomic` ask for are the same
+mechanism: a pinned goroutine keeps its slot and goes back on its own worker's
+queue, never the shared one, so a per-processor shard is really per-processor.
+Work stealing, a queue per worker, and a monitor thread that takes a slot back
+from a goroutine blocked in a system call are still to come, and with them the
+measurement that says whether the shared queue's lock was ever the problem.
+
+**Blocking is no longer decided by inspection.** On one thread, a goroutine
+that found a channel empty could park knowing nothing had run in between. Now
+something can, so a goroutine registers itself as a waiter *while it still
+holds whatever guards the condition it is waiting for* — the channel's own
+lock, the word a semaphore counts down — and parks only once that is released,
+because a park switches stacks. A wake that lands in the window between the
+two is recorded on the goroutine and consumed by the park, which then comes
+straight back; every caller re-tests what it was waiting for, because a park
+may return with nothing having happened. Go's semaphores moved into the
+runtime for the same reason: a test written in Go and a park in the runtime
+cannot agree about what happened between them.
+
 The state that belongs to a goroutine rather than to the thread — its shadow
 stack of GC roots, and the panics it is handling — moves with it on every
 switch, which is what makes a panic on one goroutine invisible to another and
-lets the collector trace the roots of a goroutine that is parked. Blocking is
-a park: a channel that is not ready, a semaphore that is held,
-`runtime.Gosched`. When nothing is left to run, that is Go's
+lets the collector trace the roots of a goroutine that is not running.
+`src/tls.rs` is where every piece of the runtime's state says which of the two
+it is: per thread, or shared behind a lock. Blocking is a park: a channel that
+is not ready, a semaphore that is held, `runtime.Gosched`. When nothing can run
+anywhere and nothing is being waited for, that is Go's
 `all goroutines are asleep - deadlock!`, reported the same way.
 
-Channels are heap objects like maps. Every goroutine blocked on one parks on
-the channel's address and re-tests its condition when woken, and every
-operation that changes a channel wakes all of them: more wakeups than Go's
-queues of waiters need, but it cannot lose one. `select` polls its cases from
-a random start, so a ready case cannot be starved, and parks on every channel
-at once when none is ready.
+**A collection stops the world.** The collector has to see every goroutine's
+roots and may not read a stack that is changing, so before marking it asks
+every thread that is running Go code to stop. A thread notices at its next
+safe point — every loop back-edge, and the top of every allocation — puts its
+goroutine's roots where the collector looks for a parked one's, and waits. A
+thread between goroutines, or asleep in the netpoller, has nothing to stop and
+nothing to show. The world is stopped *before* the heap is locked and not
+after: a thread that has not reached a safe point yet may be inside a heap
+critical section of its own, and waiting for it with that lock held would be
+waiting for a lock the collector is holding.
+
+Channels are heap objects like maps, with a lock each. Every goroutine blocked
+on one parks on the channel's address and re-tests its condition when woken,
+and every operation that changes a channel wakes all of them: more wakeups than
+Go's queues of waiters need, but it cannot lose one. `select` takes a case in
+one step under that lock rather than asking whether an operation would block
+and then performing it — in between, another goroutine could take the value,
+and the operation would block, which no select case may do. It polls its cases
+from a random start, so a ready case cannot be starved, and registers on every
+channel before it tests any of them.
 
 **The netpoller, and timers.** A goroutine that waits on a socket parks on
-the descriptor, and the scheduler, finding nothing to run, sleeps in
-`epoll_wait` until one moves (`src/netpoll.rs`). It answers the nine
+the descriptor, and one worker with nothing to run sleeps in `epoll_wait`
+until one moves (`src/netpoll.rs`). One worker, because one `epoll_wait`
+reports every descriptor at once; and because that sleep may last until a
+socket moves, the poller holds a descriptor of its own that the scheduler
+writes to when something else becomes runnable. It answers the nine
 questions `internal/poll` asks the runtime, level-triggered with the interest
 mask following the waiters: a descriptor is asked about readability only
 while a goroutine is waiting to read it. gc polls edge-triggered with
@@ -257,8 +312,11 @@ which descriptors were opened, who waited and what woke them, each deadline,
 and every time nothing was runnable. It is how a program that stops making
 progress is diagnosed at all, until goroutine stacks can be printed.
 
-Still to come in M2: the M:N scheduler over threads with work stealing and
-preemption, `runtime.Goexit`, and `testing/synctest`.
+Still to come in M2: work stealing with a run queue per worker, Go's `sysmon`
+taking a processor slot back from a goroutine that blocks in a system call
+without announcing it, time-sliced preemption at the safe points that now
+exist, pooling the stacks of goroutines that have exited, and
+`testing/synctest`.
 * **Netpoller:** `epoll`/`kqueue`/IOCP (or Rust `std` blocking threads on
   constrained targets) driving the same parking primitives as channels.
 

@@ -43,6 +43,10 @@ type fnEmitter struct {
 	byteCmp    map[*ssa.BinOp]bool
 	byteLookup map[*ssa.Lookup]bool
 	byteConv   map[*ssa.Convert]bool
+	// rpo numbers the blocks in reverse postorder, so that a jump can tell
+	// whether it goes backwards and therefore needs a preemption poll. Built
+	// on first use (roots.go).
+	rpo map[*ssa.BasicBlock]int
 }
 
 // markDead adds instructions to the set the body leaves out.
@@ -378,7 +382,12 @@ func (f *fnEmitter) block(b *ssa.BasicBlock, ind string) {
 // edge assigns the phis of succ for the edge from pred, then transfers
 // control to succ.
 func (f *fnEmitter) edge(pred, succ *ssa.BasicBlock, ind string) string {
-	return f.phiMoves(pred, succ, ind) + fmt.Sprintf("%sblk = %d;\n%scontinue;\n", ind, succ.Index, ind)
+	poll := ""
+	if rpo := f.rpoNums(); rpo[succ] <= rpo[pred] {
+		poll = preempt(ind)
+	}
+	return f.phiMoves(pred, succ, ind) + poll +
+		fmt.Sprintf("%sblk = %d;\n%scontinue;\n", ind, succ.Index, ind)
 }
 
 func (f *fnEmitter) ret(r *ssa.Return) string {

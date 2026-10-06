@@ -26,9 +26,12 @@ var intrinsics = map[string]func(args []string) string{
 	},
 
 	// sync's acquire/release loads, which gc links to its runtime atomics.
-	// One goroutine (M1): plain accesses are atomic.
-	"sync.runtime_LoadAcquintptr":  func(a []string) string { return a[0] + ".load()" },
-	"sync.runtime_StoreReluintptr": func(a []string) string { return fmt.Sprintf("%s.store(%s)", a[0], a[1]) },
+	"sync.runtime_LoadAcquintptr": func(a []string) string {
+		return fmt.Sprintf("(rustygo::atomic::load_usize(%s) as u64)", atomicWord(a[0]))
+	},
+	"sync.runtime_StoreReluintptr": func(a []string) string {
+		return fmt.Sprintf("rustygo::atomic::store_usize(%s, %s as usize)", atomicWord(a[0]), a[1])
+	},
 
 	// reflect, answered from the runtime's type descriptors (src/reflect.rs).
 	"reflect.ifaceType": func(a []string) string {
@@ -236,6 +239,10 @@ var intrinsics = map[string]func(args []string) string{
 	"runtime.unlockOSThread": func([]string) string { return "rustygo::sched::unlock_os_thread()" },
 	"runtime.procPin":        func([]string) string { return "rustygo::sched::proc_pin()" },
 	"runtime.procUnpin":      func([]string) string { return "rustygo::sched::proc_unpin()" },
+	// A fork inherits one thread and every lock as it stood, so the world stops
+	// around it: that is the one state in which no thread holds a runtime lock.
+	"runtime.beforeFork": func([]string) string { return "rustygo::sched::before_fork()" },
+	"runtime.afterFork":  func([]string) string { return "rustygo::sched::after_fork()" },
 	// A semaphore's counter and its queue of waiters belong together, so the
 	// whole of acquire and release lives in the runtime: with more than one
 	// thread, a test written in Go and a park in the runtime cannot agree
@@ -441,4 +448,137 @@ var intrinsics = map[string]func(args []string) string{
 	"internal/bytealg.MakeNoZero": func(a []string) string {
 		return fmt.Sprintf("Slice::<Slot<u8>>::make(%s, %s)", a[0], a[0])
 	},
+	// sync/atomic: gc writes these in assembly, and the whole of `sync` — its
+	// mutexes, its wait groups, `atomic.Value`, `atomic.Pointer[T]` — is built
+	// out of nothing else, so they have to be real atomics from the moment
+	// there is a second thread (src/atomic.rs).
+	"sync/atomic.LoadInt32": func(a []string) string {
+		return fmt.Sprintf("(rustygo::atomic::load_i32(%s))", atomicWord(a[0]))
+	},
+	"sync/atomic.StoreInt32": func(a []string) string {
+		return fmt.Sprintf("rustygo::atomic::store_i32(%s, %s)", atomicWord(a[0]), a[1])
+	},
+	"sync/atomic.SwapInt32": func(a []string) string {
+		return fmt.Sprintf("(rustygo::atomic::swap_i32(%s, %s))", atomicWord(a[0]), a[1])
+	},
+	"sync/atomic.CompareAndSwapInt32": func(a []string) string {
+		return fmt.Sprintf("rustygo::atomic::cas_i32(%s, %s, %s)", atomicWord(a[0]), a[1], a[2])
+	},
+	"sync/atomic.AddInt32": func(a []string) string {
+		return fmt.Sprintf("(rustygo::atomic::add_i32(%s, %s))", atomicWord(a[0]), a[1])
+	},
+	"sync/atomic.AndInt32": func(a []string) string {
+		return fmt.Sprintf("(rustygo::atomic::and_i32(%s, %s))", atomicWord(a[0]), a[1])
+	},
+	"sync/atomic.OrInt32": func(a []string) string {
+		return fmt.Sprintf("(rustygo::atomic::or_i32(%s, %s))", atomicWord(a[0]), a[1])
+	},
+	"sync/atomic.LoadUint32": func(a []string) string {
+		return fmt.Sprintf("(rustygo::atomic::load_u32(%s))", atomicWord(a[0]))
+	},
+	"sync/atomic.StoreUint32": func(a []string) string {
+		return fmt.Sprintf("rustygo::atomic::store_u32(%s, %s)", atomicWord(a[0]), a[1])
+	},
+	"sync/atomic.SwapUint32": func(a []string) string {
+		return fmt.Sprintf("(rustygo::atomic::swap_u32(%s, %s))", atomicWord(a[0]), a[1])
+	},
+	"sync/atomic.CompareAndSwapUint32": func(a []string) string {
+		return fmt.Sprintf("rustygo::atomic::cas_u32(%s, %s, %s)", atomicWord(a[0]), a[1], a[2])
+	},
+	"sync/atomic.AddUint32": func(a []string) string {
+		return fmt.Sprintf("(rustygo::atomic::add_u32(%s, %s))", atomicWord(a[0]), a[1])
+	},
+	"sync/atomic.AndUint32": func(a []string) string {
+		return fmt.Sprintf("(rustygo::atomic::and_u32(%s, %s))", atomicWord(a[0]), a[1])
+	},
+	"sync/atomic.OrUint32": func(a []string) string {
+		return fmt.Sprintf("(rustygo::atomic::or_u32(%s, %s))", atomicWord(a[0]), a[1])
+	},
+	"sync/atomic.LoadInt64": func(a []string) string {
+		return fmt.Sprintf("(rustygo::atomic::load_i64(%s))", atomicWord(a[0]))
+	},
+	"sync/atomic.StoreInt64": func(a []string) string {
+		return fmt.Sprintf("rustygo::atomic::store_i64(%s, %s)", atomicWord(a[0]), a[1])
+	},
+	"sync/atomic.SwapInt64": func(a []string) string {
+		return fmt.Sprintf("(rustygo::atomic::swap_i64(%s, %s))", atomicWord(a[0]), a[1])
+	},
+	"sync/atomic.CompareAndSwapInt64": func(a []string) string {
+		return fmt.Sprintf("rustygo::atomic::cas_i64(%s, %s, %s)", atomicWord(a[0]), a[1], a[2])
+	},
+	"sync/atomic.AddInt64": func(a []string) string {
+		return fmt.Sprintf("(rustygo::atomic::add_i64(%s, %s))", atomicWord(a[0]), a[1])
+	},
+	"sync/atomic.AndInt64": func(a []string) string {
+		return fmt.Sprintf("(rustygo::atomic::and_i64(%s, %s))", atomicWord(a[0]), a[1])
+	},
+	"sync/atomic.OrInt64": func(a []string) string {
+		return fmt.Sprintf("(rustygo::atomic::or_i64(%s, %s))", atomicWord(a[0]), a[1])
+	},
+	"sync/atomic.LoadUint64": func(a []string) string {
+		return fmt.Sprintf("(rustygo::atomic::load_u64(%s))", atomicWord(a[0]))
+	},
+	"sync/atomic.StoreUint64": func(a []string) string {
+		return fmt.Sprintf("rustygo::atomic::store_u64(%s, %s)", atomicWord(a[0]), a[1])
+	},
+	"sync/atomic.SwapUint64": func(a []string) string {
+		return fmt.Sprintf("(rustygo::atomic::swap_u64(%s, %s))", atomicWord(a[0]), a[1])
+	},
+	"sync/atomic.CompareAndSwapUint64": func(a []string) string {
+		return fmt.Sprintf("rustygo::atomic::cas_u64(%s, %s, %s)", atomicWord(a[0]), a[1], a[2])
+	},
+	"sync/atomic.AddUint64": func(a []string) string {
+		return fmt.Sprintf("(rustygo::atomic::add_u64(%s, %s))", atomicWord(a[0]), a[1])
+	},
+	"sync/atomic.AndUint64": func(a []string) string {
+		return fmt.Sprintf("(rustygo::atomic::and_u64(%s, %s))", atomicWord(a[0]), a[1])
+	},
+	"sync/atomic.OrUint64": func(a []string) string {
+		return fmt.Sprintf("(rustygo::atomic::or_u64(%s, %s))", atomicWord(a[0]), a[1])
+	},
+	"sync/atomic.LoadUintptr": func(a []string) string {
+		return fmt.Sprintf("(rustygo::atomic::load_usize(%s) as u64)", atomicWord(a[0]))
+	},
+	"sync/atomic.StoreUintptr": func(a []string) string {
+		return fmt.Sprintf("rustygo::atomic::store_usize(%s, %s as usize)", atomicWord(a[0]), a[1])
+	},
+	"sync/atomic.SwapUintptr": func(a []string) string {
+		return fmt.Sprintf("(rustygo::atomic::swap_usize(%s, %s as usize) as u64)", atomicWord(a[0]), a[1])
+	},
+	"sync/atomic.CompareAndSwapUintptr": func(a []string) string {
+		return fmt.Sprintf("rustygo::atomic::cas_usize(%s, %s as usize, %s as usize)", atomicWord(a[0]), a[1], a[2])
+	},
+	"sync/atomic.AddUintptr": func(a []string) string {
+		return fmt.Sprintf("(rustygo::atomic::add_usize(%s, %s as usize) as u64)", atomicWord(a[0]), a[1])
+	},
+	"sync/atomic.AndUintptr": func(a []string) string {
+		return fmt.Sprintf("(rustygo::atomic::and_usize(%s, %s as usize) as u64)", atomicWord(a[0]), a[1])
+	},
+	"sync/atomic.OrUintptr": func(a []string) string {
+		return fmt.Sprintf("(rustygo::atomic::or_usize(%s, %s as usize) as u64)", atomicWord(a[0]), a[1])
+	},
+	// `unsafe.Pointer` is one word in rustygo, so the pointer operations are the
+	// `uintptr` ones with the word put back in a `UPtr` on the way out. There is
+	// no double-width compare-and-swap to arrange, which is what DESIGN §13
+	// question 7 was asking about.
+	"sync/atomic.LoadPointer": func(a []string) string {
+		return fmt.Sprintf("UPtr::from_addr(rustygo::atomic::load_usize(%s) as u64)", atomicWord(a[0]))
+	},
+	"sync/atomic.StorePointer": func(a []string) string {
+		return fmt.Sprintf("rustygo::atomic::store_usize(%s, (%s).addr() as usize)", atomicWord(a[0]), a[1])
+	},
+	"sync/atomic.SwapPointer": func(a []string) string {
+		return fmt.Sprintf("UPtr::from_addr(rustygo::atomic::swap_usize(%s, (%s).addr() as usize) as u64)", atomicWord(a[0]), a[1])
+	},
+	"sync/atomic.CompareAndSwapPointer": func(a []string) string {
+		return fmt.Sprintf("rustygo::atomic::cas_usize(%s, (%s).addr() as usize, (%s).addr() as usize)", atomicWord(a[0]), a[1], a[2])
+	},
+}
+
+// atomicWord renders the address of the word a sync/atomic function was handed.
+// Its argument is a pointer to a Go variable of that width, and the runtime
+// takes the address because a `Slot` is not an atomic and must not be read as
+// one through a reference that outlives the call.
+func atomicWord(a string) string {
+	return fmt.Sprintf("(%s).addr() as usize", a)
 }

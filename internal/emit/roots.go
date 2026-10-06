@@ -242,6 +242,29 @@ func containsRef(t types.Type) bool {
 	return false
 }
 
+// preempt is what a loop back-edge emits: the poll that lets a collection stop
+// this thread.
+//
+// A loop whose body neither calls nor allocates would otherwise run without a
+// safe point for as long as it ran, and a collector waiting for every thread to
+// reach one would wait for the whole loop. One load of one atomic per iteration
+// buys a loop that can always be stopped (DESIGN §3, §4). The liveness above
+// already treats a back-edge as a safe point, so the roots a stopped thread
+// shows the collector are complete.
+func preempt(ind string) string {
+	return ind + "rustygo::gc::safepoint();\n"
+}
+
+// rpoNums is this function's reverse-postorder numbering, cached: an edge whose
+// target is numbered at or below its source goes backwards, and that is where
+// the poll belongs.
+func (f *fnEmitter) rpoNums() map[*ssa.BasicBlock]int {
+	if f.rpo == nil {
+		f.rpo = reversePostorder(f.fn)
+	}
+	return f.rpo
+}
+
 // safePoint reports whether a collection can happen during instr.
 func safePoint(instr ssa.Instruction) bool {
 	switch instr := instr.(type) {

@@ -4,229 +4,90 @@
 // The package's types (Int64, Value, Pointer[T], ...) stay gc's, and call
 // these.
 //
-// M1 runs one goroutine, so plain loads and stores are atomic. M2, which
-// brings threads, replaces these with the runtime's atomics
-// (DESIGN §13, questions 6 and 7).
+// Every one of them is the runtime's, in Rust (src/atomic.rs). They used to be
+// plain Go loads and stores, which was exactly right while one goroutine ran at
+// a time and is the first thing to break when two do: sync.Mutex, sync.Once and
+// sync.WaitGroup are built out of nothing but these, and a compare-and-swap that
+// is not one makes a mutex unlock itself.
 
 package atomic
 
 import "unsafe"
 
-var _ unsafe.Pointer
+func SwapInt32(addr *int32, new int32) (old int32)
 
-func SwapInt32(addr *int32, new int32) (old int32) {
-	old = *addr
-	*addr = new
-	return
-}
+func SwapUint32(addr *uint32, new uint32) (old uint32)
 
-func SwapUint32(addr *uint32, new uint32) (old uint32) {
-	old = *addr
-	*addr = new
-	return
-}
+func SwapUintptr(addr *uintptr, new uintptr) (old uintptr)
 
-func SwapUintptr(addr *uintptr, new uintptr) (old uintptr) {
-	old = *addr
-	*addr = new
-	return
-}
+func SwapPointer(addr *unsafe.Pointer, new unsafe.Pointer) (old unsafe.Pointer)
 
-func SwapPointer(addr *unsafe.Pointer, new unsafe.Pointer) (old unsafe.Pointer) {
-	old = *addr
-	*addr = new
-	return
-}
+func CompareAndSwapInt32(addr *int32, old, new int32) (swapped bool)
 
-func CompareAndSwapInt32(addr *int32, old, new int32) (swapped bool) {
-	if *addr == old {
-		*addr = new
-		return true
-	}
-	return false
-}
+func CompareAndSwapUint32(addr *uint32, old, new uint32) (swapped bool)
 
-func CompareAndSwapUint32(addr *uint32, old, new uint32) (swapped bool) {
-	if *addr == old {
-		*addr = new
-		return true
-	}
-	return false
-}
+func CompareAndSwapUintptr(addr *uintptr, old, new uintptr) (swapped bool)
 
-func CompareAndSwapUintptr(addr *uintptr, old, new uintptr) (swapped bool) {
-	if *addr == old {
-		*addr = new
-		return true
-	}
-	return false
-}
+func CompareAndSwapPointer(addr *unsafe.Pointer, old, new unsafe.Pointer) (swapped bool)
 
-func CompareAndSwapPointer(addr *unsafe.Pointer, old, new unsafe.Pointer) (swapped bool) {
-	if *addr == old {
-		*addr = new
-		return true
-	}
-	return false
-}
+func AddInt32(addr *int32, delta int32) (new int32)
 
-func AddInt32(addr *int32, delta int32) (new int32) {
-	*addr += delta
-	return *addr
-}
+func AddUint32(addr *uint32, delta uint32) (new uint32)
 
-func AddUint32(addr *uint32, delta uint32) (new uint32) {
-	*addr += delta
-	return *addr
-}
+func AddUintptr(addr *uintptr, delta uintptr) (new uintptr)
 
-func AddUintptr(addr *uintptr, delta uintptr) (new uintptr) {
-	*addr += delta
-	return *addr
-}
+func AndInt32(addr *int32, mask int32) (old int32)
 
-func AndInt32(addr *int32, mask int32) (old int32) {
-	old = *addr
-	*addr &= mask
-	return
-}
+func AndUint32(addr *uint32, mask uint32) (old uint32)
 
-func AndUint32(addr *uint32, mask uint32) (old uint32) {
-	old = *addr
-	*addr &= mask
-	return
-}
+func AndUintptr(addr *uintptr, mask uintptr) (old uintptr)
 
-func AndUintptr(addr *uintptr, mask uintptr) (old uintptr) {
-	old = *addr
-	*addr &= mask
-	return
-}
+func OrInt32(addr *int32, mask int32) (old int32)
 
-func OrInt32(addr *int32, mask int32) (old int32) {
-	old = *addr
-	*addr |= mask
-	return
-}
+func OrUint32(addr *uint32, mask uint32) (old uint32)
 
-func OrUint32(addr *uint32, mask uint32) (old uint32) {
-	old = *addr
-	*addr |= mask
-	return
-}
+func OrUintptr(addr *uintptr, mask uintptr) (old uintptr)
 
-func OrUintptr(addr *uintptr, mask uintptr) (old uintptr) {
-	old = *addr
-	*addr |= mask
-	return
-}
+func LoadInt32(addr *int32) (val int32)
 
-func LoadInt32(addr *int32) (val int32) {
-	return *addr
-}
+func LoadUint32(addr *uint32) (val uint32)
 
-func LoadUint32(addr *uint32) (val uint32) {
-	return *addr
-}
+func LoadUintptr(addr *uintptr) (val uintptr)
 
-func LoadUintptr(addr *uintptr) (val uintptr) {
-	return *addr
-}
+func LoadPointer(addr *unsafe.Pointer) (val unsafe.Pointer)
 
-func LoadPointer(addr *unsafe.Pointer) (val unsafe.Pointer) {
-	return *addr
-}
+func StoreInt32(addr *int32, val int32)
 
-func StoreInt32(addr *int32, val int32) {
-	*addr = val
-}
+func StoreUint32(addr *uint32, val uint32)
 
-func StoreUint32(addr *uint32, val uint32) {
-	*addr = val
-}
+func StoreUintptr(addr *uintptr, val uintptr)
 
-func StoreUintptr(addr *uintptr, val uintptr) {
-	*addr = val
-}
+func StorePointer(addr *unsafe.Pointer, val unsafe.Pointer)
 
-func StorePointer(addr *unsafe.Pointer, val unsafe.Pointer) {
-	*addr = val
-}
+func SwapInt64(addr *int64, new int64) (old int64)
 
-func SwapInt64(addr *int64, new int64) (old int64) {
-	old = *addr
-	*addr = new
-	return
-}
+func SwapUint64(addr *uint64, new uint64) (old uint64)
 
-func SwapUint64(addr *uint64, new uint64) (old uint64) {
-	old = *addr
-	*addr = new
-	return
-}
+func CompareAndSwapInt64(addr *int64, old, new int64) (swapped bool)
 
-func CompareAndSwapInt64(addr *int64, old, new int64) (swapped bool) {
-	if *addr == old {
-		*addr = new
-		return true
-	}
-	return false
-}
+func CompareAndSwapUint64(addr *uint64, old, new uint64) (swapped bool)
 
-func CompareAndSwapUint64(addr *uint64, old, new uint64) (swapped bool) {
-	if *addr == old {
-		*addr = new
-		return true
-	}
-	return false
-}
+func AddInt64(addr *int64, delta int64) (new int64)
 
-func AddInt64(addr *int64, delta int64) (new int64) {
-	*addr += delta
-	return *addr
-}
+func AddUint64(addr *uint64, delta uint64) (new uint64)
 
-func AddUint64(addr *uint64, delta uint64) (new uint64) {
-	*addr += delta
-	return *addr
-}
+func AndInt64(addr *int64, mask int64) (old int64)
 
-func AndInt64(addr *int64, mask int64) (old int64) {
-	old = *addr
-	*addr &= mask
-	return
-}
+func AndUint64(addr *uint64, mask uint64) (old uint64)
 
-func AndUint64(addr *uint64, mask uint64) (old uint64) {
-	old = *addr
-	*addr &= mask
-	return
-}
+func OrInt64(addr *int64, mask int64) (old int64)
 
-func OrInt64(addr *int64, mask int64) (old int64) {
-	old = *addr
-	*addr |= mask
-	return
-}
+func OrUint64(addr *uint64, mask uint64) (old uint64)
 
-func OrUint64(addr *uint64, mask uint64) (old uint64) {
-	old = *addr
-	*addr |= mask
-	return
-}
+func LoadInt64(addr *int64) (val int64)
 
-func LoadInt64(addr *int64) (val int64) {
-	return *addr
-}
+func LoadUint64(addr *uint64) (val uint64)
 
-func LoadUint64(addr *uint64) (val uint64) {
-	return *addr
-}
+func StoreInt64(addr *int64, val int64)
 
-func StoreInt64(addr *int64, val int64) {
-	*addr = val
-}
-
-func StoreUint64(addr *uint64, val uint64) {
-	*addr = val
-}
+func StoreUint64(addr *uint64, val uint64)

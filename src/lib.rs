@@ -16,6 +16,7 @@
 //! * [`prelude`]: what generated code imports.
 //! * [`gc`] and [`heap`]: GC roots and the collector.
 //! * [`trace`]: how the collector walks a value's references.
+//! * [`atomic`]: `sync/atomic`, which gc writes in assembly.
 //!
 //! Still to come, by milestone: slices, maps, closures and interfaces (M1); goroutines, channels and timers (M2);
 //! the `syscall` layer and netpoller (M3).
@@ -35,6 +36,7 @@ mod tls;
 #[cfg(feature = "std")]
 extern crate std;
 
+pub mod atomic;
 #[cfg(feature = "std")]
 pub mod chan;
 pub mod complex;

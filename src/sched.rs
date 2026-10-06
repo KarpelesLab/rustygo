@@ -20,6 +20,15 @@
 //! a panic on one goroutine invisible to another and lets the collector trace
 //! the roots of a goroutine that is parked.
 //!
+//! **A collection stops the world.** The collector has to see every
+//! goroutine's roots, and it may not look at a stack that is changing, so
+//! before it marks it asks every thread that is running Go code to stop
+//! ([`stop_the_world`]). A thread notices at its next safe point — every loop
+//! back-edge, and the top of every allocation — puts its goroutine's roots
+//! where the collector looks for a parked one's, and waits. A thread that is
+//! *not* running Go code, because it is between goroutines or asleep in the
+//! netpoller, has nothing to stop and nothing to show.
+//!
 //! **Parking can no longer be done by inspection.** On one thread, a goroutine
 //! that found a channel empty could park knowing nothing had run in between.
 //! Now something can, so a goroutine registers itself as a waiter *while it
@@ -363,18 +372,11 @@ pub fn run_program(init: fn(), main: fn()) -> ! {
         s.ms.push(M::new());
     });
     spawn_entry(Entry::Main(init, main));
-    start_workers(procs);
     worker(0)
 }
 
-/// `GOMAXPROCS` at startup, which `GOMAXPROCS` in the environment sets.
-///
-/// **One, for now, and not the number of CPUs as Go's default is.** Everything
-/// above is ready for more, and setting the variable gets it; what is not ready
-/// is the collector, which still marks from the roots of the thread it happens
-/// to be on. Two goroutines running Go code at once would mean one of them
-/// freeing what the other is holding. The default changes in the same commit as
-/// the stop-the-world handshake, and not before.
+/// `GOMAXPROCS` at startup: the number of CPUs, as Go's default is, unless
+/// `GOMAXPROCS` in the environment says otherwise.
 ///
 /// Read once, before any worker exists. `runtime.GOMAXPROCS` changes it
 /// afterwards, which is what Go's own tests do when they want to be
@@ -386,7 +388,7 @@ fn default_procs() -> usize {
     {
         return n;
     }
-    1
+    num_cpu() as usize
 }
 
 /// `runtime.NumCPU`: how many processors this program may use.
@@ -409,40 +411,43 @@ pub fn gomaxprocs(n: i64) -> i64 {
         (old, s.procs)
     });
     if n > 0 && want > old {
-        start_workers(want);
+        // Workers appear as goroutines ask for them; raising the limit only
+        // means the ones that are idling may run again.
         wake_idle();
     }
     old as i64
 }
 
-/// Starts worker threads until there are `want` of them.
-fn start_workers(want: usize) {
-    loop {
-        let next = with_sched(|s| {
-            if s.ms.len() >= want {
-                return None;
-            }
-            s.ms.push(M::new());
-            Some(s.ms.len() - 1)
-        });
-        // Worker 0 is the thread that started the program, already in the
-        // loop; the rest need threads of their own.
-        let Some(i) = next.filter(|&i| i > 0) else {
-            return;
-        };
-        let started = std::thread::Builder::new()
+/// Starts one more worker, if `GOMAXPROCS` has room for it and none of the ones
+/// there are is waiting for work.
+///
+/// Called when a goroutine is started, which is the only moment at which a
+/// program can be said to want another thread. Starting `GOMAXPROCS` of them up
+/// front would cost a program that never says `go` one thread per processor and
+/// buy it nothing; Go does not do that either.
+fn grow_workers() {
+    if IDLE_COUNT.load(Ordering::SeqCst) > 0 {
+        // Somebody is already waiting to be given something to run.
+        return;
+    }
+    let next = with_sched(|s| {
+        if s.ms.len() >= s.procs {
+            return None;
+        }
+        s.ms.push(M::new());
+        Some(s.ms.len() - 1)
+    });
+    // Worker 0 is the thread that started the program, already in the loop.
+    if let Some(i) = next.filter(|&i| i > 0) {
+        // A thread the operating system refuses is a slower program, not a wrong
+        // one: what would have run there runs elsewhere. The record stays,
+        // unused and empty, because a goroutine reaches a worker's own queue
+        // only by pinning itself to the thread it is already running on.
+        let _ = std::thread::Builder::new()
             .name(alloc::format!("rustygo-p{i}"))
             .spawn(move || {
                 worker(i);
             });
-        if started.is_err() {
-            // Fewer workers than were asked for is a slower program, not a
-            // wrong one: what would have run there runs elsewhere. The worker
-            // record stays, unused and empty, because a goroutine reaches a
-            // worker's own queue only by locking itself to the thread it is
-            // already running on.
-            return;
-        }
     }
 }
 
@@ -457,6 +462,13 @@ fn worker(me: usize) -> ! {
         match picked {
             Some(next) => {
                 CUR_G.with(|g| g.set(next));
+                // From here until the switch comes back, this thread is running
+                // Go code and a collection has to wait for it. `attach` is also
+                // where it waits out one that has already begun, which is why it
+                // comes before the goroutine's roots go back on the thread:
+                // while they are on its own record the collector can read them,
+                // and once they are on the thread only this thread can.
+                attach();
                 // The state the goroutine parked with goes back on the thread
                 // just before it resumes, and not a moment sooner: while it is
                 // on the goroutine's own record the collector can read it, and
@@ -475,6 +487,7 @@ fn worker(me: usize) -> ! {
                 // switch out of that stack saved. `from` is this thread's own
                 // slot, whose address is good for the life of the thread.
                 unsafe { context::switch(from, ctx) };
+                detach();
                 CUR_G.with(|g| g.set(NONE));
             }
             None => wait_for_work(me),
@@ -516,6 +529,9 @@ fn leave(how: Leaving) {
 /// does not run it immediately, and neither does this.
 pub fn spawn(f: fn(Env), env: Env) {
     spawn_entry(Entry::Go(f, env));
+    // A `go` statement is the only moment at which a program can be said to
+    // want another thread, so it is where one is started.
+    grow_workers();
 }
 
 fn spawn_entry(entry: Entry) {
@@ -920,6 +936,231 @@ fn wait_for_work(me: usize) {
     IDLE_COUNT.fetch_sub(1, Ordering::SeqCst);
     wake_expired();
     crate::netpoll::expire();
+}
+
+// Stopping the world, so that the collector may walk every goroutine's roots
+// (DESIGN §3). `running` counts the threads that are executing Go code and have
+// not stopped; `stopping` says a collector is waiting for that to reach zero.
+//
+// Both live under one mutex, because every change to one is a decision about
+// the other and a condition variable needs them to agree. The atomic beside it
+// is a copy of `stopping` for [`safepoint`] to read, which is the only part of
+// this on a hot path: it is called at every loop back-edge, and all it may cost
+// when no collection is pending is a load.
+struct World {
+    /// Threads running Go code that have not stopped.
+    running: usize,
+    /// A collector is waiting for them.
+    stopping: bool,
+}
+
+static STOPPING: core::sync::atomic::AtomicBool = core::sync::atomic::AtomicBool::new(false);
+
+fn world() -> &'static (std::sync::Mutex<World>, std::sync::Condvar) {
+    static WORLD: std::sync::OnceLock<(std::sync::Mutex<World>, std::sync::Condvar)> =
+        std::sync::OnceLock::new();
+    WORLD.get_or_init(|| {
+        (
+            std::sync::Mutex::new(World {
+                running: 0,
+                stopping: false,
+            }),
+            std::sync::Condvar::new(),
+        )
+    })
+}
+
+/// Runs `body` with the world's bookkeeping locked.
+fn with_world<R>(body: impl FnOnce(&mut World, &std::sync::Condvar) -> R) -> R {
+    let (lock, cv) = world();
+    let mut guard = lock.lock().unwrap_or_else(|e| e.into_inner());
+    body(&mut guard, cv)
+}
+
+/// This thread is about to run Go code, and waits first if a collection is
+/// stopping the world.
+fn attach() {
+    let (lock, cv) = world();
+    let mut guard = lock.lock().unwrap_or_else(|e| e.into_inner());
+    while guard.stopping {
+        guard = cv.wait(guard).unwrap_or_else(|e| e.into_inner());
+    }
+    guard.running += 1;
+}
+
+/// This thread has stopped running Go code.
+fn detach() {
+    with_world(|w, cv| {
+        w.running -= 1;
+        if w.stopping && w.running == 0 {
+            cv.notify_all();
+        }
+    });
+}
+
+/// A safe point: where a collection may happen, and where a thread that has
+/// been asked to stop stops.
+///
+/// Emitted at every loop back-edge and taken at the top of every allocation, so
+/// that a thread reaches one in bounded time whatever it is doing. The fast
+/// path is a single load, which is what makes it affordable there.
+#[inline]
+pub fn safepoint() {
+    if STOPPING.load(core::sync::atomic::Ordering::Acquire) {
+        stop_here();
+    }
+}
+
+// Set on the one thread that has stopped the world across a `fork`, and holding
+// what will start it again. A thread-local, because the thread that forks is the
+// only thread the child has: the child inherits this and is therefore the only
+// one that can start the world again, which it does by the same `after_fork` the
+// parent calls.
+rt_global! {
+    static FORK_STOP: core::cell::RefCell<Option<Stopped>> =
+        core::cell::RefCell::new(None);
+}
+
+/// Whether this thread is the one holding the world stopped across a fork.
+///
+/// Such a thread must not stop at a safe point and must not stop the world a
+/// second time: it is the only thread that can start it again, so waiting for
+/// anyone else to do so would be waiting for ever. In the child of the fork it
+/// is also the only thread there is.
+fn forking() -> bool {
+    FORK_STOP.with(|f| f.borrow().is_some())
+}
+
+/// `syscall.runtime_BeforeFork`: stops the world across a fork.
+///
+/// A forked child inherits one thread and every lock exactly as it stood, so a
+/// lock another thread was holding would never be given back — and the child
+/// does reach the runtime, if only for the quarantine check that GC torture puts
+/// in front of every dereference. The world being stopped is the one state in
+/// which no thread holds a runtime lock, because no safe point falls inside a
+/// critical section.
+pub fn before_fork() {
+    let stopped = stop_the_world();
+    FORK_STOP.with(|f| *f.borrow_mut() = Some(stopped));
+}
+
+/// `syscall.runtime_AfterFork`, and the child's `runtime_AfterForkInChild`.
+///
+/// The same work in both: dropping the guard clears the stop and counts this
+/// thread as running Go code again. In the child that is the whole world, and
+/// the condition variable it notifies has nobody waiting on it.
+pub fn after_fork() {
+    FORK_STOP.with(|f| f.borrow_mut().take());
+}
+
+/// Waits out the collection, with this goroutine's roots where the collector
+/// will find them.
+#[cold]
+fn stop_here() {
+    if forking() {
+        return;
+    }
+    let me = current();
+    if me == NONE {
+        // Not a worker running a goroutine, so there is nothing to stop and
+        // nothing the collector wants from this thread. The runtime's own unit
+        // tests reach the allocator from threads libtest made, and they are not
+        // counted among the ones a collection waits for.
+        return;
+    }
+    // The collector reads a stopped goroutine's roots exactly where it reads a
+    // parked one's, so they go on its own record and come back afterwards.
+    let state = take_thread_state();
+    with_sched(|s| s.g(me).saved = state);
+    with_world(|w, cv| {
+        w.running -= 1;
+        if w.running == 0 {
+            cv.notify_all();
+        }
+    });
+    let (lock, cv) = world();
+    let mut guard = lock.lock().unwrap_or_else(|e| e.into_inner());
+    while guard.stopping {
+        guard = cv.wait(guard).unwrap_or_else(|e| e.into_inner());
+    }
+    guard.running += 1;
+    drop(guard);
+    let state = with_sched(|s| core::mem::replace(&mut s.g(me).saved, Saved::new()));
+    put_thread_state(state);
+}
+
+/// Stops every other thread that is running Go code, and keeps them stopped
+/// until the result is dropped.
+///
+/// Taken before the heap's own lock, never while holding it: a thread that has
+/// not reached a safe point yet may well be inside a heap critical section, and
+/// waiting for it with that lock held would be waiting for itself.
+pub fn stop_the_world() -> Stopped {
+    if forking() {
+        // This thread already holds the world stopped, across a fork. Asking
+        // again is not a second stop, it is the same one, and waiting for it to
+        // end would be waiting for this thread.
+        return Stopped {
+            running: false,
+            restart: false,
+        };
+    }
+    // A thread with no goroutine was never counted among the ones running Go
+    // code, so it has nothing to step out of. That is how the runtime's own
+    // unit tests collect.
+    let running = current() != NONE;
+    let (lock, cv) = world();
+    let mut guard = lock.lock().unwrap_or_else(|e| e.into_inner());
+    // This thread is one of the ones that would have to stop, and it is the one
+    // doing the stopping, so it steps out first. A second collector waiting
+    // below would otherwise be a thread the first one waits for for ever.
+    if running {
+        guard.running -= 1;
+        if guard.stopping && guard.running == 0 {
+            cv.notify_all();
+        }
+    }
+    while guard.stopping {
+        guard = cv.wait(guard).unwrap_or_else(|e| e.into_inner());
+    }
+    guard.stopping = true;
+    STOPPING.store(true, core::sync::atomic::Ordering::Release);
+    while guard.running > 0 {
+        guard = cv.wait(guard).unwrap_or_else(|e| e.into_inner());
+    }
+    drop(guard);
+    Stopped {
+        running,
+        restart: true,
+    }
+}
+
+/// Lets the world run again when it is dropped, so that a collection which
+/// unwinds does not leave every other thread stopped for ever.
+pub struct Stopped {
+    /// Whether the thread that stopped the world was itself running Go code,
+    /// and so has to be counted again.
+    running: bool,
+    /// Whether this is the guard that started the stop. A thread that asked
+    /// twice gets one that does nothing.
+    restart: bool,
+}
+
+impl Drop for Stopped {
+    fn drop(&mut self) {
+        if !self.restart {
+            return;
+        }
+        STOPPING.store(false, core::sync::atomic::Ordering::Release);
+        let running = self.running;
+        with_world(|w, cv| {
+            w.stopping = false;
+            if running {
+                w.running += 1;
+            }
+            cv.notify_all();
+        });
+    }
 }
 
 /// Go's report when nothing can run: every goroutine is blocked forever.

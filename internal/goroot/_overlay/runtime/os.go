@@ -135,23 +135,28 @@ func os_sigpipe() { sigpipe() }
 
 // Fork and exec.
 //
-// gc stops the world around a fork, because a forked child inherits only the
-// thread that called fork and must not touch a lock another thread held. One
-// goroutine on one thread has nothing to stop, and the child does nothing but
-// the raw system calls `syscall.forkAndExecInChild` makes. So these are the
-// hooks and none of them has anything to do.
+// The world stops around a fork, because a forked child inherits only the
+// thread that called fork and must not touch a lock another thread held. The
+// child reaches the runtime even though it does nothing but the raw system calls
+// `syscall.forkAndExecInChild` makes: GC torture checks the quarantine in front
+// of every dereference. With the world stopped no thread holds a runtime lock,
+// so the child inherits all of them free, and both the parent and the child
+// start it again with the same call.
 //
 // Everything else fork and exec need is Go in the `syscall` package, over the
 // raw system calls rustygo already answers.
 
+func beforeFork()
+func afterFork()
+
 //go:linkname syscall_runtime_BeforeFork syscall.runtime_BeforeFork
-func syscall_runtime_BeforeFork() {}
+func syscall_runtime_BeforeFork() { beforeFork() }
 
 //go:linkname syscall_runtime_AfterFork syscall.runtime_AfterFork
-func syscall_runtime_AfterFork() {}
+func syscall_runtime_AfterFork() { afterFork() }
 
 //go:linkname syscall_runtime_AfterForkInChild syscall.runtime_AfterForkInChild
-func syscall_runtime_AfterForkInChild() {}
+func syscall_runtime_AfterForkInChild() { afterFork() }
 
 //go:linkname syscall_runtime_BeforeExec syscall.runtime_BeforeExec
 func syscall_runtime_BeforeExec() {}
