@@ -13,7 +13,7 @@ cgo needed to get there.
 > **Status: M0 and M1 are done; M2 (goroutines) and M3 (the standard library)
 > are in progress.** Go programs compile to Rust and run under a precise
 > mark-sweep collector, and their output, panics and exit codes are identical to
-> gc's — 74 differential programs check that on every commit, every one of them
+> gc's — 75 differential programs check that on every commit, every one of them
 > also under GC torture, which collects at every allocation, and the whole set
 > passes both ways. Go's own `test/`
 > directory is at [125 of 141](docs/GOTEST.md), and every failure is listed
@@ -42,9 +42,13 @@ cgo needed to get there.
 > `go-sql-driver/mysql`, `sqlx`, `yaml.v2` and `v3`, `uuid`,
 > `protobuf/proto`, `x/net/html`, `x/text`, `x/crypto`, `golang-jwt`.
 >
-> Not yet: threads — the scheduler runs every goroutine on one of them — and a
-> file and socket layer for anything but Linux, so macOS and Windows compile the
-> language but not the packages that reach the kernel. Nor runtime type
+> Not yet: more than one thread at a time. The M:N scheduler is in — goroutines
+> on worker threads, a stop-the-world collection, real atomics, `GOMAXPROCS`,
+> `LockOSThread` — and `GOMAXPROCS` defaults to one, because above one a
+> `parallel` program stalls or crashes in a way that is memory corruption rather
+> than a mis-saved context, and the roadmap says where the suspects are. Also not
+> yet: a file and socket layer for anything but Linux, so macOS and Windows
+> compile the language but not the packages that reach the kernel. Nor runtime type
 > construction: `reflect.MakeFunc`, `StructOf` and the rest say so rather than
 > guessing, because a type descriptor is a Rust static the compiler writes for
 > the types a program mentions. The plan is
