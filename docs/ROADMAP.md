@@ -294,20 +294,23 @@ work fails too, decision gate 1 says stop.
   factor published instead of hidden.
 * 100k parked goroutines fit in a stated memory budget.
 
-**Status (2026-10-04): M2's scheduler runs goroutines on several threads.**
+**Status (2026-10-06): M2's scheduler is the M:N one, running one worker.**
+
+The machinery is all here and `GOMAXPROCS` reaches it; the default is one
+because more than one still corrupts a goroutine's saved context, and that is
+the next thing to do. It landed at one rather than waiting, because most of what
+is below is a correctness fix that costs nothing at one worker and that
+everything after it has to be built on: `sync/atomic` was plain Go loads and
+stores, so `sync.Mutex` unlocked itself as soon as a second thread existed, and
+every Go package-level variable was one copy per thread.
 
 * Goroutines are real stacks with a real context switch (x86-64 and aarch64,
   naked assembly), reserved with a guard page below them. `go` hands the
   scheduler the thunk and environment a `defer` builds, so the two share
   their machinery.
 * `GOMAXPROCS` worker threads run them, settable from the environment and by
-  `runtime.GOMAXPROCS`. The default is **one**, not the number of CPUs, because
-  more than one is not yet correct: a goroutine's saved context acquires a stack
-  pointer belonging to a worker's own stack, and the program returns from `main`
-  without running it about one run in seven at two workers. So the scheduler is
-  the M:N one and the threads are real, and the default does not use them until
-  that is found. A worker stands on
-  its thread's own stack between goroutines, which is what lets a goroutine be
+  `runtime.GOMAXPROCS`, defaulting to one for the reason below. A worker stands
+  on its thread's own stack between goroutines, which is what lets a goroutine be
   handed to another thread at all ([DESIGN §4](DESIGN.md#4-goroutines-and-the-scheduler)).
   One shared run queue, one lock; `runtime.LockOSThread` and `sync`'s processor
   pinning keep a goroutine where it is and give it a processor number below
@@ -342,12 +345,41 @@ work fails too, decision gate 1 says stop.
   also park until a moment on the clock, which is what `time.Sleep` and the
   timer list use. `time.NewTimer`, `After` and `Ticker` work, fired by a
   timer goroutine in the runtime overlay.
-* Not yet: work stealing with a run queue per worker (one shared queue under
+**Next: more than one worker.** A goroutine's saved context acquires a stack
+pointer belonging to a *worker's* own stack, so resuming it restores that pointer
+and returns through it. `pick` refuses to resume such a context and reports it
+rather than jumping into it, which is why the failure is a named one. To
+reproduce: `testdata/programs/parallel` — sixty-four goroutines on one mutex —
+with `GOMAXPROCS=2`, which gets the answer wrong about three runs in twenty.
+Compare *output*, not exit status: the program returns from `main` without
+reaching its last line, and that exits zero.
+
+Three things were measured and they cannot all be true, which is the state to
+pick up from:
+
+* At the moment of failure the thread-local naming the running goroutine, the
+  scheduler's own `M::current`, and the goroutine whose stack the thread is
+  standing on all agree. So it is not a stale thread-local, and not one `Gid`
+  handed to two threads.
+* The only code that writes a goroutine's context is `leave`, and an assertion
+  that `leave` is standing on that goroutine's own stack never fired.
+* `pick` nevertheless finds worker stack pointers in goroutine contexts.
+
+So one of those measurements is wrong, and the way to settle it is to attribute
+the bad write instead of inferring it: give `Context` an owner that
+`Context::prepare` sets and `switch` checks, and give `switch`'s two arguments
+distinct types so that `from` and `to` cannot be transposed.
+
+* Also not yet: work stealing with a run queue per worker (one shared queue under
   one lock today), Go's `sysmon` taking a processor slot back from a goroutine
   that blocks in a system call without announcing it, time-sliced preemption at
   the safe points that now exist, pooling the stacks of exited goroutines, and
   `testing/synctest`. Read and write deadlines on a descriptor, and
   `runtime.Goexit`, landed earlier — see the M1 and M3 status notes.
+* Known races left in the runtime overlay, all of them state gc keeps per
+  goroutine and this keeps per package: the FIPS 140 indicator and bypass flags
+  in `crypto.go`, the random state behind `sync.Pool`'s shuffling, and
+  `runtime.KeepAlive`'s sink.
 
 **The threaded half, measured 2026-10-06.** Written on a branch and not yet
 merged. What it found first is worth recording whatever becomes of the rest,
