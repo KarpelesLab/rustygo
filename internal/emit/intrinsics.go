@@ -317,6 +317,22 @@ var intrinsics = map[string]func(args []string) string{
 			a[0], a[1], a[2], a[3])
 	},
 
+	// The clock `syscall` reads directly, which gc writes in assembly so that
+	// it can read the kernel's vDSO page without entering the kernel. The
+	// ordinary system call gives the same answer, and lets the kernel fill the
+	// `Timeval` with its own layout (src/syscall.rs).
+	"syscall.gettimeofday": func(a []string) string {
+		return fmt.Sprintf("rustygo::syscall::gettimeofday(UPtr::from_ptr(%s).addr())", a[0])
+	},
+	// The bridge into libc, which exists in `syscall` because the call graph
+	// reaches it and is never taken: every caller guards it on a
+	// `cgo_libc_*` pointer that only cgo sets, and rustygo has no cgo (M4).
+	// `Setegid` and the rest take their `AllThreadsSyscall` path instead.
+	"syscall.cgocaller": func([]string) string {
+		return `rustygo::panic::runtime_error_msg(alloc::string::String::from(` +
+			`"syscall: cgocaller without cgo"))`
+	},
+
 	// `golang.org/x/sys/unix` is how Go programs outside the standard library
 	// reach the kernel, and on linux/amd64 its six entry points are assembly
 	// that jumps straight into `syscall`'s. They are the same calls with the

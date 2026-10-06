@@ -190,6 +190,34 @@ pub fn syscall6_go(
     syscall6(num, a1, a2, a3, a4, a5, a6)
 }
 
+/// `gettimeofday(2)`, which gc writes in assembly so that it can read the
+/// kernel's vDSO page without entering the kernel at all.
+///
+/// Here it is the ordinary system call, which is also what gc falls back to
+/// where the vDSO is unavailable. Letting the kernel fill the `Timeval` is the
+/// point: its two fields are `int64` on linux/amd64 and linux/arm64 but not
+/// everywhere, and the kernel knows its own layout.
+///
+/// The caller passes the struct's address. Nothing here allocates, so the
+/// object behind it cannot be collected while the kernel writes to it — and the
+/// emitter now roots the pointer across the call in any case (roots.go).
+#[cfg(target_os = "linux")]
+pub fn gettimeofday(tv: u64) -> u64 {
+    #[cfg(target_arch = "x86_64")]
+    const SYS_GETTIMEOFDAY: u64 = 96;
+    #[cfg(target_arch = "aarch64")]
+    const SYS_GETTIMEOFDAY: u64 = 169;
+    let (_, _, errno) = syscall6(SYS_GETTIMEOFDAY, tv, 0, 0, 0, 0, 0);
+    errno
+}
+
+/// As above, where there are no system calls to make: ENOSYS, as every other
+/// call reports on such a platform.
+#[cfg(not(target_os = "linux"))]
+pub fn gettimeofday(_tv: u64) -> u64 {
+    38
+}
+
 /// Splits a kernel return value into gc's `(r1, r2, errno)`.
 #[cfg(target_os = "linux")]
 fn split(ret: i64, r2: u64) -> (u64, u64, u64) {
