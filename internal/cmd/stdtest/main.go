@@ -1002,6 +1002,12 @@ func note(r result) string {
 	if r.Problem != "" {
 		parts = append(parts, r.Problem)
 	}
+	// A result that came from `-emit` has no verdict to report: the Rust was
+	// generated and nothing was built or run. Saying so is what lets one
+	// document hold both, the packages a sweep had time for and the rest.
+	if r.Built && r.ran() == 0 && r.Problem == "" {
+		parts = append(parts, "emits; not run")
+	}
 	// A binary that ran fewer tests than the package has says so, whether or not
 	// it admitted to stopping: the tests it never reached are not passing.
 	if ran := r.ran(); ran > 0 && r.Tests > ran {
