@@ -1148,6 +1148,15 @@ func (f *fnEmitter) builtin(b *ssa.Builtin, c *ssa.CallCommon, resultType types.
 		// go/ssa's nil check before a promoted field or method reaches
 		// through an embedded pointer.
 		return fmt.Sprintf("(%s).nil_checked()", args[0])
+	case "panic":
+		// `go panic(e)` — a `go` statement whose callee is the builtin, which
+		// `x/sync/singleflight` uses to raise a panic nothing can recover.
+		// The statement form is an `*ssa.Panic` instruction instead and does
+		// not come through here.
+		if isNilConst(c.Args[0]) {
+			return "rustygo::panic::panic_nil()"
+		}
+		return fmt.Sprintf("rustygo::panic::panic_iface(%s)", args[0])
 	case "recover":
 		return "rustygo::panic::recover()"
 	case "append":

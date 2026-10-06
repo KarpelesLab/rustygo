@@ -103,6 +103,10 @@ type Type interface {
 	NumOut() int
 	Out(i int) Type
 	IsVariadic() bool
+	ChanDir() ChanDir
+	CanSeq() bool
+	CanSeq2() bool
+	FieldByIndex(index []int) StructField
 	OverflowInt(x int64) bool
 	OverflowUint(x uint64) bool
 	OverflowFloat(x float64) bool
@@ -647,6 +651,8 @@ func (v Value) Len() int {
 		return len(*(*string)(v.p))
 	case Map:
 		return int(mapLen(v.d, v.p))
+	case Chan:
+		return int(chanLen(v.d, v.p))
 	}
 	panic("reflect: Len of " + v.Kind().String() + " value")
 }
@@ -657,6 +663,8 @@ func (v Value) Cap() int {
 		return int(descLen(v.d))
 	case Slice:
 		return (*sliceHeader)(v.p).cap
+	case Chan:
+		return int(chanCap(v.d, v.p))
 	}
 	panic("reflect: Cap of " + v.Kind().String() + " value")
 }

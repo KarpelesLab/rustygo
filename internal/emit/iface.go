@@ -351,6 +351,18 @@ func (e *emitter) typeDesc(t types.Type, pos token.Pos) string {
 			e.typeDesc(u.Elem(), pos), e.types.place(u.Elem(), e, pos), place)
 	case *types.Array:
 		fmt.Fprintf(&b, "    elem: Some(&%s),\n    len: %d,\n", e.typeDesc(u.Elem(), pos), u.Len())
+	case *types.Chan:
+		// `reflect.ChanDir`'s own numbering: receive is 1, send is 2, both is
+		// the two together.
+		dir := 3
+		switch u.Dir() {
+		case types.RecvOnly:
+			dir = 1
+		case types.SendOnly:
+			dir = 2
+		}
+		fmt.Fprintf(&b, "    elem: Some(&%s),\n    chan_dir: %d,\n    chan_ops: Some(&%s),\n",
+			e.typeDesc(u.Elem(), pos), dir, e.chanOps(u, pos))
 	case *types.Map:
 		fmt.Fprintf(&b, "    elem: Some(&%s),\n    key: Some(&%s),\n    map_ops: Some(&%s),\n",
 			e.typeDesc(u.Elem(), pos), e.typeDesc(u.Key(), pos), e.mapOps(u, pos))
@@ -595,6 +607,73 @@ pub static %s: MapOps = MapOps {
 };
 `, name, mapType, iterType, mapType, iterType, kPlace, vPlace, mapType, kPlace, vPlace, mapType, mapType,
 		mapType, mapType, kPlace, vPlace, mapType, kPlace)
+	return crateName(band) + "::ty::" + name
+}
+
+// chanOps renders the accessors reflection reaches a channel of this type
+// through, the way mapOps does for a map.
+//
+// A channel is a runtime object rather than memory laid out by Go's rules, so
+// nothing can read one by address; and every one of these may block, which is
+// the point — `reflect.Value.Recv` parks the goroutine until a value arrives.
+// The box for a received value is allocated and rooted *before* the receive, so
+// that the allocation cannot collect a value the channel has already handed
+// over.
+func (e *emitter) chanOps(ct *types.Chan, pos token.Pos) string {
+	key := "chanops:" + types.TypeString(ct, qualifiedPath)
+	if p, ok := e.wrappers[key]; ok {
+		return p
+	}
+	name := e.types.ns.claim("CO_" + mangle(strings.NewReplacer("*", "ptr_", ".", "_", "/", "_", "[", "_", "]", "_", " ", "_", "<", "_", "-", "_").Replace(types.TypeString(ct, qualifiedPath))))
+	if e.wrappers == nil {
+		e.wrappers = map[string]string{}
+	}
+	band := e.bands.typ(ct)
+	e.wrappers[key] = crateName(band) + "::ty::" + name
+
+	chanType := fmt.Sprintf("Chan<%s>", e.types.rust(ct.Elem(), e, pos))
+	ePlace := e.types.place(ct.Elem(), e, pos)
+	fmt.Fprintf(e.types.at(band), `
+pub static %s: ChanOps = ChanOps {
+    recv: |d| {
+        let __b = Ptr::<%s>::alloc(GoValue::zero());
+        let __roots = rustygo::gc::Frame::<1>::new();
+        __roots.scope(|| {
+            __roots.set(0, &__b);
+            let (v, ok) = d.cast::<Slot<%s>>().load().recv();
+            __b.store(v);
+            (Data::of(__b), ok)
+        })
+    },
+    try_recv: |d| {
+        let ch = d.cast::<Slot<%s>>().load();
+        if !ch.can_recv() {
+            return (Data::NONE, false);
+        }
+        let __b = Ptr::<%s>::alloc(GoValue::zero());
+        let __roots = rustygo::gc::Frame::<1>::new();
+        __roots.scope(|| {
+            __roots.set(0, &__b);
+            let (v, ok) = ch.recv();
+            __b.store(v);
+            (Data::of(__b), ok)
+        })
+    },
+    send: |d, v| d.cast::<Slot<%s>>().load().send(v.cast::<%s>().load()),
+    try_send: |d, v| {
+        let ch = d.cast::<Slot<%s>>().load();
+        if !ch.can_send() {
+            return false;
+        }
+        ch.send(v.cast::<%s>().load());
+        true
+    },
+    len: |d| d.cast::<Slot<%s>>().load().len(),
+    cap: |d| d.cast::<Slot<%s>>().load().cap(),
+    close: |d| d.cast::<Slot<%s>>().load().close(),
+};
+`, name, ePlace, chanType, chanType, ePlace, chanType, ePlace, chanType, ePlace,
+		chanType, chanType, chanType)
 	return crateName(band) + "::ty::" + name
 }
 

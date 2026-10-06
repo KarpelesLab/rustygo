@@ -88,6 +88,24 @@ var intrinsics = map[string]func(args []string) string{
 	"reflect.descOut": func(a []string) string {
 		return fmt.Sprintf("rustygo::reflect::type_out(%s, %s)", a[0], a[1])
 	},
+	"reflect.chanRecv": func(a []string) string {
+		return fmt.Sprintf("rustygo::reflect::chan_recv(%s, %s, %s)", a[0], a[1], a[2])
+	},
+	"reflect.chanSend": func(a []string) string {
+		return fmt.Sprintf("rustygo::reflect::chan_send(%s, %s, %s, %s)", a[0], a[1], a[2], a[3])
+	},
+	"reflect.chanLen": func(a []string) string {
+		return fmt.Sprintf("rustygo::reflect::chan_len(%s, %s)", a[0], a[1])
+	},
+	"reflect.chanCap": func(a []string) string {
+		return fmt.Sprintf("rustygo::reflect::chan_cap(%s, %s)", a[0], a[1])
+	},
+	"reflect.chanClose": func(a []string) string {
+		return fmt.Sprintf("rustygo::reflect::chan_close(%s, %s)", a[0], a[1])
+	},
+	"reflect.descChanDir": func(a []string) string {
+		return fmt.Sprintf("rustygo::reflect::chan_dir(%s)", a[0])
+	},
 	"reflect.descVariadic": func(a []string) string {
 		return fmt.Sprintf("rustygo::reflect::is_variadic(%s)", a[0])
 	},

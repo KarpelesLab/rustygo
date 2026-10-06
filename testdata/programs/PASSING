@@ -65,3 +65,5 @@ rectypes linux
 reflectnew linux
 httpstls linux
 filesys linux
+reflectchan linux
+gopanic linux

@@ -113,11 +113,19 @@ pub struct TypeDesc {
     pub key: Option<&'static TypeDesc>,
     /// An array's length.
     pub len: usize,
+    /// A channel type's direction, numbered as `reflect.ChanDir`: 1 for
+    /// `<-chan`, 2 for `chan<-`, 3 for both, 0 for a type that is not a
+    /// channel. Go's own numbering, so that reflection can hand it straight
+    /// out.
+    pub chan_dir: u8,
     /// A struct's fields, in declaration order.
     pub fields: &'static [FieldDesc],
     /// A map's accessors: our maps are hash tables, not memory gc's layout
     /// rules describe, so reflection reaches them through these.
     pub map_ops: Option<&'static MapOps>,
+    /// A channel's accessors, for the same reason: a channel is a runtime
+    /// object rather than memory, so reflection cannot read one by address.
+    pub chan_ops: Option<&'static ChanOps>,
     /// A func type's parameter types, and whether the last of them is `...`.
     pub params: &'static [&'static TypeDesc],
     /// A func type's result types.
@@ -185,6 +193,28 @@ pub struct FieldDesc {
     pub embedded: bool,
 }
 
+/// Type-erased access to a channel, generated per channel type.
+///
+/// Every one of these may block, which is what makes them unlike a map's: a
+/// receive parks the goroutine until a value arrives, and reflection's callers
+/// expect exactly that.
+pub struct ChanOps {
+    /// `v, ok := <-ch`, with the value boxed.
+    pub recv: fn(Data) -> (Data, bool),
+    /// `v, ok := <-ch` without blocking: `ok` is false when nothing was ready.
+    pub try_recv: fn(Data) -> (Data, bool),
+    /// `ch <- v`, with the value given boxed.
+    pub send: fn(Data, Data),
+    /// `ch <- v` without blocking, reporting whether it went.
+    pub try_send: fn(Data, Data) -> bool,
+    /// `len(ch)` and `cap(ch)`.
+    pub len: fn(Data) -> i64,
+    /// `cap(ch)`.
+    pub cap: fn(Data) -> i64,
+    /// `close(ch)`.
+    pub close: fn(Data),
+}
+
 /// Type-erased access to a map value, generated per map type.
 pub struct MapOps {
     /// `len(m)`.
@@ -227,8 +257,10 @@ impl TypeDesc {
         ptr: None,
         key: None,
         len: 0,
+        chan_dir: 0,
         fields: &[],
         map_ops: None,
+        chan_ops: None,
         params: &[],
         results: &[],
         variadic: false,

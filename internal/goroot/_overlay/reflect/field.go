@@ -79,3 +79,67 @@ func (v Value) Slice3(i, j, k int) Value {
 // MakeMapWithSize makes an empty map of a type the program mentions. The size
 // is a hint about how much to preallocate, and rustygo's maps do not take one.
 func MakeMapWithSize(t Type, n int) Value { return MakeMap(t) }
+
+// FieldByIndex returns the nested field an index path names.
+//
+// A path longer than one step crosses an embedded field, and `Type.FieldByIndex`
+// is the type-level question — which field, not which value — so an embedded
+// pointer is simply followed to the type it points at.
+func (t rtype) FieldByIndex(index []int) StructField {
+	f := StructField{Type: Type(t)}
+	for i, x := range index {
+		if i > 0 {
+			ft := f.Type
+			if ft.Kind() == Pointer && ft.Elem().Kind() == Struct {
+				ft = ft.Elem()
+			}
+			f.Type = ft
+		}
+		f = f.Type.Field(x)
+	}
+	return f
+}
+
+// FieldByIndexErr is Value.FieldByIndex, except that a nil embedded pointer on
+// the way is an error rather than a panic. `encoding/json` walks a struct that
+// way, because a field it cannot reach is not a field it should fail over.
+func (v Value) FieldByIndexErr(index []int) (Value, error) {
+	if len(index) == 1 {
+		return v.Field(index[0]), nil
+	}
+	v.mustBe(Struct, "FieldByIndexErr")
+	for i, x := range index {
+		if i > 0 {
+			if v.Kind() == Pointer && v.Type().Elem().Kind() == Struct {
+				if v.IsNil() {
+					return Value{}, errNilEmbedded{v.Type().Elem().Name(), index[:i]}
+				}
+				v = v.Elem()
+			}
+		}
+		v = v.Field(x)
+	}
+	return v, nil
+}
+
+// errNilEmbedded is what FieldByIndexErr reports, worded as gc words it.
+type errNilEmbedded struct {
+	name  string
+	index []int
+}
+
+func (e errNilEmbedded) Error() string {
+	return "reflect: indirection through nil pointer to embedded struct field " + e.name
+}
+
+// UnsafeAddr is the address of the value's own storage, which only an
+// addressable value has.
+func (v Value) UnsafeAddr() uintptr {
+	if v.d == nil {
+		panic("reflect: UnsafeAddr of the zero Value")
+	}
+	if !v.addr {
+		panic("reflect.Value.UnsafeAddr of unaddressable value")
+	}
+	return uintptr(v.p)
+}

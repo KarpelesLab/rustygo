@@ -223,6 +223,59 @@ pub fn type_out(d: UPtr, i: i64) -> UPtr {
     }
 }
 
+/// A channel's accessors, which only a channel type has.
+fn chan_ops(d: UPtr) -> &'static crate::iface::ChanOps {
+    match desc(d).chan_ops {
+        Some(ops) => ops,
+        None => crate::panic::runtime_error_msg(alloc::format!(
+            "reflect: {} is not a channel",
+            desc(d).name
+        )),
+    }
+}
+
+/// `v, ok := <-ch`, blocking until a value arrives or the channel closes.
+pub fn chan_recv(d: UPtr, ch: UPtr, block: bool) -> (UPtr, bool) {
+    let ops = chan_ops(d);
+    let (v, ok) = if block {
+        (ops.recv)(data(ch))
+    } else {
+        (ops.try_recv)(data(ch))
+    };
+    (UPtr::from_addr(v.addr()), ok)
+}
+
+/// `ch <- v`, blocking until it is taken unless `block` is false, in which case
+/// the result says whether it went.
+pub fn chan_send(d: UPtr, ch: UPtr, v: UPtr, block: bool) -> bool {
+    let ops = chan_ops(d);
+    if block {
+        (ops.send)(data(ch), data(v));
+        return true;
+    }
+    (ops.try_send)(data(ch), data(v))
+}
+
+/// `len(ch)`.
+pub fn chan_len(d: UPtr, ch: UPtr) -> i64 {
+    (chan_ops(d).len)(data(ch))
+}
+
+/// `cap(ch)`.
+pub fn chan_cap(d: UPtr, ch: UPtr) -> i64 {
+    (chan_ops(d).cap)(data(ch))
+}
+
+/// `close(ch)`.
+pub fn chan_close(d: UPtr, ch: UPtr) {
+    (chan_ops(d).close)(data(ch))
+}
+
+/// A channel type's direction, numbered as `reflect.ChanDir`.
+pub fn chan_dir(d: UPtr) -> i64 {
+    desc(d).chan_dir as i64
+}
+
 /// Whether a func type's last parameter is `...`.
 pub fn is_variadic(d: UPtr) -> bool {
     desc(d).variadic
