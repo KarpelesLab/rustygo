@@ -13,6 +13,11 @@
 // more, refused because its client trusts nobody, which is what says the
 // verification on the others is real rather than skipped.
 //
+// The certificate is made on the spot, so the program needs no files: a P-256
+// key from crypto/rand, a self-signed certificate over it, and the PEM pair put
+// back together by tls.X509KeyPair, which is x509's writer and its parser both.
+// Nothing about the key is printed, because a fresh one is different every run.
+//
 // Nothing printed may depend on the port the kernel picked, nor on the
 // processor: rustygo's internal/cpu reports no features, so a cipher suite
 // chosen for AES hardware is not the one gc picks here, and the suite is
@@ -23,9 +28,11 @@ package main
 import (
 	"crypto/ecdsa"
 	"crypto/elliptic"
+	"crypto/rand"
 	"crypto/tls"
 	"crypto/x509"
-	"encoding/hex"
+	"crypto/x509/pkix"
+	"encoding/pem"
 	"fmt"
 	"io"
 	"log"
@@ -36,49 +43,35 @@ import (
 	"time"
 )
 
-// The server's certificate and key, fixed rather than made on the spot:
-// x509.CreateCertificate marshals through encoding/asn1, which reaches
-// reflect.New, and reflection's write half is not there yet. When it is, this
-// becomes a GenerateKey, a CreateCertificate and a tls.X509KeyPair, and
-// nothing below it changes. The certificate is self-signed, names 127.0.0.1,
-// and carries a P-256 key whose scalar is keyScalar.
-const keyScalar = "1f2e3d4c5b6a798807162534435261708f9eadbccbdae9f80f1e2d3c4b5a6978"
-
-const certHex = "" +
-	"308201863082012da003020102020101300a06082a8648ce3d0403023017311530130603550403130c7275737479676f" +
-	"20746573743020170d3230303931333132323634305a180f32303936313030323037303634305a301731153013060355" +
-	"0403130c7275737479676f20746573743059301306072a8648ce3d020106082a8648ce3d0301070342000479436d5f4f" +
-	"43d7c04264aed4de9a78330fbe638a84954c3ad961b934e9366abd22c1e0de087ff6dda9aaf5e3f116fec5d0e1d65f5b" +
-	"ac81f39da2b0984eaf9c46a3683066300e0603551d0f0101ff04040302028430130603551d25040c300a06082b060105" +
-	"05070301300f0603551d130101ff040530030101ff301d0603551d0e041604142df46629351c488e2277ad8a4eaeba4b" +
-	"78219738300f0603551d110408300687047f000001300a06082a8648ce3d040302034700304402202259f811881e1820" +
-	"2c95a0b6c325ab0b5d4885cace3ed0a81f45557923836fa60220420ce1ad2b48b3a3e082dae9f468164a1051ca699e7e" +
-	"b1b096b6e8727f53aa85"
-
 // at is the instant both ends judge the certificate's validity by, so the
 // program's output never depends on today's date.
 func at() time.Time { return time.Unix(1700000000, 0).UTC() }
 
 func main() {
-	der, err := hex.DecodeString(certHex)
+	cert, err := selfSigned()
 	if err != nil {
-		fmt.Println("certificate hex:", err)
+		fmt.Println("certificate:", err)
 		return
 	}
-	leaf, err := x509.ParseCertificate(der)
-	if err != nil {
-		fmt.Println("parse certificate:", err)
-		return
-	}
+	leaf := cert.Leaf
 	fmt.Printf("certificate %q for %v, ca=%v\n", leaf.Subject.CommonName, leaf.IPAddresses, leaf.IsCA)
 
-	key := serverKey()
 	pub, ok := leaf.PublicKey.(*ecdsa.PublicKey)
 	if !ok {
 		fmt.Printf("certificate holds a %T, not an ECDSA key\n", leaf.PublicKey)
 		return
 	}
+	key, ok := cert.PrivateKey.(*ecdsa.PrivateKey)
+	if !ok {
+		fmt.Printf("the key pair holds a %T\n", cert.PrivateKey)
+		return
+	}
 	fmt.Println("key matches certificate:", pub.Equal(&key.PublicKey))
+	if err := leaf.CheckSignatureFrom(leaf); err != nil {
+		fmt.Println("self signature:", err)
+		return
+	}
+	fmt.Println("self signature verifies")
 
 	pool := x509.NewCertPool()
 	pool.AddCert(leaf)
@@ -107,7 +100,7 @@ func main() {
 	srv := &http.Server{Handler: mux, ErrorLog: log.New(io.Discard, "", 0)}
 	go func() {
 		_ = srv.Serve(tls.NewListener(ln, &tls.Config{
-			Certificates: []tls.Certificate{{Certificate: [][]byte{der}, PrivateKey: key, Leaf: leaf}},
+			Certificates: []tls.Certificate{cert},
 			MinVersion:   tls.VersionTLS12,
 			Time:         at,
 		}))
@@ -148,17 +141,57 @@ func main() {
 	fmt.Println("done")
 }
 
-// serverKey rebuilds the key the certificate was issued for from its scalar,
-// the public half derived from it rather than stated, so the two cannot drift
-// apart.
-func serverKey() *ecdsa.PrivateKey {
-	b, err := hex.DecodeString(keyScalar)
+// selfSigned makes the server's key pair: a P-256 key from crypto/rand and a
+// certificate that signs itself, naming the loopback address the client will
+// dial. It goes out through PEM and comes back through tls.X509KeyPair rather
+// than being assembled by hand, so the DER the program writes is also DER it
+// reads: x509.CreateCertificate marshals the certificate through encoding/asn1,
+// MarshalPKCS8PrivateKey marshals the key, and X509KeyPair parses both again and
+// checks that they belong together.
+//
+// The dates are fixed, as `at` is, so the certificate is the same age on every
+// run. The serial number is fixed for the same reason — nothing here is a real
+// certificate authority, and a random serial would be printed nowhere but would
+// still make the DER differ run to run.
+func selfSigned() (tls.Certificate, error) {
+	key, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
 	if err != nil {
-		panic(err)
+		return tls.Certificate{}, err
 	}
-	d := new(big.Int).SetBytes(b)
-	x, y := elliptic.P256().ScalarBaseMult(d.Bytes())
-	return &ecdsa.PrivateKey{PublicKey: ecdsa.PublicKey{Curve: elliptic.P256(), X: x, Y: y}, D: d}
+	tmpl := &x509.Certificate{
+		SerialNumber:          big.NewInt(1),
+		Subject:               pkix.Name{CommonName: "rustygo test"},
+		NotBefore:             time.Unix(1600000000, 0).UTC(),
+		NotAfter:              time.Unix(4000000000, 0).UTC(),
+		KeyUsage:              x509.KeyUsageDigitalSignature | x509.KeyUsageCertSign,
+		ExtKeyUsage:           []x509.ExtKeyUsage{x509.ExtKeyUsageServerAuth},
+		IsCA:                  true,
+		BasicConstraintsValid: true,
+		IPAddresses:           []net.IP{net.IPv4(127, 0, 0, 1)},
+	}
+	der, err := x509.CreateCertificate(rand.Reader, tmpl, tmpl, &key.PublicKey, key)
+	if err != nil {
+		return tls.Certificate{}, err
+	}
+	keyDER, err := x509.MarshalPKCS8PrivateKey(key)
+	if err != nil {
+		return tls.Certificate{}, err
+	}
+	cert, err := tls.X509KeyPair(
+		pem.EncodeToMemory(&pem.Block{Type: "CERTIFICATE", Bytes: der}),
+		pem.EncodeToMemory(&pem.Block{Type: "PRIVATE KEY", Bytes: keyDER}),
+	)
+	if err != nil {
+		return tls.Certificate{}, err
+	}
+	// X509KeyPair parses the leaf to check it against the key but does not keep
+	// it, and both the server's own name matching and this program's pool want
+	// it parsed.
+	cert.Leaf, err = x509.ParseCertificate(cert.Certificate[0])
+	if err != nil {
+		return tls.Certificate{}, err
+	}
+	return cert, nil
 }
 
 // client returns an HTTPS client pinned to one TLS version, trusting pool and
