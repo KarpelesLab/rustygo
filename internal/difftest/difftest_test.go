@@ -95,7 +95,15 @@ func TestPrograms(t *testing.T) {
 			goBuild := exec.Command("go", "build", "-o", gcBin, pkg)
 			goBuild.Dir = moduleRoot
 			if out, err := goBuild.CombinedOutput(); err != nil {
-				t.Fatalf("gc build failed: %v\n%s", err, out)
+				// gc cannot build it here. For a program this platform requires
+				// that is the program's own fault and a failure. For one it does
+				// not — `syscallptr` names `syscall.SYS_OPENAT`, which exists on
+				// Linux and nowhere else — it is the point of the qualifier in
+				// PASSING, and nothing about rustygo.
+				if passing[name] {
+					t.Fatalf("gc build failed: %v\n%s", err, out)
+				}
+				t.Skipf("gc cannot build it on %s: %s", runtime.GOOS, firstLine(string(out)))
 			}
 			want := run(t, gcBin, false)
 

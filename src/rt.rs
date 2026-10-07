@@ -117,7 +117,40 @@ pub fn run_main(init: fn(), main: fn()) -> ! {
     // when `main` returns, panics or calls `runtime.Goexit` is decided there,
     // because by then this thread may be running something else entirely
     // (`sched::run_program`).
-    crate::sched::run_program(init, main)
+    #[cfg(any(
+        all(target_arch = "x86_64", not(windows)),
+        all(target_arch = "aarch64", not(windows))
+    ))]
+    crate::sched::run_program(init, main);
+
+    // Where there is no context switch yet, `main` runs on this thread, as it
+    // did before there was a scheduler at all. Giving the program a goroutine
+    // of its own would mean a context switch before the first statement, so
+    // every program — `hello` included — would die on a platform that can
+    // still run all of the language that does not start a goroutine. Only `go`
+    // reaches the unsupported path now, which is what it should cost.
+    //
+    // Windows x64 makes `rdi`, `rsi` and `xmm6`-`xmm15` callee-saved and keeps
+    // the stack's bounds in the thread information block, so it needs a switch
+    // of its own (roadmap M5).
+    #[cfg(not(any(
+        all(target_arch = "x86_64", not(windows)),
+        all(target_arch = "aarch64", not(windows))
+    )))]
+    {
+        let result = std::panic::catch_unwind(|| {
+            init();
+            main();
+        });
+        match result {
+            Ok(()) => exit(0),
+            // `runtime.Goexit` in the main goroutine ends it without ending
+            // the program: what is left runs, and the scheduler reports a
+            // deadlock once nothing can.
+            Err(payload) if crate::sched::is_goexit(&*payload) => crate::sched::park_forever(),
+            Err(payload) => report_unrecovered(payload),
+        }
+    }
 }
 
 /// Reports a panic nothing recovered, the way gc does, and ends the process.
@@ -225,6 +258,11 @@ pub fn fcntl(fd: i32, cmd: i32, arg: i32) -> (i32, i32) {
 
 /// The signals delivered since Go last asked, one bit each, for `sig` in
 /// 1..=64 at bit `sig - 1`.
+///
+/// Gated with its readers: every one of them is Linux-only, because the handler
+/// is installed with `rt_sigaction` rather than through the C library, so on
+/// another platform these three are dead and `-D warnings` says so.
+#[cfg(target_os = "linux")]
 static PENDING: core::sync::atomic::AtomicU64 = core::sync::atomic::AtomicU64::new(0);
 
 /// The signals `os/signal` wants delivered, and the ones it wants dropped.
@@ -233,7 +271,9 @@ static PENDING: core::sync::atomic::AtomicU64 = core::sync::atomic::AtomicU64::n
 /// ignores `SIGPIPE` before any Go code runs, and gc instead installs a handler
 /// for nearly everything and keeps its own two sets. So these are kept too,
 /// and they are what [`sigpipe`] and `signal_ignored` read.
+#[cfg(target_os = "linux")]
 static CAUGHT: core::sync::atomic::AtomicU64 = core::sync::atomic::AtomicU64::new(0);
+#[cfg(target_os = "linux")]
 static IGNORED: core::sync::atomic::AtomicU64 = core::sync::atomic::AtomicU64::new(0);
 
 /// `rt_sigaction`, and the three calls that raise a signal at this thread.

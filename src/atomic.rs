@@ -18,7 +18,9 @@
 //! question does not arise.
 //!
 //! The address is an invariant rather than a safety contract, the way
-//! [`crate::sched::sem_acquire`]'s is: every caller is a `sync/atomic` function
+//! `sched::sem_acquire`'s is — named rather than linked, because the scheduler
+//! is there only with `std` and this module is there either way: every caller is
+//! a `sync/atomic` function
 //! the emitter resolved, so the address is a Go variable of exactly this width,
 //! and Go's own alignment rules — which rustygo keeps (DESIGN §7) — are what
 //! make the wider ones aligned.

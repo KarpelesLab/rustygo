@@ -73,7 +73,7 @@ reflectmakefunc linux
 http2tls linux
 mfrecover linux
 syscallptr linux
-yieldtimer
+yieldtimer linux
 structlayout linux
 reflectarrayof linux
 parallel linux
